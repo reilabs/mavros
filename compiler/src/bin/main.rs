@@ -153,7 +153,7 @@ pub fn compile_to_r1cs(
     driver.monomorphize()?;
     driver.spill_witness()?;
 
-    let r1cs = driver.generate_r1cs()?;
+    let r1cs = driver.generate_r1cs::<mavros_artifacts::Field>()?;
     Ok((driver, r1cs))
 }
 

@@ -13,8 +13,8 @@
 //! corruption.
 //!
 //! - **Storage cells** (`*_frame_cells`, [`MavrosField::storage_cell0`]) are the element's
-//!   in-memory representation (Montgomery form for bn254). This is what VM frames, tapes, bytecode
-//!   operands and the constant pool hold.
+//!   in-memory representation (Montgomery form for every supported field). This is what VM
+//!   frames, tapes, bytecode operands and the constant pool hold.
 //! - **Canonical limbs** (`*_canonical_limbs`) are the little-endian limbs of the integer in
 //!   `0..modulus` that the element denotes. Ordering, casts to integers, bit/byte decompositions
 //!   and table-row addressing are defined on this form.
@@ -26,18 +26,45 @@ use std::{
 };
 
 use ark_ff::{AdditiveGroup, BigInt, PrimeField};
+use serde::{Serialize, de::DeserializeOwned};
+
+use crate::field::element::FieldElement;
 
 // FIELD IDENTIFIER
 // ================================================================================================
 
 /// Identifies one of Mavros' supported fields.
 ///
-/// No artifact encodes it: bytecode names its field by opcode identity. It selects per-field
-/// behaviour in the compiler through exhaustive matches, so a new variant is a compile error at
-/// every per-field site.
+/// A VM program binary names its field in its header ([`FieldId::code`]), and the VM refuses to run
+/// it over another; its field opcodes name the field too. In the compiler it selects per-field
+/// behaviour through exhaustive matches, so a new variant is a compile error at every per-field
+/// site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FieldId {
     Bn254,
+    Goldilocks,
+}
+
+impl FieldId {
+    /// The word naming this field in a VM program header. No field is `0`, so a zeroed word names
+    /// none.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            FieldId::Bn254 => 1,
+            FieldId::Goldilocks => 2,
+        }
+    }
+
+    /// The field a program header word names, or `None` for a word that names none.
+    #[must_use]
+    pub const fn from_code(code: u64) -> Option<FieldId> {
+        match code {
+            1 => Some(FieldId::Bn254),
+            2 => Some(FieldId::Goldilocks),
+            _ => None,
+        }
+    }
 }
 
 // FIELD TRAIT
@@ -80,6 +107,9 @@ pub unsafe trait MavrosField:
     + From<u64>
     + From<u128>
 {
+    /// The field this type implements.
+    const ID: FieldId;
+
     /// Number of 64-bit storage cells one element occupies.
     const STORAGE_CELLS: usize;
 
@@ -88,7 +118,7 @@ pub unsafe trait MavrosField:
 
     /// The canonical limbs of one element: a fixed-size array of
     /// [`MavrosField::CANONICAL_LIMBS`] limbs, read as a slice via `AsRef<[u64]>`.
-    type Limbs: AsRef<[u64]> + Copy;
+    type Limbs: AsRef<[u64]> + Copy + Serialize + DeserializeOwned;
 
     /// The additive identity.
     const ZERO: Self;
@@ -98,6 +128,16 @@ pub unsafe trait MavrosField:
 
     /// The multiplicative inverse, or `None` for zero.
     fn inverse(&self) -> Option<Self>;
+
+    /// The raw element a compiler [`FieldElement`] of this field wraps.
+    ///
+    /// # Panics
+    ///
+    /// If `value` belongs to another field.
+    fn from_element(value: FieldElement) -> Self;
+
+    /// This element as a compiler [`FieldElement`].
+    fn to_element(self) -> FieldElement;
 
     /// Reconstructs an element from its storage cells, keeping them as given: the WASM host reads a
     /// slot holding a punned `u64` through this, and [`MavrosField::storage_cell0`] of the result
@@ -134,6 +174,16 @@ pub unsafe trait MavrosField:
     }
 }
 
+/// Panics for a [`MavrosField::from_element`] given an element of another field.
+#[cold]
+#[track_caller]
+pub(crate) fn foreign_element(value: FieldElement, field: FieldId) -> ! {
+    panic!(
+        "ICE: a {:?} element where a {field:?} one belongs",
+        value.field_id()
+    )
+}
+
 // BN254
 // ================================================================================================
 
@@ -154,6 +204,7 @@ const _: () = assert!(matches!(
 /// The assertions above make `Fr` exactly its limb array, which `to_frame_cells` writes and whose
 /// every pattern is a valid `Fr` (plain integers, no niche), and make `ZERO` all-zero cells.
 unsafe impl MavrosField for ark_bn254::Fr {
+    const ID: FieldId = FieldId::Bn254;
     const STORAGE_CELLS: usize = 4;
     const CANONICAL_LIMBS: usize = 4;
     type Limbs = [u64; 4];
@@ -162,6 +213,18 @@ unsafe impl MavrosField for ark_bn254::Fr {
 
     fn inverse(&self) -> Option<Self> {
         ark_ff::Field::inverse(self)
+    }
+
+    #[track_caller]
+    fn from_element(value: FieldElement) -> Self {
+        match value {
+            FieldElement::Bn254(value) => value,
+            _ => foreign_element(value, FieldId::Bn254),
+        }
+    }
+
+    fn to_element(self) -> FieldElement {
+        FieldElement::Bn254(self)
     }
 
     fn from_frame_cells(cells: &[u64]) -> Self {
@@ -283,6 +346,23 @@ mod tests {
             <Fr as MavrosField>::from_canonical_limbs(&Fr::MODULUS.0),
             None
         );
+    }
+
+    #[test]
+    fn bn254_elements_round_trip_through_field_element() {
+        assert_eq!(<Fr as MavrosField>::ID, FieldId::Bn254);
+        for value in samples() {
+            let element = value.to_element();
+            assert_eq!(element, FieldElement::Bn254(value));
+            assert_eq!(<Fr as MavrosField>::from_element(element), value);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a Goldilocks element where a Bn254 one belongs")]
+    fn bn254_from_element_refuses_a_goldilocks_element() {
+        let element = FieldElement::Goldilocks(crate::field::goldilocks::Goldilocks::from(1u64));
+        let _ = <Fr as MavrosField>::from_element(element);
     }
 
     #[test]

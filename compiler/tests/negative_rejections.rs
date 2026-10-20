@@ -35,7 +35,11 @@ fn source_checks_survive_unused_results_and_respect_inactive_branches() {
             .make_struct_access_static()
             .and_then(|_| driver.monomorphize())
             .and_then(|_| driver.spill_witness())
-            .and_then(|_| driver.generate_r1cs().map(|_| ()));
+            .and_then(|_| {
+                driver
+                    .generate_r1cs::<mavros_artifacts::Field>()
+                    .map(|_| ())
+            });
         assert_eq!(result.is_ok(), accepted, "{body}: {result:?}");
         if !accepted {
             assert!(

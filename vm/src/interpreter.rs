@@ -8,7 +8,7 @@ use tracing::instrument;
 pub use crate::InputValueOrdered;
 
 use crate::{
-    ConstraintsLayout, Field, TableKind, WitnessLayout,
+    ConstraintsLayout, TableKind, WitnessLayout,
     array::BoxedValue,
     bytecode::{
         self, AllocationInstrumenter, AllocationType, ENTRY_AD, ENTRY_WITGEN, Int128, OpCode,
@@ -426,6 +426,21 @@ pub fn run_phase1_profiled<F: mavros_artifacts::MavrosField>(
     )
 }
 
+/// Refuses to run a program over a field other than the one its header names.
+///
+/// The handlers a field opcode dispatches to read and write their field's element width, so running
+/// a program over another field's tapes writes past their ends. The check is once per run, in every
+/// build.
+#[track_caller]
+fn check_program_field<F: mavros_artifacts::MavrosField>(header: &bytecode::ProgramHeader) {
+    assert!(
+        header.field == F::ID,
+        "a VM program over {:?} cannot run over {:?}",
+        header.field,
+        F::ID
+    );
+}
+
 fn run_phase1_impl<F: mavros_artifacts::MavrosField>(
     program: &[u64],
     witness_layout: WitnessLayout,
@@ -435,6 +450,7 @@ fn run_phase1_impl<F: mavros_artifacts::MavrosField>(
     profile: bool,
 ) -> Result<(Phase1Result<F>, crate::FlamegraphProfile), TrapError> {
     let header = parse_program_header(program);
+    check_program_field::<F>(&header);
     let debug_info = debug_info.unwrap_or_default();
     let entry = *header
         .entry_points
@@ -958,6 +974,7 @@ fn run_ad_impl<F: mavros_artifacts::MavrosField>(
     TrapError,
 > {
     let header = parse_program_header(program);
+    check_program_field::<F>(&header);
     let debug_info = debug_info.unwrap_or_default();
     let entry = *header
         .entry_points
@@ -1025,7 +1042,7 @@ fn run_ad_impl<F: mavros_artifacts::MavrosField>(
 }
 
 /// Flatten ordered input values into the entry blob's field sequence.
-pub fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
+pub fn flatten_param_vec<F: Copy>(vec: &[InputValueOrdered<F>]) -> Vec<F> {
     let mut encoded_value = Vec::new();
     for elem in vec {
         encoded_value.extend(flatten_params(elem));
@@ -1033,11 +1050,11 @@ pub fn flatten_param_vec(vec: &[InputValueOrdered]) -> Vec<Field> {
     encoded_value
 }
 
-pub fn flattened_param_count(vec: &[InputValueOrdered]) -> usize {
+pub fn flattened_param_count<F>(vec: &[InputValueOrdered<F>]) -> usize {
     vec.iter().map(param_field_count).sum()
 }
 
-fn param_field_count(value: &InputValueOrdered) -> usize {
+fn param_field_count<F>(value: &InputValueOrdered<F>) -> usize {
     match value {
         InputValueOrdered::Field(_) => 1,
         InputValueOrdered::Vec(vec_elements) => vec_elements.iter().map(param_field_count).sum(),
@@ -1049,7 +1066,7 @@ fn param_field_count(value: &InputValueOrdered) -> usize {
     }
 }
 
-fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
+fn flatten_params<F: Copy>(value: &InputValueOrdered<F>) -> Vec<F> {
     let mut encoded_value = Vec::new();
     match value {
         InputValueOrdered::Field(elem) => encoded_value.push(*elem),
@@ -1074,6 +1091,7 @@ fn flatten_params(value: &InputValueOrdered) -> Vec<Field> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Field;
     use mavros_int_semantics::IntBits;
 
     /// The frame's cell count and the compiler's are the same.
@@ -1211,6 +1229,7 @@ mod tests {
             code,
         };
         Program {
+            field: F::ID,
             functions: vec![function("main", 36, witgen), function("ad", 8, ad)],
             entry_points: vec![0, 1],
             entry_blob_field_count: 6,
@@ -1312,16 +1331,16 @@ mod tests {
         }
     }
 
-    /// The generic entry points end to end, comparing a run over the test field's one-cell elements
+    /// The generic entry points end to end, comparing a run over Goldilocks' one-cell elements
     /// with one over bn254: the entry blob's stride, phase 2's reads of the `u64`s kept in field
     /// slots, its batch inversion and its challenges, and the AD entry's dA tape.
     #[test]
-    fn the_entry_points_run_a_test_field_program() {
-        use crate::test_field::TestField;
+    fn the_entry_points_run_a_goldilocks_program() {
+        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
         let bn254 = run_every_table_program::<Field>(bytecode::FieldOpCode::bn254);
-        let test64 = run_every_table_program::<TestField>(bytecode::FieldOpCode::test64);
+        let goldilocks = run_every_table_program::<Goldilocks>(bytecode::FieldOpCode::goldilocks);
         // The algebraic witnesses, then the multiplicities of the rangecheck, spread, powers-of-two
         // and array tables, in that order.
         let pre_commitment = [3, 5, 15, 0, 0, 2, 0, 0, 1, 0, 1, 0, 0, 1];
@@ -1339,9 +1358,9 @@ mod tests {
         .map(|bit| bit == '1')
         .collect::<Vec<_>>();
         assert_eq!(bn254.post_commitment_written, written);
-        assert_eq!(test64, bn254);
-        // The challenges are the seed's, reduced into the test field.
-        let challenges = fake_challenges::<TestField>(2)
+        assert_eq!(goldilocks, bn254);
+        // The challenges are the seed's, reduced into Goldilocks.
+        let challenges = fake_challenges::<Goldilocks>(2)
             .into_iter()
             .map(|challenge| challenge.to_canonical_limbs()[0])
             .collect::<Vec<_>>();
@@ -1404,6 +1423,7 @@ mod tests {
             source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1)],
         };
         Program {
+            field: mavros_artifacts::FieldId::Bn254,
             functions: vec![function("main", frame_size), function("ad", 2)],
             entry_points: vec![0, 1],
             entry_blob_field_count: inputs,
@@ -1457,6 +1477,34 @@ mod tests {
             witness_layout,
             constraints_layout,
             &inputs,
+            None,
+        );
+    }
+
+    /// A program runs only over the field its header names: its field opcodes' handlers read and
+    /// write that field's element width.
+    #[test]
+    #[should_panic(expected = "a VM program over Bn254 cannot run over Goldilocks")]
+    fn a_witgen_run_over_another_field_is_refused() {
+        let (witness_layout, constraints_layout) = empty_layouts(0);
+        let _ = run::<mavros_artifacts::Goldilocks>(
+            &empty_program(2, 0),
+            witness_layout,
+            constraints_layout,
+            &[],
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a VM program over Bn254 cannot run over Goldilocks")]
+    fn an_ad_run_over_another_field_is_refused() {
+        let (witness_layout, constraints_layout) = empty_layouts(0);
+        let _ = run_ad::<mavros_artifacts::Goldilocks>(
+            &empty_program(2, 0),
+            &[],
+            witness_layout,
+            constraints_layout,
             None,
         );
     }

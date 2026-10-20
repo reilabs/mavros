@@ -1,10 +1,12 @@
 //! Lowers canonical `BitRange` operations after the witness integer/bitwise passes have emitted
 //! all bit selections.
 
+use mavros_artifacts::FieldId;
 use mavros_int_semantics::{IntBits, int_bits::FIELD_LIMB_BITS};
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
+    passes::shared::unsupported::unsupported_on_this_field,
     ssa::{
         ValueId,
         hlssa::{
@@ -179,6 +181,19 @@ impl LowerBitRangeOps {
         offset: usize,
         width: usize,
     ) {
+        // The canonical decomposition splits the element's integer at bit 128 and range-checks
+        // each half's distance below the modulus' half to 128 bits, which rejects a non-canonical
+        // split only for a modulus above `2^129`.
+        match b.field().id() {
+            FieldId::Bn254 => {}
+            FieldId::Goldilocks => unsupported_on_this_field(
+                format_args!(
+                    "a witness bit window of a field element decomposes the element into two \
+                     128-bit halves, which needs a modulus above 2^129"
+                ),
+                b.field(),
+            ),
+        }
         let flag = b.field_const(b.field().one());
         let bytes = decompose_canonical_field_bytes(b, value, flag);
         let selected = lower_field_bit_range_from_bytes(b, &bytes, offset, width, flag);

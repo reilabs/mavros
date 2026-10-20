@@ -1323,7 +1323,7 @@ mod tests {
             current_location: SourceLocation::synthetic("specializer_test"),
         };
 
-        let three = Val::of_field(Field::from(3u64), &mut ctx);
+        let three = Val::of_field(ssa.field().constant(3u64), &mut ctx);
         let bit_type = Type::int(1);
         for (endianness, inside, want) in [(Endianness::Little, 1, 1), (Endianness::Big, 6, 1)] {
             let bits = three.to_bits(endianness, 8, &bit_type, &mut ctx);

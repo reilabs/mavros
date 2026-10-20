@@ -1,8 +1,6 @@
 //! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
 //! reaches an iteration limit or a fixed point.
 
-use num_traits::{One, Zero};
-
 use crate::{
     collections::HashMap,
     compiler::{

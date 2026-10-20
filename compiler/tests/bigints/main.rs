@@ -1,8 +1,11 @@
 //! The oracle's test suite: what the pipeline must agree with the model about.
 
+mod goldilocks;
 mod harness;
 
-use harness::{BinaryOpOracle, Compiled, Verdict, bytecode_listing, input_block, main_program};
+use harness::{
+    BinaryOpOracle, Compiled, HarnessField, Verdict, bytecode_listing, input_block, main_program,
+};
 use mavros_artifacts::{Field, FieldConfig, InputValueOrdered};
 use mavros_compiler::{
     compiler::{
@@ -82,8 +85,12 @@ fn sweep_over(kind: BinaryArithOpKind, bits: usize, pairs: Vec<(IntBits, IntBits
 /// **An input column is only stepped up**: a different input with the same answer is another honest
 /// run, so taking one away need not fail. [`assert_changing_an_input_breaks_the_witness`] covers
 /// inputs.
-fn assert_every_column_is_pinned(what: &str, compiled: &Compiled, inputs: &[&IntBits]) {
-    let verdict = compiled.run(&input_block(inputs));
+fn assert_every_column_is_pinned<F: HarnessField>(
+    what: &str,
+    compiled: &Compiled<F>,
+    inputs: &[&IntBits],
+) {
+    let verdict = compiled.run(&harness::input_block_in(inputs));
     let witness = verdict
         .witness()
         .unwrap_or_else(|| panic!("{what}: {verdict:?}"))
@@ -94,13 +101,10 @@ fn assert_every_column_is_pinned(what: &str, compiled: &Compiled, inputs: &[&Int
         .collect();
 
     for column in 0..witness.len() {
-        let steps: &[(Field, &str)] = if input_columns.contains(&column) {
-            &[(Field::from(1u64), "adding one to")]
+        let steps: &[(F, &str)] = if input_columns.contains(&column) {
+            &[(F::ONE, "adding one to")]
         } else {
-            &[
-                (Field::from(1u64), "adding one to"),
-                (-Field::from(1u64), "taking one from"),
-            ]
+            &[(F::ONE, "adding one to"), (-F::ONE, "taking one from")]
         };
         for &(step, direction) in steps {
             let mut perturbed = witness.clone();
@@ -154,16 +158,20 @@ fn assert_changing_an_input_breaks_the_witness(
 /// column, so that pair trades the other way: the first column loses `2^h` and the second gains
 /// one. Only the place value `2^h` is probed. Column 0, the constant one, is left to
 /// [`assert_every_column_is_pinned`]. Quadratic in the witness, so kept to small programs.
-fn assert_no_two_columns_trade_a_limb(what: &str, compiled: &Compiled, inputs: &[&IntBits]) {
-    let verdict = compiled.run(&input_block(inputs));
+fn assert_no_two_columns_trade_a_limb<F: HarnessField>(
+    what: &str,
+    compiled: &Compiled<F>,
+    inputs: &[&IntBits],
+) {
+    let verdict = compiled.run(&harness::input_block_in(inputs));
     let witness = verdict
         .witness()
         .unwrap_or_else(|| panic!("{what}: {verdict:?}"))
         .to_vec();
-    let limb = witness_limb_bits(FieldConfig::bn254());
-    let place = Field::from(BigUint::from(1u8) << limb);
-    let one = Field::from(1u64);
-    let zero = Field::from(0u64);
+    let limb = witness_limb_bits(F::CONFIG);
+    let place = F::of_biguint(&(BigUint::from(1u8) << limb));
+    let one = F::ONE;
+    let zero = F::ZERO;
     for traded in 1..witness.len() {
         for paired in 1..witness.len() {
             if traded == paired {

@@ -7968,9 +7968,9 @@ mod tests {
     #[test]
     fn the_limb_wise_shift_needs_a_limb_times_its_place_in_one_element() {
         assert!(limb_shift_fits(bn254()));
-        let goldilocks = (BigInt::one() << 64) - (BigInt::one() << 32) + BigInt::one();
+        let goldilocks = field_modulus(FieldConfig::goldilocks());
         assert_eq!(limb_bits_for_modulus(&goldilocks, LimbBudget::DEFAULT), 32);
-        assert!(!limb_shift_fits_modulus(&goldilocks));
+        assert!(!limb_shift_fits(FieldConfig::goldilocks()));
     }
 
     /// A pure amount witnesses nothing about itself: no bits of `q`, no `r`, no power of two and no

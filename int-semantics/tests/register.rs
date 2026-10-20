@@ -25,6 +25,33 @@ use std::{
 /// file is not waved through by the first.
 const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
     (
+        GOLDILOCKS,
+        "lo.wrapping_mul(MODULUS_INVERSE)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "hi.overflowing_sub(mp_hi)", GOLDILOCKS_WHY),
+    (
+        GOLDILOCKS,
+        "difference.wrapping_add(MODULUS)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "lo.overflowing_sub(hi_hi)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "sum.wrapping_sub(EPSILON)", GOLDILOCKS_WHY),
+    (
+        GOLDILOCKS,
+        "sum.overflowing_add(hi_lo * EPSILON)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "self.0.overflowing_add(rhs.0)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "sum.wrapping_add(EPSILON)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "self.0.overflowing_sub(rhs.0)", GOLDILOCKS_WHY),
+    (
+        GOLDILOCKS,
+        "difference.wrapping_sub(EPSILON)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "MODULUS.wrapping_sub(self.0)", GOLDILOCKS_WHY),
+    (
         "opcode-gen/src/lib.rs",
         "read_cycles().wrapping_sub(__prof_start)",
         "a cycle-counter delta, which wraps at the counter's width and not at any Noir type's",
@@ -35,6 +62,14 @@ const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
         "an LCG step; wrapping is the generator, not an overflow",
     ),
 ];
+
+/// The hand-written Goldilocks field.
+const GOLDILOCKS: &str = "mavros-artifacts/src/field/goldilocks.rs";
+
+/// Why its wrapping arithmetic is waived.
+const GOLDILOCKS_WHY: &str = "Goldilocks field arithmetic: host `u64` words reduced modulo the \
+     field prime (Montgomery reduction, the special-form 128-bit reduction, and the carries and \
+     borrows of addition, subtraction and negation), which no Noir integer type defines";
 
 /// The signature check 4 looks for.
 ///

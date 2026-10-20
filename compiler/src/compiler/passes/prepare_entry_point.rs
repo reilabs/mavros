@@ -57,7 +57,8 @@ use crate::{
     compiler::{
         pass_manager::{AnalysisStore, Pass},
         passes::{
-            shared::limbs::widest_injective_int_bits, wide_witness_ints::multi_cell_int_bits,
+            shared::{limbs::widest_injective_int_bits, unsupported::unsupported_on_this_field},
+            wide_witness_ints::multi_cell_int_bits,
         },
         ssa::{
             BlockId, FunctionId, Located, SourceLocation, ValueId,
@@ -735,9 +736,12 @@ impl PrepareEntryPoint {
                 // injectively. Wider integers can be assembled inside the program from ABI limbs.
                 let widest = widest_injective_int_bits(e.field());
                 if *size > widest {
-                    ice!(
-                        "an int{size} crosses the entry point, which carries integers up to \
-                         int{widest}"
+                    unsupported_on_this_field(
+                        format_args!(
+                            "an int{size} crosses the entry point as one field element, which \
+                             carries integers up to int{widest}"
+                        ),
+                        e.field(),
                     );
                 }
                 let zero = e.int_const(IntBits::zero(32));

@@ -275,6 +275,7 @@ impl CodeGen {
 
         bytecode::Program {
             functions,
+            field: ssa.field().id(),
             entry_points: (0..entry_ids.len()).collect(),
             entry_blob_field_count,
             global_frame_size: global_layouter.total_size,
@@ -2200,14 +2201,12 @@ fn lookup_elem_kind(elem_type: &Type, field: FieldConfig) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::FieldElement;
-
     use super::*;
 
     #[test]
     fn a_constants_words_fill_its_frame_slot() {
         let layouter = FrameLayouter::new(FieldConfig::bn254());
-        let field = hlssa::Constant::Field(FieldElement::ONE);
+        let field = hlssa::Constant::Field(FieldConfig::bn254().one());
         let blob = hlssa::Constant::Blob(hlssa::Blob::new(
             Type::field(),
             vec![field.clone(), field.clone()],
@@ -2227,7 +2226,10 @@ mod tests {
     fn a_field_constant_wider_than_its_slot_is_refused() {
         // Three cells, which no field has: bn254's four words overrun the slot.
         let layouter = FrameLayouter::with_field_cells(3);
-        constant_cell_count(&hlssa::Constant::Field(FieldElement::ONE), &layouter);
+        constant_cell_count(
+            &hlssa::Constant::Field(FieldConfig::bn254().one()),
+            &layouter,
+        );
     }
 
     #[test]

@@ -1162,7 +1162,7 @@ impl<'a> ExpressionConverter<'a> {
                 let tag = s.tag.unwrap_or_else(|| {
                     ice!("{constructor:?} is a single-constructor pattern and is never tested")
                 });
-                let c = b.emit_const(Constant::Field((*idx as u128).into()));
+                let c = b.emit_const(Constant::Field(b.field().constant(*idx as u128)));
                 (
                     self.emit_at_source_location(b, location, |e| e.eq(tag, c)),
                     true,

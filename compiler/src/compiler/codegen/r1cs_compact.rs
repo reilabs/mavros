@@ -99,6 +99,8 @@
 //! iteration is in row/column index order and merges go through [`UnionFind`], whose smaller-root
 //! tie-break keeps the partition deterministic.
 
+use mavros_artifacts::MavrosField;
+
 use crate::collections::{HashMap, UnionFind};
 use crate::compiler::Field;
 
@@ -112,7 +114,7 @@ use super::hlssa_to_r1cs::{LC, R1CS};
 /// `protected_cols` is the number of leading witness columns that must survive untouched: column 0
 /// (the constant one) plus the positional input/return block, i.e. `1 + flattened field count of
 /// the entry point's params and returns`.
-pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
+pub fn analyze<F: MavrosField>(r1cs: &R1CS<F>, protected_cols: usize) -> CompactionStats {
     // With column 0 unprotected, `pin_candidate` could "pin" the constant-one column itself,
     // silently corrupting every constant fold below.
     assert!(
@@ -135,7 +137,7 @@ pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
     let protected = protected_cols as u32;
 
     let mut interner = CoeffInterner::default();
-    let mut subst = Substitution::new();
+    let mut subst = Substitution::new(F::ZERO.to_element());
     let mut live = vec![true; algebraic_rows];
 
     // Canonical form of each row, kept as `None` while the row is dead. Persisted across rounds
@@ -191,7 +193,8 @@ pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
                 live[idx] = false;
                 stats.tautology_rows += 1;
                 changed = true;
-            } else if let Some((col, value)) = pin_candidate(row, protected, &interner) {
+            } else if let Some((col, value)) = pin_candidate(row, protected, &interner, subst.zero)
+            {
                 if !subst.is_pinned(col) {
                     let root = subst.uf.find(col);
                     subst.pins.insert(root, value);
@@ -218,34 +221,31 @@ pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
             }
             let a = subst.apply_canon(&row.a, &mut interner);
             let b = subst.apply_canon(&row.b, &mut interner);
-            // `(k, product_lc)`: the product is `k·product_lc` (with `product_lc = None` meaning
-            // the product is identically 0). `None` overall means a genuinely quadratic row — skip
-            // it.
+            // `product` is `Some((k, lc))` when the product is `k·lc`, and `None` when it is
+            // identically 0. `linear` is `None` for a genuinely quadratic row, which is skipped.
             let linear = if a.is_empty() || b.is_empty() {
-                Some((Field::ZERO, None))
+                Some(None)
             } else if let Some(k) = lone_constant(&a, &interner) {
-                Some((k, Some(b.clone())))
+                Some(Some((k, b.clone())))
             } else if let Some(k) = lone_constant(&b, &interner) {
-                Some((k, Some(a.clone())))
+                Some(Some((k, a.clone())))
             } else {
                 None
             };
-            let Some((k, product_lc)) = linear else { continue };
+            let Some(product) = linear else { continue };
             let c = subst.apply_canon(&row.c, &mut interner);
-            // L = C − k·product_lc, folded.
+            // L = C − k·lc, folded.
             let mut folded = std::collections::BTreeMap::<u32, Field>::new();
             for &(col, coeff_id) in &c {
-                *folded.entry(col).or_insert(Field::ZERO) += interner.value(coeff_id);
+                accumulate(&mut folded, col, interner.value(coeff_id));
             }
-            if let Some(lc) = &product_lc {
+            if let Some((k, lc)) = &product {
                 for &(col, coeff_id) in lc {
-                    *folded.entry(col).or_insert(Field::ZERO) -= k * interner.value(coeff_id);
+                    accumulate(&mut folded, col, -(*k * interner.value(coeff_id)));
                 }
             }
-            let terms: Vec<(u32, Field)> = folded
-                .into_iter()
-                .filter(|(_, v)| *v != Field::ZERO)
-                .collect();
+            let terms: Vec<(u32, Field)> =
+                folded.into_iter().filter(|(_, v)| !v.is_zero()).collect();
             match eliminate_linear(&mut subst, &terms, protected) {
                 Elim::None => {}
                 Elim::Pin => {
@@ -437,14 +437,18 @@ struct Substitution {
     uf: UnionFind<u32>,
     pins: HashMap<u32, Field>,
     subs: HashMap<u32, Vec<(u32, Field)>>,
+
+    /// The zero of the R1CS's field, which a column pinned to zero takes.
+    zero: Field,
 }
 
 impl Substitution {
-    fn new() -> Self {
+    fn new(zero: Field) -> Self {
         Substitution {
             uf: UnionFind::default(),
             pins: HashMap::default(),
             subs: HashMap::default(),
+            zero,
         }
     }
 
@@ -455,10 +459,10 @@ impl Substitution {
 
     /// Canonicalize one LC under the current substitution. The R1CS holds raw coefficients, so this
     /// is the boundary where they become middle-end [`Field`] values.
-    fn apply(&mut self, lc: &LC, interner: &mut CoeffInterner) -> CanonLc {
+    fn apply<F: MavrosField>(&mut self, lc: &LC<F>, interner: &mut CoeffInterner) -> CanonLc {
         self.fold_terms(
             lc.iter()
-                .map(|&(col, coeff)| (col as u32, Field::from(coeff))),
+                .map(|&(col, coeff)| (col as u32, coeff.to_element())),
             interner,
         )
     }
@@ -504,7 +508,7 @@ impl Substitution {
         let mut gathered: Vec<(u32, Field)> = Vec::new();
         let mut stack: Vec<(u32, Field)> = terms.collect();
         while let Some((col, coeff)) = stack.pop() {
-            if coeff == Field::ZERO {
+            if coeff.is_zero() {
                 continue;
             }
             let root = self.uf.find(col);
@@ -527,7 +531,7 @@ impl Substitution {
                 _ => folded.push((col, coeff)),
             }
         }
-        folded.retain(|(_, coeff)| *coeff != Field::ZERO);
+        folded.retain(|(_, coeff)| !coeff.is_zero());
 
         folded
     }
@@ -567,15 +571,21 @@ struct CanonRow {
 fn lc_difference(c: &CanonLc, c_ref: &CanonLc, interner: &CoeffInterner) -> Vec<(u32, Field)> {
     let mut folded = std::collections::BTreeMap::<u32, Field>::new();
     for &(col, coeff_id) in c {
-        *folded.entry(col).or_insert(Field::ZERO) += interner.value(coeff_id);
+        accumulate(&mut folded, col, interner.value(coeff_id));
     }
     for &(col, coeff_id) in c_ref {
-        *folded.entry(col).or_insert(Field::ZERO) -= interner.value(coeff_id);
+        accumulate(&mut folded, col, -interner.value(coeff_id));
     }
+    folded.into_iter().filter(|(_, v)| !v.is_zero()).collect()
+}
+
+/// Adds `value` to column `col`'s coefficient in `folded`. A new column starts at `value`, so no
+/// zero of the field is needed.
+fn accumulate(folded: &mut std::collections::BTreeMap<u32, Field>, col: u32, value: Field) {
     folded
-        .into_iter()
-        .filter(|(_, v)| *v != Field::ZERO)
-        .collect()
+        .entry(col)
+        .and_modify(|coeff| *coeff += value)
+        .or_insert(value);
 }
 
 /// Is this LC a lone constant term `k·w_0`? Returns `k`.
@@ -628,13 +638,18 @@ fn is_tautology(row: &CanonRow, interner: &CoeffInterner) -> bool {
 
 /// A degenerate row that pins an unprotected column to a constant: one product side is the empty
 /// LC (so the product is 0) and `C` is `k·w_j` or `k·w_j + m·w_0`, giving `w_j = −m/k`.
-fn pin_candidate(row: &CanonRow, protected: u32, interner: &CoeffInterner) -> Option<(u32, Field)> {
+fn pin_candidate(
+    row: &CanonRow,
+    protected: u32,
+    interner: &CoeffInterner,
+    zero: Field,
+) -> Option<(u32, Field)> {
     // `b < a` normalization puts an empty product side in `a`.
     if !row.a.is_empty() {
         return None;
     }
     let (col, k, m) = match row.c.as_slice() {
-        [(col, k_id)] => (*col, interner.value(*k_id), Field::ZERO),
+        [(col, k_id)] => (*col, interner.value(*k_id), zero),
         [(0, m_id), (col, k_id)] => (*col, interner.value(*k_id), interner.value(*m_id)),
         _ => return None,
     };
@@ -693,7 +708,7 @@ fn eliminate_linear(subst: &mut Substitution, terms: &[(u32, Field)], protected:
     match rhs.as_slice() {
         // A constant (or zero) right-hand side is a pin.
         [] => {
-            subst.pins.insert(root, Field::ZERO);
+            subst.pins.insert(root, subst.zero);
             Elim::Pin
         }
         [(0, value)] => {
@@ -705,7 +720,7 @@ fn eliminate_linear(subst: &mut Substitution, terms: &[(u32, Field)], protected:
         // Because the folded `terms` hold distinct surviving roots, `root != other_root` always
         // holds here, so this eliminates exactly one column; the equality guard is a last-line
         // defence that a would-be no-op union never counts as a removed column.
-        [(other, coeff)] if *coeff == Field::from(1u64) => {
+        [(other, coeff)] if coeff.is_one() => {
             let other_root = subst.uf.find(*other);
             if root == other_root {
                 Elim::None
@@ -728,28 +743,24 @@ fn eliminate_linear(subst: &mut Substitution, terms: &[(u32, Field)], protected:
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{ConstraintsLayout, R1C, WitnessLayout};
+    use mavros_artifacts::{ConstraintsLayout, FieldConfig, R1C, WitnessLayout};
 
     use super::*;
 
     fn field(v: i64) -> Field {
-        if v < 0 {
-            -Field::from((-v) as u64)
-        } else {
-            Field::from(v as u64)
-        }
+        FieldConfig::bn254().constant(v)
     }
 
     fn lc(terms: &[(usize, i64)]) -> LC {
         terms
             .iter()
-            .map(|&(col, v)| (col, field(v).to_ark()))
+            .map(|&(col, v)| (col, MavrosField::from_element(field(v))))
             .collect()
     }
 
     /// An R1CS whose algebraic section is exactly `rows` over `cols` columns, with empty
     /// non-algebraic sections (the analysis never looks at them).
-    fn system(cols: usize, rows: Vec<R1C>) -> R1CS {
+    fn system<F: MavrosField>(cols: usize, rows: Vec<R1C<F>>) -> R1CS<F> {
         R1CS {
             witness_layout: WitnessLayout {
                 guard_index: None,
@@ -842,6 +853,63 @@ mod tests {
         assert_eq!(stats.removable_rows, 3);
         assert_eq!(stats.removable_cols, 2);
         assert!(stats.rounds >= 2);
+    }
+
+    #[test]
+    fn a_column_in_both_c_and_the_product_cancels_before_pinning() {
+        let rows = vec![
+            // (w0) * (w3) - (w3 + w4) = 0: `L = C − 1·B = w4`, so w3 cancels and w4 = 0 (pin).
+            r1c(&[(0, 1)], &[(3, 1)], &[(3, 1), (4, 1)]),
+            // (w4) * (w1) - (0) = 0: a tautology only once w4 is pinned to zero.
+            r1c(&[(4, 1)], &[(1, 1)], &[]),
+        ];
+        let stats = analyze(&system(5, rows), 3);
+        assert_eq!(stats.pinned_cols, 1);
+        assert_eq!(stats.eliminated_cols, 0);
+        assert_eq!(stats.merged_cols, 0);
+        assert_eq!(stats.tautology_rows, 1);
+    }
+
+    #[test]
+    fn a_zero_product_equal_to_one_column_pins_it_to_zero() {
+        let rows = vec![
+            // (0) * (w1) - (w3) = 0  =>  w3 = 0 (pin).
+            r1c(&[], &[(1, 1)], &[(3, 1)]),
+            // (w3) * (w1) - (0) = 0: a tautology only once w3 is pinned to zero.
+            r1c(&[(3, 1)], &[(1, 1)], &[]),
+        ];
+        let stats = analyze(&system(4, rows), 2);
+        assert_eq!(stats.pinned_cols, 1);
+        assert_eq!(stats.tautology_rows, 1);
+        assert_eq!(stats.removable_rows, 2);
+    }
+
+    /// The analysis runs over any field's R1CS. On Goldilocks, a column pinned to zero takes
+    /// Goldilocks' zero, and the second row's product reads it: another field's zero would make
+    /// that a mixed-field operation.
+    #[test]
+    fn a_goldilocks_system_pins_a_column_to_its_zero() {
+        use mavros_artifacts::Goldilocks;
+
+        let one = Goldilocks::ONE;
+        let rows = vec![
+            // (0) * (w1) - (w3) = 0  =>  w3 = 0 (pin).
+            R1C {
+                a: vec![],
+                b: vec![(1, one)],
+                c: vec![(3, one)],
+            },
+            // (w3) * (w1) - (0) = 0: a tautology once w3 is pinned to zero.
+            R1C {
+                a: vec![(3, one)],
+                b: vec![(1, one)],
+                c: vec![],
+            },
+        ];
+        let stats = analyze(&system(4, rows), 2);
+        assert_eq!(stats.pinned_cols, 1);
+        assert_eq!(stats.tautology_rows, 1);
+        assert_eq!(stats.removable_rows, 2);
     }
 
     /// Two rows pinning the same column to different values make the system unsatisfiable. The

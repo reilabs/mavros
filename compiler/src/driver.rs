@@ -9,7 +9,6 @@ use std::{
     sync::Arc,
 };
 
-use ark_ff::AdditiveGroup as _;
 use mavros_vm::bytecode::DebugInfo;
 use noirc_frontend::{
     debug::DebugInstrumenter,
@@ -17,7 +16,7 @@ use noirc_frontend::{
 };
 use tracing::info;
 
-use mavros_artifacts::Field as RawField;
+use mavros_artifacts::{FieldConfig, FieldId, MavrosField};
 
 use crate::{
     Project,
@@ -138,6 +137,12 @@ pub enum Error {
     ///
     /// Carries every failing assertion so a single compile reports them all.
     AssertConstantFailed(Vec<SourceLocation>),
+
+    /// A program to compile to WASM over a field the runtime archive has no instance for.
+    WasmFieldUnsupported(FieldId),
+
+    /// R1CS coefficients requested in a field other than the program's.
+    R1csFieldMismatch { requested: FieldId, program: FieldId },
 }
 
 impl std::fmt::Display for Error {
@@ -148,6 +153,13 @@ impl std::fmt::Display for Error {
                 write!(f, "{}", diagnostic::render_all(diagnostics))
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
+            Error::WasmFieldUnsupported(field) => {
+                write!(f, "the WASM backend does not support the {field:?} field")
+            }
+            Error::R1csFieldMismatch { requested, program } => write!(
+                f,
+                "R1CS generation in {requested:?} was requested for a program over {program:?}"
+            ),
             Error::AssertConstantFailed(locations) => {
                 for (i, location) in locations.iter().enumerate() {
                     if i > 0 {
@@ -332,8 +344,13 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        let (ssa, main_is_unconstrained) =
-            HLSSA::from_program_with_file_manager(&program, Some(self.project().file_manager()));
+        // FIELD-ASSUMPTION: L1-noir-frontend
+        // The driver has no field selector, so a Noir package compiles over bn254.
+        let (ssa, main_is_unconstrained) = HLSSA::from_program_with_file_manager(
+            &program,
+            Some(self.project().file_manager()),
+            FieldConfig::bn254(),
+        );
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
 
@@ -674,9 +691,18 @@ impl Driver {
         Ok(())
     }
 
+    /// Generates the program's R1CS with coefficients in `F`, which must be the raw type of the
+    /// program's field.
     #[tracing::instrument(skip_all)]
-    pub fn generate_r1cs(&mut self) -> Result<R1CS, Error> {
+    pub fn generate_r1cs<F: MavrosField>(&mut self) -> Result<R1CS<F>, Error> {
         let mut r1cs_ssa = self.witness_spilled_ssa.clone().unwrap();
+        let program_field = r1cs_ssa.field().id();
+        if F::ID != program_field {
+            return Err(Error::R1csFieldMismatch {
+                requested: F::ID,
+                program: program_field,
+            });
+        }
 
         let mut r1cs_phase_1 = PassManager::new(
             "r1cs_phase_1".to_string(),
@@ -693,7 +719,7 @@ impl Driver {
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
 
-        let mut r1cs_gen = R1CGen::new(r1cs_ssa.field());
+        let mut r1cs_gen = R1CGen::<F>::new(r1cs_ssa.field());
         if self.r1cs_profiling {
             r1cs_gen.enable_profile();
         }
@@ -722,17 +748,17 @@ impl Driver {
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
-                if *coeff != RawField::ZERO {
+                if *coeff != F::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.b.iter() {
-                if *coeff != RawField::ZERO {
+                if *coeff != F::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
             for (_, coeff) in r1c.c.iter() {
-                if *coeff != RawField::ZERO {
+                if *coeff != F::ZERO {
                     num_non_zero_terms += 1;
                 }
             }
@@ -945,9 +971,19 @@ impl Driver {
         wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
         options: CodeGenOptions,
     ) -> Result<Option<String>, Error> {
-        use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
+        use crate::compiler::codegen::llssa_to_llvm::{FieldRuntimeSymbols, LLVMCodeGen};
         use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::context::Context;
+
+        // Every later stage's SSA takes the initial one's field.
+        let field = self
+            .initial_ssa
+            .as_ref()
+            .expect("a driver holds its initial SSA")
+            .field();
+        if FieldRuntimeSymbols::of(field).is_none() {
+            return Err(Error::WasmFieldUnsupported(field.id()));
+        }
 
         self.prepare_program_ssa();
         let ssa = self.program_ssa.as_ref().unwrap();
@@ -1313,5 +1349,119 @@ mod tests {
             "error: first refusal\n  --> <a_pass>:1:1\n  = note: a standing fact\n\n\
              error: second refusal\n  --> <a_pass>:1:1\n"
         );
+    }
+
+    /// The runtime archive has no Goldilocks instance, so the WASM path refuses a Goldilocks
+    /// program with an error before lowering it.
+    #[test]
+    fn the_wasm_path_refuses_a_goldilocks_program() {
+        use mavros_artifacts::{FieldConfig, FieldId, Goldilocks};
+
+        use super::Driver;
+        use crate::compiler::{
+            codegen::CodeGenOptions,
+            ssa::hlssa::{HLSSA, builder::HLSSABuilder},
+        };
+
+        let mut ssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            b.block(entry)
+                .with_source_location(SourceLocation::synthetic("main"))
+                .terminate_return(vec![]);
+        });
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut driver = Driver::from_ssa(ssa, scratch.path().to_path_buf(), false);
+        driver.make_struct_access_static().unwrap();
+        driver.monomorphize().unwrap();
+        driver.spill_witness().unwrap();
+        let r1cs = driver.generate_r1cs::<Goldilocks>().unwrap();
+        let options = CodeGenOptions {
+            check_constraints: false,
+            include_debug_info: false,
+        };
+        // The refusal precedes any read of the R1CS, so a bn254 one stands in for this program's.
+        let bn254_r1cs = mavros_artifacts::R1CS {
+            witness_layout: r1cs.witness_layout,
+            constraints_layout: r1cs.constraints_layout,
+            constraints: vec![],
+        };
+        match driver.compile_llvm_targets(false, &bn254_r1cs, None, options) {
+            Err(Error::WasmFieldUnsupported(FieldId::Goldilocks)) => {}
+            other => panic!("expected the WASM path to refuse Goldilocks, got {other:?}"),
+        }
+    }
+
+    /// R1CS generation refuses coefficients in a field other than the program's.
+    #[test]
+    fn r1cs_generation_refuses_a_field_other_than_the_programs() {
+        use mavros_artifacts::{Field, FieldConfig, FieldId};
+
+        use super::Driver;
+        use crate::compiler::ssa::hlssa::{HLSSA, builder::HLSSABuilder};
+
+        let mut ssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            b.block(entry)
+                .with_source_location(SourceLocation::synthetic("main"))
+                .terminate_return(vec![]);
+        });
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut driver = Driver::from_ssa(ssa, scratch.path().to_path_buf(), false);
+        driver.make_struct_access_static().unwrap();
+        driver.monomorphize().unwrap();
+        driver.spill_witness().unwrap();
+        match driver.generate_r1cs::<Field>() {
+            Err(Error::R1csFieldMismatch {
+                requested: FieldId::Bn254,
+                program: FieldId::Goldilocks,
+            }) => {}
+            other => panic!("expected a field mismatch, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// A serialized coefficient is its field's canonical limbs as a fixed-size array: four for
+    /// bn254, with no length, and one for Goldilocks.
+    #[test]
+    fn r1cs_coefficients_serialize_as_their_canonical_limbs() {
+        use ark_ff::PrimeField;
+        use mavros_artifacts::{Field, Goldilocks, MavrosField, R1C};
+
+        let minus_one = -<Field as MavrosField>::ONE;
+        let bn254 = R1C {
+            a: vec![(3, minus_one)],
+            b: vec![],
+            c: vec![(0, <Field as MavrosField>::ONE)],
+        };
+        let bytes = bincode::serialize(&bn254).unwrap();
+        let expected = bincode::serialize(&(
+            vec![(3usize, minus_one.into_bigint().0)],
+            Vec::<(usize, [u64; 4])>::new(),
+            vec![(0usize, [1u64, 0, 0, 0])],
+        ))
+        .unwrap();
+        assert_eq!(bytes, expected);
+        let back: R1C<Field> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!((back.a, back.c), (bn254.a, bn254.c));
+
+        let top = -Goldilocks::ONE;
+        let goldilocks = R1C {
+            a: vec![(7, top)],
+            b: vec![(1, Goldilocks::from(5u64))],
+            c: vec![],
+        };
+        let bytes = bincode::serialize(&goldilocks).unwrap();
+        let expected = bincode::serialize(&(
+            vec![(7usize, [top.value()])],
+            vec![(1usize, [5u64])],
+            Vec::<(usize, [u64; 1])>::new(),
+        ))
+        .unwrap();
+        assert_eq!(bytes, expected);
+        let back: R1C<Goldilocks> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!((back.a, back.b), (goldilocks.a, goldilocks.b));
     }
 }
