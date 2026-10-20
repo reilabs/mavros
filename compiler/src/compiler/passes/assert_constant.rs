@@ -121,7 +121,6 @@ mod tests {
 
     use super::AssertConstantValidation;
     use crate::compiler::{
-        Field,
         analysis::{flow_analysis::FlowAnalysis, witness_taint_inference::WitnessTaintInference},
         pass_manager::PassManager,
         ssa::{
@@ -207,8 +206,8 @@ mod tests {
     fn accepts_constants_in_every_call_context_and_removes_markers() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let helper = add_asserting_helper(&mut ssa);
-        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
-        let six = ssa.add_const(Constant::Field(Field::from(6u64)));
+        let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
+        let six = ssa.add_const(Constant::Field(ssa.field().constant(6u64)));
         call(&mut ssa, helper, five);
         call(&mut ssa, helper, six);
         ssa.get_unique_entrypoint_mut()
@@ -229,7 +228,7 @@ mod tests {
     fn rejects_when_any_call_context_contains_a_witness() {
         let mut ssa = HLSSA::with_main("main".to_string());
         let helper = add_asserting_helper(&mut ssa);
-        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
         call(&mut ssa, helper, five);
         call(&mut ssa, helper, dynamic);
@@ -244,7 +243,7 @@ mod tests {
     fn recursively_checks_aggregate_shapes() {
         for dynamic_element in [false, true] {
             let mut ssa = HLSSA::with_main("main".to_string());
-            let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+            let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
             let element = if dynamic_element {
                 witness(&mut ssa, five)
             } else {
@@ -273,7 +272,7 @@ mod tests {
         // Once witness-length slices are supported, this test must also cover a genuinely dynamic
         // slice length and require validation to reject it.
         let mut ssa = HLSSA::with_main("main".to_string());
-        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
         let array = ssa.fresh_value();
         let slice = ssa.fresh_value();
@@ -309,7 +308,7 @@ mod tests {
     #[test]
     fn rejects_a_direct_witness_and_preserves_markers_on_failure() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
         entry.push_instruction(assert_constant(dynamic));
@@ -328,7 +327,7 @@ mod tests {
     #[test]
     fn reports_every_failing_assertion() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
         entry.push_instruction(assert_constant_at(dynamic, 10));
@@ -347,7 +346,7 @@ mod tests {
     )]
     fn rejects_a_guard_before_witness_taint_inference() {
         let mut ssa = HLSSA::with_main("main".to_string());
-        let five = ssa.add_const(Constant::Field(Field::from(5u64)));
+        let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
         entry.push_instruction(
             OpCode::Guard {

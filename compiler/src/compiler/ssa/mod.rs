@@ -150,7 +150,12 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     }
 
     pub fn with_main(name: String) -> Self {
-        let mut ssa = Self::empty();
+        Self::with_main_in(FieldConfig::bn254(), name)
+    }
+
+    /// Constructs an SSA over `field` whose only function, `name`, is its entry point.
+    pub fn with_main_in(field: FieldConfig, name: String) -> Self {
+        let mut ssa = Self::with_field(field);
         let main_id = ssa.add_function(name);
         ssa.add_entry_point(main_id);
         ssa

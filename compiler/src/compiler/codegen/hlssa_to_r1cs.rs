@@ -1,10 +1,10 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
-use ark_ff::{BigInteger, Zero};
+use ark_ff::BigInteger;
 use num_bigint::BigUint;
 use tracing::{instrument, warn};
 
-use mavros_artifacts::{Field as RawField, FieldConfig};
+use mavros_artifacts::{Field as RawField, FieldConfig, MavrosField};
 use mavros_int_semantics::{self as semantics, CmpOp, IntBits, int_bits::HOST_WORD_BITS};
 
 use crate::compiler::{
@@ -35,34 +35,34 @@ pub struct R1CSProfile {
 }
 
 #[derive(Debug)]
-pub struct R1CSProfileDisabled {
-    r1cs: Box<R1CS>,
+pub struct R1CSProfileDisabled<F: MavrosField = RawField> {
+    r1cs: Box<R1CS<F>>,
 }
 
-impl R1CSProfileDisabled {
-    pub fn into_r1cs(self) -> R1CS {
+impl<F: MavrosField> R1CSProfileDisabled<F> {
+    pub fn into_r1cs(self) -> R1CS<F> {
         *self.r1cs
     }
 }
 
-impl std::fmt::Display for R1CSProfileDisabled {
+impl<F: MavrosField> std::fmt::Display for R1CSProfileDisabled<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("R1CS profiling was not enabled")
     }
 }
 
-impl std::error::Error for R1CSProfileDisabled {}
+impl<F: MavrosField> std::error::Error for R1CSProfileDisabled<F> {}
 
 #[derive(Clone, Debug)]
-pub struct ArrayData {
+pub struct ArrayData<F: MavrosField = RawField> {
     table_id: Option<usize>,
-    data: Vec<Value>,
+    data: Vec<Value<F>>,
 }
 
 /// What R1CS generation knows of one SSA value as it executes the program symbolically.
 #[derive(Clone, Debug)]
 // FIELD-ASSUMPTION: L4-eval
-pub enum Value {
+pub enum Value<F: MavrosField = RawField> {
     /// A Field element value known at compile time.
     Const(Field),
 
@@ -70,25 +70,25 @@ pub enum Value {
     Wide(IntBits),
 
     /// A value that depends on the witness, as a linear combination of witness columns.
-    LC(LC),
+    LC(LC<F>),
 
     /// An array or slice, element by element.
-    Array(Rc<RefCell<ArrayData>>),
+    Array(Rc<RefCell<ArrayData<F>>>),
 
     /// A blob constant's elements, read only by `MkSeqOfBlob`, which turns them into an
     /// [`Value::Array`].
-    Blob(Vec<Value>),
+    Blob(Vec<Value<F>>),
 
     /// A reference, as the cell it points to.
     ///
     /// Clones share the cell, so a write through one is seen by a read through any other.
-    Ptr(Rc<RefCell<Value>>),
+    Ptr(Rc<RefCell<Value<F>>>),
 
     /// Never constructed, and matched nowhere.
     Invalid,
 }
 
-impl Value {
+impl<F: MavrosField> Value<F> {
     /// Report an undefined `Div`/`Mod` reaching the R1CS constant folds as a compiler bug.
     ///
     /// `LowerPureGuards` asserts every integer `Div`/`Mod` is defined immediately before the op, so
@@ -118,7 +118,7 @@ impl Value {
     }
 
     /// An integer answer as an element where one holds it, and as its pattern where none does.
-    fn of_pattern(field: FieldConfig, pattern: IntBits) -> Value {
+    fn of_pattern(field: FieldConfig, pattern: IntBits) -> Value<F> {
         match field_constant(field, &pattern) {
             Some(element) => Value::Const(element),
             None => Value::Wide(pattern),
@@ -140,7 +140,7 @@ impl Value {
     ///
     /// A signed ordering is not answered here: it reads both sides as patterns, which holds a
     /// [`Value::Wide`] as well.
-    fn wide_unsigned_cmp(kind: CmpKind, a: &Value, b: &Value) -> Option<bool> {
+    fn wide_unsigned_cmp(kind: CmpKind, a: &Value<F>, b: &Value<F>) -> Option<bool> {
         if !(matches!(a, Value::Wide(_)) || matches!(b, Value::Wide(_))) {
             return None;
         }
@@ -152,7 +152,7 @@ impl Value {
     }
 
     // FIELD-ASSUMPTION: L4-eval
-    pub fn add(&self, other: &Value) -> Value {
+    pub fn add(&self, other: &Value<F>) -> Value<F> {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs + rhs),
             (_, _) => {
@@ -164,7 +164,7 @@ impl Value {
                 while lhs_i < lhs.len() && rhs_i < rhs.len() {
                     if lhs[lhs_i].0 == rhs[rhs_i].0 {
                         let r = lhs[lhs_i].1 + rhs[rhs_i].1;
-                        if !r.is_zero() {
+                        if r != F::ZERO {
                             result.push((lhs[lhs_i].0, r));
                         }
                         lhs_i += 1;
@@ -190,7 +190,7 @@ impl Value {
         }
     }
 
-    fn neg(&self) -> Value {
+    fn neg(&self) -> Value<F> {
         match self {
             Value::Const(c) => Value::Const(-*c),
             Value::LC(lc) => Value::LC(lc.iter().map(|(i, c)| (*i, -*c)).collect()),
@@ -198,12 +198,12 @@ impl Value {
         }
     }
 
-    pub fn sub(&self, other: &Value) -> Value {
+    pub fn sub(&self, other: &Value<F>) -> Value<F> {
         self.add(&other.neg())
     }
 
     // FIELD-ASSUMPTION: L4-eval
-    pub fn div(&self, other: &Value) -> Value {
+    pub fn div(&self, other: &Value<F>) -> Value<F> {
         let Value::Const(rhs) = other else { ice!("expected constant") };
         // `LowerPureGuards` asserts every field division is defined, so `R1CGen` rejects a program
         // with a zero divisor at that assertion, which precedes the division. Reaching here with
@@ -324,14 +324,14 @@ impl Value {
     }
 
     // FIELD-ASSUMPTION: L4-eval
-    pub fn mul(&self, other: &Value) -> Value {
+    pub fn mul(&self, other: &Value<F>) -> Value<F> {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs * rhs),
             (Value::Const(c), Value::LC(lc)) | (Value::LC(lc), Value::Const(c)) => {
                 if c.is_zero() {
                     return Value::Const(*c);
                 }
-                let c = c.to_ark();
+                let c = F::from_element(*c);
                 let mut result = Vec::new();
                 for (i, cl) in lc.iter() {
                     result.push((*i, c * *cl));
@@ -342,29 +342,29 @@ impl Value {
         }
     }
 
-    pub fn expect_ptr(&self) -> Rc<RefCell<Value>> {
+    pub fn expect_ptr(&self) -> Rc<RefCell<Value<F>>> {
         match self {
             Value::Ptr(ptr) => ptr.clone(),
             _ => ice!("expected ptr"),
         }
     }
 
-    pub fn expect_array(&self) -> Rc<RefCell<ArrayData>> {
+    pub fn expect_array(&self) -> Rc<RefCell<ArrayData<F>>> {
         match self {
             Value::Array(array) => array.clone(),
             _ => ice!("expected array"),
         }
     }
 
-    pub fn expect_blob(&self) -> Vec<Value> {
+    pub fn expect_blob(&self) -> Vec<Value<F>> {
         match self {
             Value::Blob(elements) => elements.clone(),
             _ => ice!("expected blob"),
         }
     }
-    pub fn expect_linear_combination(&self) -> LC {
+    pub fn expect_linear_combination(&self) -> LC<F> {
         match self {
-            Value::Const(c) => vec![(0, c.to_ark())],
+            Value::Const(c) => vec![(0, F::from_element(*c))],
             Value::Wide(pattern) => Self::ice_no_element(pattern),
             Value::LC(lc) => lc.clone(),
             _ => ice!("expected constant or linear combination"),
@@ -372,11 +372,11 @@ impl Value {
     }
 
     /// A boolean as the field's one or zero.
-    fn of_bool(field: FieldConfig, holds: bool) -> Value {
+    fn of_bool(field: FieldConfig, holds: bool) -> Value<F> {
         Value::Const(if holds { field.one() } else { field.zero() })
     }
 
-    pub fn mk_array(data: Vec<Value>) -> Value {
+    pub fn mk_array(data: Vec<Value<F>>) -> Value<F> {
         Value::Array(Rc::new(RefCell::new(ArrayData {
             table_id: None,
             data,
@@ -391,7 +391,7 @@ fn past_the_end(index: usize, length: usize) -> AssertionFailure {
     ))
 }
 
-fn flatten_array_into_table(arr: &ArrayData, out: &mut Vec<LC>) {
+fn flatten_array_into_table<F: MavrosField>(arr: &ArrayData<F>, out: &mut Vec<LC<F>>) {
     for elem in arr.data.iter() {
         match elem {
             Value::Array(inner) => flatten_array_into_table(&inner.borrow(), out),
@@ -401,22 +401,22 @@ fn flatten_array_into_table(arr: &ArrayData, out: &mut Vec<LC>) {
 }
 
 #[derive(Clone, Debug)]
-pub struct LookupConstraint {
+pub struct LookupConstraint<F: MavrosField = RawField> {
     pub table_id: usize,
-    pub elements: Vec<LC>,
-    pub flag: LC,
+    pub elements: Vec<LC<F>>,
+    pub flag: LC<F>,
 }
 
 #[derive(Clone, Debug)]
-pub enum Table {
+pub enum Table<F: MavrosField = RawField> {
     Range(u64),
-    OfElems(Vec<LC>),
+    OfElems(Vec<LC<F>>),
     Spread(u8),
     /// `(n, 2^n)` for `n` in `0..2^size`, where `size` is `log2` of the shifted operand's width.
     Pow2(u8),
 }
 
-impl Table {
+impl<F: MavrosField> Table<F> {
     fn row_count(&self) -> usize {
         match self {
             Table::Range(bits) => 1usize << bits,
@@ -456,12 +456,12 @@ impl Table {
 }
 
 #[derive(Clone)]
-pub struct R1CGen {
+pub struct R1CGen<F: MavrosField = RawField> {
     /// The field the program operates over.
     field: FieldConfig,
-    constraints: Vec<R1C>,
-    tables: Vec<Table>,
-    lookups: Vec<LookupConstraint>,
+    constraints: Vec<R1C<F>>,
+    tables: Vec<Table<F>>,
+    lookups: Vec<LookupConstraint<F>>,
     next_witness: usize,
     function_names: BTreeMap<FunctionId, String>,
     call_stack: Vec<String>,
@@ -470,15 +470,15 @@ pub struct R1CGen {
     profile: Option<R1CSProfile>,
 }
 
-impl symbolic_executor::Context<Value> for R1CGen {
+impl<F: MavrosField> symbolic_executor::Context<Value<F>> for R1CGen<F> {
     fn on_call(
         &mut self,
         func: FunctionId,
-        _params: &mut [Value],
+        _params: &mut [Value<F>],
         _param_types: &[&Type],
         _result_types: &[Type],
         unconstrained: bool,
-    ) -> Option<Vec<Value>> {
+    ) -> Option<Vec<Value<F>>> {
         assert!(
             !unconstrained,
             "ICE: unconstrained calls should be DCE'd before R1CS gen"
@@ -494,15 +494,20 @@ impl symbolic_executor::Context<Value> for R1CGen {
         None
     }
 
-    fn on_return(&mut self, _returns: &mut [Value], _return_types: &[Type]) {
+    fn on_return(&mut self, _returns: &mut [Value<F>], _return_types: &[Type]) {
         if self.profile.is_some() {
             self.pop_profile_frame();
         }
     }
 
-    fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value], _param_types: &[&Type]) {}
+    fn on_jmp(&mut self, _target: BlockId, _params: &mut [Value<F>], _param_types: &[&Type]) {}
 
-    fn lookup(&mut self, target: hlssa::LookupTarget<Value>, args: Vec<Value>, flag: Value) {
+    fn lookup(
+        &mut self,
+        target: hlssa::LookupTarget<Value<F>>,
+        args: Vec<Value<F>>,
+        flag: Value<F>,
+    ) {
         let flag_lc = flag.expect_linear_combination();
         let els: Vec<_> = args
             .into_iter()
@@ -566,11 +571,11 @@ impl symbolic_executor::Context<Value> for R1CGen {
         });
     }
 
-    fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Value> {
+    fn todo(&mut self, payload: &str, _result_types: &[Type]) -> Vec<Value<F>> {
         ice!("Todo opcode encountered in R1CSGen: {}", payload);
     }
 
-    fn slice_push(&mut self, slice: &Value, values: &[Value], dir: SliceOpDir) -> Value {
+    fn slice_push(&mut self, slice: &Value<F>, values: &[Value<F>], dir: SliceOpDir) -> Value<F> {
         match dir {
             SliceOpDir::Front => {
                 let mut r = values.to_vec();
@@ -585,7 +590,7 @@ impl symbolic_executor::Context<Value> for R1CGen {
         }
     }
 
-    fn slice_len(&mut self, slice: &Value) -> Value {
+    fn slice_len(&mut self, slice: &Value<F>) -> Value<F> {
         let array = slice.expect_array();
         Value::Const(self.field.constant(array.borrow().data.len() as u128))
     }
@@ -593,17 +598,17 @@ impl symbolic_executor::Context<Value> for R1CGen {
     fn on_guard(
         &mut self,
         _inner: &crate::compiler::ssa::hlssa::OpCode,
-        _condition: &Value,
-        _inputs: Vec<&Value>,
+        _condition: &Value<F>,
+        _inputs: Vec<&Value<F>>,
         _result_types: Vec<&Type>,
-    ) -> Vec<Value> {
+    ) -> Vec<Value<F>> {
         ice!("Guard should not appear in R1CS gen (should be lowered before)")
     }
 }
 
 // FIELD-ASSUMPTION: L4-eval
-impl symbolic_executor::Value<R1CGen> for Value {
-    fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, ctx: &mut R1CGen) -> Self {
+impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
+    fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, ctx: &mut R1CGen<F>) -> Self {
         if let Some(holds) = Value::wide_unsigned_cmp(kind, self, b) {
             return Value::of_bool(ctx.field(), holds);
         }
@@ -640,7 +645,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         b: &Self,
         binary_arith_op_kind: BinaryArithOpKind,
         out_type: &Type,
-        ctx: &mut R1CGen,
+        ctx: &mut R1CGen<F>,
     ) -> Self {
         match &out_type.strip_witness().expr {
             TypeExpr::Int(bits) => {
@@ -701,7 +706,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    fn assert_bool(&self, ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
+    fn assert_bool(&self, ctx: &mut R1CGen<F>) -> Result<(), AssertionFailure> {
         let v = self.expect_constant();
         if v == ctx.field().zero() {
             return Err(AssertionFailure::new("assert failed: value is zero"));
@@ -714,7 +719,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         a: &Self,
         b: &Self,
         bits: Option<usize>,
-        _ctx: &mut R1CGen,
+        _ctx: &mut R1CGen<F>,
     ) -> Result<(), AssertionFailure> {
         if let Some(holds) = Value::wide_unsigned_cmp(kind, a, b) {
             return if holds {
@@ -762,7 +767,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Ok(())
     }
 
-    fn assert_r1c(a: &Self, b: &Self, c: &Self, _ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
+    fn assert_r1c(
+        a: &Self,
+        b: &Self,
+        c: &Self,
+        _ctx: &mut R1CGen<F>,
+    ) -> Result<(), AssertionFailure> {
         let a = a.expect_constant();
         let b = b.expect_constant();
         let c = c.expect_constant();
@@ -780,7 +790,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         &self,
         index: &Self,
         _out_type: &Type,
-        _ctx: &mut R1CGen,
+        _ctx: &mut R1CGen<F>,
     ) -> Result<Self, AssertionFailure> {
         let index = index.expect_u32() as usize;
         let array = self.expect_array();
@@ -796,7 +806,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         index: &Self,
         value: &Self,
         _out_type: &Type,
-        _ctx: &mut R1CGen,
+        _ctx: &mut R1CGen<F>,
     ) -> Result<Self, AssertionFailure> {
         let array = self.expect_array();
         let index = index.expect_u32() as usize;
@@ -816,7 +826,13 @@ impl symbolic_executor::Value<R1CGen> for Value {
     /// through `Value::of_pattern`. A window of an element is below the modulus; only a window of a
     /// [`Value::Wide`] can exceed it.
     // FIELD-ASSUMPTION: L4-decompose
-    fn bit_range(&self, offset: usize, width: usize, _out_type: &Type, ctx: &mut R1CGen) -> Self {
+    fn bit_range(
+        &self,
+        offset: usize,
+        width: usize,
+        _out_type: &Type,
+        ctx: &mut R1CGen<F>,
+    ) -> Self {
         let read = offset
             .checked_add(width)
             .expect("ICE: a bit range whose top overflows a usize");
@@ -825,7 +841,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     /// Widen `from` bits to `to`, replicating the sign bit using the integer semantic model.
-    fn sext(&self, from: usize, to: usize, _out_type: &Type, ctx: &mut R1CGen) -> Self {
+    fn sext(&self, from: usize, to: usize, _out_type: &Type, ctx: &mut R1CGen<F>) -> Self {
         assert!(from > 0, "an int0 has no sign bit to extend");
         assert!(
             to >= from,
@@ -836,7 +852,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         Value::of_pattern(ctx.field(), extended)
     }
 
-    fn cast(&self, cast_target: &hlssa::CastTarget, _out_type: &Type, ctx: &mut R1CGen) -> Self {
+    fn cast(&self, cast_target: &hlssa::CastTarget, _out_type: &Type, ctx: &mut R1CGen<F>) -> Self {
         // Witness strips (ValueOf, also under Maps) only feed hint chains and
         // unconstrained call arguments, so they must be dead (and DCE'd) by
         // R1CS generation. The remaining casts — witness injections and Maps
@@ -856,7 +872,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
         }
     }
 
-    fn constrain(a: &Self, b: &Self, c: &Self, ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
+    fn constrain(
+        a: &Self,
+        b: &Self,
+        c: &Self,
+        ctx: &mut R1CGen<F>,
+    ) -> Result<(), AssertionFailure> {
         let a = a.expect_linear_combination();
         let b = b.expect_linear_combination();
         let c = c.expect_linear_combination();
@@ -871,7 +892,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         endianness: hlssa::Endianness,
         size: usize,
         _out_type: &Type,
-        ctx: &mut R1CGen,
+        ctx: &mut R1CGen<F>,
     ) -> Self {
         let value_const = self.expect_constant();
         let mut bits = value_const.into_bigint().to_bits_le();
@@ -901,56 +922,56 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     /// Every bit below the result's width, flipped using the semantic model.
-    fn not(&self, out_type: &Type, ctx: &mut R1CGen) -> Self {
+    fn not(&self, out_type: &Type, ctx: &mut R1CGen<F>) -> Self {
         let bits = out_type.get_bit_size(ctx.field());
         let complemented = self.expect_pattern(bits).complement();
         Value::of_pattern(ctx.field(), complemented)
     }
 
-    fn of_int(v: &IntBits, ctx: &mut R1CGen) -> Self {
+    fn of_int(v: &IntBits, ctx: &mut R1CGen<F>) -> Self {
         Value::of_pattern(ctx.field(), v.clone())
     }
 
-    fn of_field(f: Field, _ctx: &mut R1CGen) -> Self {
+    fn of_field(f: Field, _ctx: &mut R1CGen<F>) -> Self {
         Value::Const(f)
     }
 
-    fn of_blob(_elem_type: Type, elements: Vec<Self>, _ctx: &mut R1CGen) -> Self {
+    fn of_blob(_elem_type: Type, elements: Vec<Self>, _ctx: &mut R1CGen<F>) -> Self {
         Value::Blob(elements)
     }
 
-    fn expect_blob(&self, _ctx: &mut R1CGen) -> Vec<Self> {
+    fn expect_blob(&self, _ctx: &mut R1CGen<F>) -> Vec<Self> {
         self.expect_blob()
     }
 
     fn mk_array(
         a: Vec<Self>,
-        _ctx: &mut R1CGen,
+        _ctx: &mut R1CGen<F>,
         _seq_type: hlssa::SequenceTargetType,
         _elem_type: &Type,
     ) -> Self {
         Value::mk_array(a)
     }
 
-    fn alloc(value: &Self, _ctx: &mut R1CGen) -> Self {
+    fn alloc(value: &Self, _ctx: &mut R1CGen<F>) -> Self {
         Value::Ptr(Rc::new(RefCell::new(value.clone())))
     }
 
-    fn ptr_write(&self, value: &Self, _ctx: &mut R1CGen) {
+    fn ptr_write(&self, value: &Self, _ctx: &mut R1CGen<F>) {
         let ptr = self.expect_ptr();
         *ptr.borrow_mut() = value.clone();
     }
 
-    fn ptr_read(&self, _out_type: &Type, _ctx: &mut R1CGen) -> Self {
+    fn ptr_read(&self, _out_type: &Type, _ctx: &mut R1CGen<F>) -> Self {
         let ptr = self.expect_ptr();
         ptr.borrow().clone()
     }
 
-    fn try_constant_bool(&self, ctx: &mut R1CGen) -> Result<bool, AssertionFailure> {
+    fn try_constant_bool(&self, ctx: &mut R1CGen<F>) -> Result<bool, AssertionFailure> {
         Ok(self.expect_constant() == ctx.field().one())
     }
 
-    fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, ctx: &mut R1CGen) -> Self {
+    fn select(&self, if_t: &Self, if_f: &Self, _out_type: &Type, ctx: &mut R1CGen<F>) -> Self {
         let one = ctx.field().one();
         if matches!(if_t, Value::Wide(_)) || matches!(if_f, Value::Wide(_)) {
             return if self.expect_constant() == one {
@@ -962,22 +983,22 @@ impl symbolic_executor::Value<R1CGen> for Value {
         self.mul(if_t).add(&Value::Const(one).sub(self).mul(if_f))
     }
 
-    fn write_witness(&self, _tp: Option<&Type>, ctx: &mut R1CGen) -> Self {
+    fn write_witness(&self, _tp: Option<&Type>, ctx: &mut R1CGen<F>) -> Self {
         let witness_var = ctx.next_witness();
         ctx.record_witnesses(1);
-        Value::LC(vec![(witness_var, ctx.field().one().to_ark())])
+        Value::LC(vec![(witness_var, F::from_element(ctx.field().one()))])
     }
 
-    fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen) -> Self {
+    fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen<F>) -> Self {
         let witness_var = ctx.next_witness();
         ctx.record_witnesses(1);
-        Value::LC(vec![(witness_var, ctx.field().one().to_ark())])
+        Value::LC(vec![(witness_var, F::from_element(ctx.field().one()))])
     }
 
-    fn mem_op(&self, _kind: RefCountOp, _ctx: &mut R1CGen) {}
+    fn mem_op(&self, _kind: RefCountOp, _ctx: &mut R1CGen<F>) {}
 
     // FIELD-ASSUMPTION: L4-decompose
-    fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen) -> Result<(), AssertionFailure> {
+    fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen<F>) -> Result<(), AssertionFailure> {
         let self_const = self.expect_constant();
         let check = self_const
             .into_bigint()
@@ -1000,7 +1021,7 @@ impl symbolic_executor::Value<R1CGen> for Value {
         endianness: crate::compiler::ssa::hlssa::Endianness,
         size: usize,
         _out_type: &Type,
-        ctx: &mut R1CGen,
+        ctx: &mut R1CGen<F>,
     ) -> Self {
         match radix {
             Radix::Bytes => {
@@ -1025,12 +1046,12 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 
     // The operand is read at `value_bits`, which masks the bits above it as the model does.
-    fn spread(&self, value_bits: usize, ctx: &mut R1CGen) -> Self {
+    fn spread(&self, value_bits: usize, ctx: &mut R1CGen<F>) -> Self {
         let spread = self.expect_pattern(value_bits).spread(value_bits);
         Value::of_pattern(ctx.field(), spread)
     }
 
-    fn unspread(&self, value_bits: usize, ctx: &mut R1CGen) -> (Self, Self) {
+    fn unspread(&self, value_bits: usize, ctx: &mut R1CGen<F>) -> (Self, Self) {
         let (odd, even) = self.expect_pattern(value_bits).unspread(value_bits);
         (
             Value::of_pattern(ctx.field(), odd),
@@ -1039,8 +1060,20 @@ impl symbolic_executor::Value<R1CGen> for Value {
     }
 }
 
-impl R1CGen {
+impl<F: MavrosField> R1CGen<F> {
+    /// A generator emitting coefficients in `F`, for a program over `field`.
+    ///
+    /// # Panics
+    ///
+    /// If `F` is not `field`'s raw type.
     pub fn new(field: FieldConfig) -> Self {
+        assert_eq!(
+            F::ID,
+            field.id(),
+            "ICE: R1CS generation in {:?} for a program over {:?}",
+            F::ID,
+            field.id()
+        );
         Self {
             field,
             constraints: vec![],
@@ -1113,7 +1146,7 @@ impl R1CGen {
         }
     }
 
-    fn add_table(&mut self, table: Table) -> usize {
+    fn add_table(&mut self, table: Table<F>) -> usize {
         let table_index = self.tables.len();
         let (constraints, witnesses) = table.profile_size();
         if let Some(profile) = &mut self.profile {
@@ -1143,31 +1176,6 @@ impl R1CGen {
         }
     }
 
-    pub fn verify(&self, witness: &[RawField]) -> bool {
-        for (i, r1c) in self.constraints.iter().enumerate() {
-            let a = r1c
-                .a
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<RawField>();
-            let b = r1c
-                .b
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<RawField>();
-            let c = r1c
-                .c
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<RawField>();
-            if a * b != c {
-                warn!(message = %"R1CS constraint failed to verify", index = i);
-                return false;
-            }
-        }
-        true
-    }
-
     #[instrument(skip_all, name = "R1CGen::run")]
     pub fn run(&mut self, ssa: &HLSSA, type_info: &TypeInfo) -> Result<(), AssertionFailure> {
         let entry_point = ssa.get_unique_entrypoint_id();
@@ -1193,7 +1201,7 @@ impl R1CGen {
         result
     }
 
-    pub fn get_r1cs(self) -> Vec<R1C> {
+    pub fn get_r1cs(self) -> Vec<R1C<F>> {
         self.constraints
     }
 
@@ -1214,14 +1222,14 @@ impl R1CGen {
         result
     }
 
-    pub fn seal(self, guard: Option<(usize, usize)>) -> R1CS {
+    pub fn seal(self, guard: Option<(usize, usize)>) -> R1CS<F> {
         self.seal_impl(guard).0
     }
 
     pub fn seal_with_profile(
         self,
         guard: Option<(usize, usize)>,
-    ) -> Result<(R1CS, R1CSProfile), R1CSProfileDisabled> {
+    ) -> Result<(R1CS<F>, R1CSProfile), R1CSProfileDisabled<F>> {
         let (r1cs, profile) = self.seal_impl(guard);
         match profile {
             Some(profile) => Ok((r1cs, profile)),
@@ -1231,11 +1239,11 @@ impl R1CGen {
         }
     }
 
-    fn seal_impl(mut self, guard: Option<(usize, usize)>) -> (R1CS, Option<R1CSProfile>) {
+    fn seal_impl(mut self, guard: Option<(usize, usize)>) -> (R1CS<F>, Option<R1CSProfile>) {
         // The rows below are `LC`s, which hold raw coefficients.
         let field = self.field;
-        let one = field.one().to_ark();
-        let constant = |value: u64| field.constant(value).to_ark();
+        let one = F::from_element(field.one());
+        let constant = |value: u64| F::from_element(field.constant(value));
 
         // Algebraic section
         let mut witness_layout = WitnessLayout {
@@ -1255,9 +1263,9 @@ impl R1CGen {
         let mut result = self.constraints;
 
         // multiplicities init + compute the needed challenges
-        struct TableInfo {
+        struct TableInfo<F: MavrosField> {
             multiplicities_witness_off: usize,
-            table: Table,
+            table: Table<F>,
             sum_constraint_idx: usize,
         }
         let mut table_infos = vec![];
@@ -1321,7 +1329,7 @@ impl R1CGen {
                     // for each element i, we need one witness `y = mᵢ / (α - i)`
                     // and one constraint saying `y * (α - i) - mᵢ = 0`
                     let len = 1 << bits;
-                    let mut sum_lhs: LC = vec![];
+                    let mut sum_lhs: LC<F> = vec![];
                     for i in 0..len {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + i;
@@ -1343,7 +1351,7 @@ impl R1CGen {
                     // for each element (i, v), we need two witness/constraint pairs:
                     // -> x = β * v, with the constraint `β * v - x = 0`
                     // -> y = mᵢ / (α - i - x), with the constraint `y * (α - i - x) - mᵢ = 0`
-                    let mut sum_lhs: LC = vec![];
+                    let mut sum_lhs: LC<F> = vec![];
                     for (i, v) in els.iter().enumerate() {
                         let x = witness_layout.next_table_data();
                         let y = witness_layout.next_table_data();
@@ -1376,7 +1384,7 @@ impl R1CGen {
                     // -> y = mᵢ / (α - i + β·spread(i)),
                     //    constraint `y · (α - i + β·spread(i)) - mᵢ = 0`
                     let len = 1usize << bits;
-                    let mut sum_lhs: LC = vec![];
+                    let mut sum_lhs: LC<F> = vec![];
                     for i in 0..len {
                         let key = u32::try_from(i).expect("a spread table's key fits a half-word");
                         let spread_val = mavros_limb_arith::spread_u32_to_u64(key);
@@ -1413,7 +1421,7 @@ impl R1CGen {
                     // the widest row clears the modulus, so no row wraps. `two_pow` would wrap
                     // silently if it ever did.
                     let len = 1usize << size;
-                    let mut sum_lhs: LC = vec![];
+                    let mut sum_lhs: LC<F> = vec![];
                     for n in 0..len {
                         let y = witness_layout.next_table_data();
                         let m = table_info.multiplicities_witness_off + n;
@@ -1422,7 +1430,7 @@ impl R1CGen {
                             b: vec![
                                 (alpha, one),
                                 (0, -constant(n as u64)),
-                                (beta, field.two_pow(n).to_ark()),
+                                (beta, F::from_element(field.two_pow(n))),
                             ],
                             c: vec![(m, one)],
                         });
@@ -1509,9 +1517,22 @@ impl R1CGen {
     }
 }
 
+/// bn254's raw form of a middle-end element, for the tests' hand-built linear combinations.
+#[cfg(test)]
+trait ToArk {
+    fn to_ark(self) -> RawField;
+}
+
+#[cfg(test)]
+impl ToArk for Field {
+    fn to_ark(self) -> RawField {
+        <RawField as MavrosField>::from_element(self)
+    }
+}
+
 #[cfg(test)]
 mod r1cs_profile_tests {
-    use super::{ArrayData, FieldConfig, R1CGen, Value, hlssa, symbolic_executor};
+    use super::{ArrayData, FieldConfig, R1CGen, ToArk, Value, hlssa, symbolic_executor};
     use std::{cell::RefCell, rc::Rc};
 
     fn witness(generator: &mut R1CGen) -> Value {
@@ -1946,6 +1967,10 @@ mod tests {
     use super::*;
     use symbolic_executor::{Context as _, Value as _};
 
+    // These tests compute over bn254.
+    type Value = super::Value<RawField>;
+    type R1CGen = super::R1CGen<RawField>;
+
     fn field() -> FieldConfig {
         FieldConfig::bn254()
     }
@@ -2199,7 +2224,7 @@ mod tests {
             w[column] = Some(value.to_ark());
         }
         for i in layout.multiplicities_start()..layout.multiplicities_end() {
-            w[i] = Some(RawField::zero());
+            w[i] = Some(<RawField as ark_ff::Zero>::zero());
         }
         for (offset, entry) in hits {
             w[layout.multiplicities_start() + offset + entry] = Some(field().one().to_ark());
@@ -2239,8 +2264,12 @@ mod int_semantics_conformance {
     use mavros_int_semantics::{IntBits, IntOp, Sign, corners, residue};
 
     use super::{
-        BinaryArithOpKind, FieldConfig, R1CGen, Type, Value, field_constant, symbolic_executor,
+        BinaryArithOpKind, FieldConfig, RawField, Type, field_constant, symbolic_executor,
     };
+
+    // These tests compute over bn254.
+    type Value = super::Value<RawField>;
+    type R1CGen = super::R1CGen<RawField>;
 
     /// Every operation, spelled out so a new variant cannot quietly skip the sweep.
     const ALL_ARITH: [BinaryArithOpKind; 17] = [

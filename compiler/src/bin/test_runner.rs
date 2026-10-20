@@ -223,7 +223,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
 
     // 2. R1CS
     emit("START:R1CS");
-    let r1cs = match driver.generate_r1cs() {
+    let r1cs = match driver.generate_r1cs::<RawField>() {
         Ok(r) => {
             let rows = r.constraints.len();
             let cols = r.witness_layout.size();

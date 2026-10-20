@@ -6,14 +6,13 @@ use mavros_compiler::{api, compiler::codegen::CodeGenOptions};
 use rand::{SeedableRng, rngs::StdRng};
 
 /// Independent oracle: multiply each materialized matrix row by w, then by r.
-fn reference(r1cs: &R1CS, r: &[Field], w: &[Field]) -> [Field; 3] {
-    let mut result = [Field::ZERO; 3];
+fn reference<F: mavros_artifacts::MavrosField>(r1cs: &R1CS<F>, r: &[F], w: &[F]) -> [F; 3] {
+    let mut result = [F::ZERO; 3];
     for (row, weight) in r1cs.constraints.iter().zip(r) {
         for (sum, terms) in result.iter_mut().zip([&row.a, &row.b, &row.c]) {
-            let row_value: Field = terms
+            let row_value = terms
                 .iter()
-                .map(|(column, coeff)| *coeff * w[*column])
-                .sum();
+                .fold(F::ZERO, |sum, (column, coeff)| sum + *coeff * w[*column]);
             *sum += *weight * row_value;
         }
     }
@@ -23,6 +22,7 @@ fn reference(r1cs: &R1CS, r: &[Field], w: &[Field]) -> [Field; 3] {
 /// The verifier artifact must never execute witgen-only or AD operations.
 fn assert_forward_bytecode(binary: &[u64]) {
     use mavros_vm::bytecode::{FieldOpCode as Op, FramePosition, OpCode, parse_program_header};
+    let header = parse_program_header(binary);
     let p = FramePosition(0);
     let forbidden: Vec<u64> = [
         Op::PureToWitnessRef { res: p, v: p },
@@ -94,7 +94,7 @@ fn assert_forward_bytecode(binary: &[u64]) {
         },
     ]
     .into_iter()
-    .map(Op::bn254)
+    .map(|op| op.for_field(header.field))
     .chain([OpCode::FreshWitness { res: p }])
     .map(|op| {
         let mut words = vec![];
@@ -102,7 +102,7 @@ fn assert_forward_bytecode(binary: &[u64]) {
         words[0]
     })
     .collect();
-    let mut cursor = parse_program_header(binary).code_start;
+    let mut cursor = header.code_start;
     while cursor < binary.len() {
         if binary[cursor] == u64::MAX {
             cursor += 2;
@@ -114,6 +114,72 @@ fn assert_forward_bytecode(binary: &[u64]) {
         );
         cursor = OpCode::next_opcode(binary, cursor);
     }
+}
+
+#[test]
+fn goldilocks_verifier_matches_materialized_matrices() {
+    use mavros_artifacts::{FieldConfig, Goldilocks};
+    use mavros_compiler::{
+        compiler::ssa::{
+            SourceLocation,
+            hlssa::{
+                BinaryArithOpKind, HLSSA, Type,
+                builder::{HLEmitter as _, HLSSABuilder},
+            },
+        },
+        driver::Driver,
+    };
+    use mavros_int_semantics::IntBits;
+
+    let mut ssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "main".to_string());
+    let entry = ssa.get_unique_entrypoint_id();
+    HLSSABuilder::new(&mut ssa).modify_function(entry, |b| {
+        let entry = b.function.get_entry_id();
+        let mut e = b
+            .block(entry)
+            .with_source_location(SourceLocation::synthetic("main"));
+        let x = e.add_parameter(Type::field());
+        let y = e.add_parameter(Type::int(8));
+        let amount = e.add_parameter(Type::int(8));
+        let square = e.umul(x, x);
+        let nine = e.field_const(9u64);
+        e.assert_eq(square, nine);
+        let shifted = e.bin(BinaryArithOpKind::UShl, y, amount);
+        let nine = e.int_const(IntBits::from_u128(8, 9));
+        e.assert_eq(shifted, nine);
+        e.terminate_return(vec![]);
+    });
+    let scratch = tempfile::tempdir().unwrap();
+    let mut driver = Driver::from_ssa(ssa, scratch.path().to_path_buf(), false);
+    // Arithmetic test only: Goldilocks needs a lower target for the single-challenge LogUp.
+    driver.set_logup_soundness(40);
+    driver.make_struct_access_static().unwrap();
+    driver.monomorphize().unwrap();
+    driver.spill_witness().unwrap();
+    let r1cs = driver.generate_r1cs::<Goldilocks>().unwrap();
+    let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    assert_forward_bytecode(&binary);
+    assert!(r1cs.constraints_layout.tables_data_size > 0);
+    let r: Vec<_> = (0..r1cs.constraints.len())
+        .map(|i| Goldilocks::from(i as u64 + 2))
+        .collect();
+    let w: Vec<_> = (0..r1cs.witness_layout.size())
+        .map(|i| Goldilocks::from(i as u64 + 5))
+        .collect();
+    let result = api::run_verifier_from_binary(
+        &binary,
+        &r,
+        &w,
+        r1cs.witness_layout,
+        r1cs.constraints_layout,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        [result.r_aw, result.r_bw, result.r_cw],
+        reference(&r1cs, &r, &w)
+    );
+    assert_eq!(result.instrumenter.final_memory_usage(), 0);
 }
 
 fn check(source: &str) -> (usize, usize) {
@@ -473,6 +539,7 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
     let project = common::noir_project("fn main() {}");
     let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
     let binary = Program {
+        field: mavros_artifacts::FieldId::Bn254,
         constraint_layouts: None,
         functions: (0..2)
             .map(|i| Function {

@@ -14,24 +14,25 @@
 //! An accepted run means the VM produced a witness that satisfies the R1CS and carries the model's
 //! value. A rejected run means the guard IR refused the operands.
 //!
-//! Each compiled program is also checked against its **AD** entry point on both lanes, since that
-//! answer depends on the circuit, not on the operands. See [`Compiled::assert_the_ad_lane_agrees`].
+//! Each compiled program is also checked against its **AD** entry point on each lane it has, since
+//! that answer depends on the circuit alone. See [`Compiled::assert_the_ad_lane_agrees`].
 //!
 //! [`Compiled::run_wasm`] makes the same judgement with the compiled WASM against the **same**
-//! R1CS, so a disagreement between the lanes is one between two implementations of one program. It
-//! answers [`None`] only when the linker produced no module; a lane that fails to compile fails the
-//! test.
+//! R1CS, so a disagreement between the lanes is one between two implementations of one program.
+//! Only bn254 has a WASM runtime, so only a bn254 program has that lane. It answers [`None`] only
+//! when the linker produced no module; a lane that fails to compile fails the test.
 
 use std::{
+    any::Any,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
 use ark_ff::UniformRand as _;
-use mavros_artifacts::{Field, InputValueOrdered};
+use mavros_artifacts::{Field, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
 use mavros_int_semantics::{IntBits, IntOp, Outcome, residue};
 use num_bigint::BigUint;
-use rand::{SeedableRng as _, rngs::StdRng};
+use rand::{RngCore as _, SeedableRng as _, rngs::StdRng};
 use tempfile::TempDir;
 
 use mavros_compiler::{
@@ -58,19 +59,89 @@ use mavros_compiler::{
 };
 
 // ---------------------------------------------------------------------------
+// Fields
+// ---------------------------------------------------------------------------
+
+/// A field the harness compiles and runs programs over.
+pub trait HarnessField: MavrosField {
+    /// The field's configuration, which a program built for it carries.
+    const CONFIG: FieldConfig;
+
+    /// The LogUp soundness target the harness compiles at, or [`None`] for the driver's default.
+    const LOGUP_SOUNDNESS_BITS: Option<u32>;
+
+    /// A random element, for the coefficients of the AD check.
+    fn random(rng: &mut StdRng) -> Self;
+
+    /// `value` as an element. bn254 reduces it modulo the modulus; Goldilocks refuses a value at or
+    /// above its modulus, since no entry point takes one.
+    fn of_biguint(value: &BigUint) -> Self;
+}
+
+impl HarnessField for Field {
+    const CONFIG: FieldConfig = FieldConfig::bn254();
+    const LOGUP_SOUNDNESS_BITS: Option<u32> = None;
+
+    fn random(rng: &mut StdRng) -> Self {
+        Field::rand(rng)
+    }
+
+    fn of_biguint(value: &BigUint) -> Self {
+        Field::from(value.clone())
+    }
+}
+
+impl HarnessField for Goldilocks {
+    const CONFIG: FieldConfig = FieldConfig::goldilocks();
+
+    // A program with an integer parameter range-checks it, so it has a lookup argument, and the
+    // driver's default target needs more LogUp challenges on a 64-bit field than R1CS generation
+    // implements. 40 bits takes one challenge for any argument of degree up to `2^23`. This
+    // under-provisions the argument by design and is for testing the arithmetic only.
+    const LOGUP_SOUNDNESS_BITS: Option<u32> = Some(40);
+
+    // A uniform 128-bit integer reduced modulo `p < 2^64` is within `2^-64` of uniform.
+    fn random(rng: &mut StdRng) -> Self {
+        Goldilocks::from(u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64()))
+    }
+
+    fn of_biguint(value: &BigUint) -> Self {
+        u64::try_from(value)
+            .ok()
+            .and_then(Goldilocks::from_canonical)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the input {value} is not below the Goldilocks modulus, so no entry point \
+                     takes it"
+                )
+            })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Building programs
 // ---------------------------------------------------------------------------
 
-/// Builds `main(params...) -> returns...` with `body` as its single-block body.
+/// Builds `main(params...) -> returns...` over bn254 with `body` as its single-block body.
 ///
-/// Each parameter becomes a range-checked witness column, so the body runs on the witnessed lane;
-/// constants folded in it take the pure lane.
+/// Each parameter becomes a witness column, range-checked for an integer, so the body runs on the
+/// witnessed lane; constants folded in it take the pure lane.
 pub fn main_program(
     params: &[Type],
     returns: &[Type],
     body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> Vec<ValueId>,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    main_program_in(FieldConfig::bn254(), params, returns, body)
+}
+
+/// [`main_program`] over `field`.
+pub fn main_program_in(
+    field: FieldConfig,
+    params: &[Type],
+    returns: &[Type],
+    body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> Vec<ValueId>,
+) -> HLSSA {
+    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let mut sb = HLSSABuilder::new(&mut ssa);
     sb.modify_function(main_id, |b| {
@@ -89,9 +160,10 @@ pub fn main_program(
     ssa
 }
 
-/// Builds `main(lhs: int(bits), rhs: int(bits)) -> int(bits) { lhs op rhs }`.
-pub fn binary_op_program(kind: BinaryArithOpKind, bits: usize) -> HLSSA {
-    main_program(
+/// Builds `main(lhs: int(bits), rhs: int(bits)) -> int(bits) { lhs op rhs }` over `field`.
+pub fn binary_op_program_in(field: FieldConfig, kind: BinaryArithOpKind, bits: usize) -> HLSSA {
+    main_program_in(
+        field,
         &[Type::int(bits), Type::int(bits)],
         &[Type::int(bits)],
         |e, params| vec![e.bin(kind, params[0], params[1])],
@@ -101,20 +173,32 @@ pub fn binary_op_program(kind: BinaryArithOpKind, bits: usize) -> HLSSA {
 // INPUTS
 // ================================================================================================
 
-/// The field element the entry point expects for one integer input: its unsigned magnitude, however
+/// The bn254 element the entry point expects for one integer input: its unsigned magnitude, however
 /// the operation reads it.
 #[must_use]
 pub fn input_field(value: &IntBits) -> Field {
-    Field::from(BigUint::from(value))
+    input_element(value)
 }
 
-/// The positional input block: the entry point's parameters followed by its declared return
-/// values, in declaration order, each already flattened by [`input_field`].
+/// [`input_field`] in `F`.
+#[must_use]
+pub fn input_element<F: HarnessField>(value: &IntBits) -> F {
+    F::of_biguint(&BigUint::from(value))
+}
+
+/// The positional input block over bn254: the entry point's parameters followed by its declared
+/// return values, in declaration order, each flattened by [`input_field`].
 #[must_use]
 pub fn input_block(values: &[&IntBits]) -> Vec<InputValueOrdered> {
+    input_block_in(values)
+}
+
+/// [`input_block`] in `F`.
+#[must_use]
+pub fn input_block_in<F: HarnessField>(values: &[&IntBits]) -> Vec<InputValueOrdered<F>> {
     values
         .iter()
-        .map(|v| InputValueOrdered::Field(input_field(v)))
+        .map(|v| InputValueOrdered::Field(input_element(v)))
         .collect()
 }
 
@@ -122,10 +206,10 @@ pub fn input_block(values: &[&IntBits]) -> Vec<InputValueOrdered> {
 // ================================================================================================
 
 /// The results of one run of a compiled program.
-pub enum Verdict {
+pub enum Verdict<F: MavrosField = Field> {
     /// Witness generation ran, every constraint holds against the witness it produced, and the
     /// `a`/`b`/`c` evaluations the VM emitted agree with the constraint system.
-    Accepted { witness: Vec<Field> },
+    Accepted { witness: Vec<F> },
 
     /// The VM refused to produce a witness at all — an assertion in the guard IR, a division check,
     /// a range check. This is what the model's `Rejected` predicts.
@@ -141,7 +225,7 @@ pub enum Verdict {
     AbcMismatch,
 }
 
-impl std::fmt::Debug for Verdict {
+impl<F: MavrosField> std::fmt::Debug for Verdict<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Verdict::Accepted { witness } => {
@@ -164,7 +248,7 @@ impl std::fmt::Debug for Verdict {
     }
 }
 
-impl Verdict {
+impl<F: MavrosField> Verdict<F> {
     #[must_use]
     pub fn is_accepted(&self) -> bool {
         matches!(self, Verdict::Accepted { .. })
@@ -192,7 +276,7 @@ impl Verdict {
 
     /// The witness of an accepted run, for a caller that wants to perturb it.
     #[must_use]
-    pub fn witness(&self) -> Option<&[Field]> {
+    pub fn witness(&self) -> Option<&[F]> {
         match self {
             Verdict::Accepted { witness } => Some(witness),
             _ => None,
@@ -203,10 +287,10 @@ impl Verdict {
 /// A hand-built program compiled all the way to executable artifacts.
 ///
 /// The R1CS and the VM binary are positionally coupled, so they are kept together.
-pub struct Compiled {
+pub struct Compiled<F: HarnessField = Field> {
     /// The compiled constraint system: the two layouts witness generation runs against, and the
     /// constraints a witness is judged by.
-    r1cs: R1CS,
+    r1cs: R1CS<F>,
 
     /// The VM bytecode, holding both the witgen and the AD entry point, cloned per run.
     binary: Vec<u64>,
@@ -227,9 +311,11 @@ pub struct Compiled {
     /// [`Self::with_guard`] splices it in, so a caller states only parameters and declared returns.
     guard_slot: Option<usize>,
 
-    /// The same program compiled to WASM, when the linker produced a module.
+    /// The same program compiled to WASM, when the field has a WASM runtime and the linker produced
+    /// a module.
     ///
-    /// [`None`] only when it did not; a compilation that _fails_ panics. See [`compile_wasm`].
+    /// [`None`] for a field without a WASM runtime, or when no module came out; a compilation that
+    /// _fails_ panics. See [`compile_wasm`].
     wasm: Option<WasmArtifact>,
 }
 
@@ -272,112 +358,9 @@ pub const KEEP_DUMPS_ENV: &str = "MAVROS_ORACLE_DUMPS";
 pub const AD_SEED_ENV: &str = "MAVROS_ORACLE_AD_SEED";
 
 impl Compiled {
-    /// Runs the production pipeline over `ssa`, from `make_struct_access_static` to the VM
-    /// binary. The Noir frontend is the only stage skipped, because the program did not come
-    /// from Noir source.
+    /// [`Self::compile`] for a program over bn254, the field with a WASM lane.
     pub fn new(ssa: HLSSA) -> Result<Self, DriverError> {
-        let (debug_output_dir, scratch) = match std::env::var_os(KEEP_DUMPS_ENV) {
-            Some(root) => {
-                static NEXT: std::sync::atomic::AtomicUsize =
-                    std::sync::atomic::AtomicUsize::new(0);
-                let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                (PathBuf::from(root).join(format!("program-{n}")), None)
-            }
-            None => {
-                let dir = TempDir::new().expect("a temporary directory for the pipeline's dumps");
-                (PathBuf::from(dir.path()), Some(dir))
-            }
-        };
-
-        // `wrap_main` lays the entry blob out as the parameters, a one-field return guard when
-        // `main` returns anything, and the declared returns. The guard is set, so the declared
-        // return is checked against the computed one.
-        let entry = ssa.get_unique_entrypoint();
-        let guard_slot = (!entry.get_returns().is_empty()).then(|| {
-            entry
-                .get_param_types()
-                .iter()
-                .map(PrepareEntryPoint::flattened_field_count)
-                .sum::<usize>()
-        });
-
-        let mut driver = Driver::from_ssa(ssa, debug_output_dir.clone(), false);
-        driver.make_struct_access_static()?;
-        driver.monomorphize()?;
-        driver.spill_witness()?;
-
-        let r1cs = driver.generate_r1cs()?;
-        let artifact = driver.compile_bytecode_artifact(CodeGenOptions {
-            // The VM checks constraints as it runs, so a disagreement shows up first as a trap
-            // rather than later as a wrong witness.
-            check_constraints: true,
-            include_debug_info: true,
-        })?;
-
-        let wasm = compile_wasm(&mut driver, &r1cs);
-
-        let compiled = Self {
-            r1cs,
-            binary: artifact.binary,
-            debug_info: artifact.debug_info,
-            debug_output_dir,
-            scratch,
-            wasm,
-            guard_slot,
-        };
-        compiled.assert_the_ad_lane_agrees();
-        Ok(compiled)
-    }
-
-    /// Runs the AD entry point on each lane and holds it to the constraint system, panicking on a
-    /// disagreement, which is a compiler bug.
-    ///
-    /// AD weights each constraint matrix by random coefficients, which depends on the circuit
-    /// alone, so it is checked once per program. The coefficients come from a seed the panic names;
-    /// setting [`AD_SEED_ENV`] to it replays the failure.
-    fn assert_the_ad_lane_agrees(&self) {
-        let seed = match std::env::var(AD_SEED_ENV) {
-            Ok(seed) => seed
-                .parse()
-                .unwrap_or_else(|_| panic!("{AD_SEED_ENV} is not a u64: {seed:?}")),
-            Err(_) => rand::random(),
-        };
-        let mut rng = StdRng::seed_from_u64(seed);
-        let coeffs: Vec<Field> = (0..self.r1cs.constraints.len())
-            .map(|_| Field::rand(&mut rng))
-            .collect();
-        let replay = format!("replay with {AD_SEED_ENV}={seed}");
-
-        let mut binary = self.binary.clone();
-        let (a, b, c, _) =
-            api::run_ad_from_binary(&mut binary, &self.r1cs, &coeffs, self.debug_info.clone())
-                .unwrap_or_else(|error| {
-                    panic!("the AD entry point trapped on the VM: {error}; {replay}")
-                });
-        assert!(
-            api::check_ad(&self.r1cs, &coeffs, &a, &b, &c),
-            "the VM's AD entry point disagrees with the constraint system; {replay}"
-        );
-
-        if let Some(wasm) = &self.wasm {
-            let loaded = wasm.loaded().unwrap_or_else(|error| {
-                panic!("the WASM engine refused the module: {error}; {replay}")
-            });
-            let result =
-                wasm_host::run_ad_loaded(loaded, &self.r1cs, &coeffs).unwrap_or_else(|error| {
-                    panic!("the AD entry point trapped on WASM: {error}; {replay}")
-                });
-            assert!(
-                api::check_ad(
-                    &self.r1cs,
-                    &coeffs,
-                    &result.out_da,
-                    &result.out_db,
-                    &result.out_dc
-                ),
-                "the WASM AD entry point disagrees with the constraint system; {replay}"
-            );
-        }
+        Self::compile(ssa)
     }
 
     /// Whether the WASM lane was built for this program.
@@ -432,6 +415,121 @@ impl Compiled {
         }
         Some(Verdict::Accepted { witness })
     }
+}
+
+impl<F: HarnessField> Compiled<F> {
+    /// Runs the production pipeline over `ssa`, from `make_struct_access_static` to the VM
+    /// binary. The Noir frontend is the only stage skipped, because the program did not come
+    /// from Noir source.
+    ///
+    /// `ssa` must be a program over `F`. Only bn254 has a WASM runtime, so only a bn254 program
+    /// gets a WASM lane.
+    pub fn compile(ssa: HLSSA) -> Result<Self, DriverError> {
+        let (debug_output_dir, scratch) = match std::env::var_os(KEEP_DUMPS_ENV) {
+            Some(root) => {
+                static NEXT: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (PathBuf::from(root).join(format!("program-{n}")), None)
+            }
+            None => {
+                let dir = TempDir::new().expect("a temporary directory for the pipeline's dumps");
+                (PathBuf::from(dir.path()), Some(dir))
+            }
+        };
+
+        // `wrap_main` lays the entry blob out as the parameters, a one-field return guard when
+        // `main` returns anything, and the declared returns. The guard is set, so the declared
+        // return is checked against the computed one.
+        let entry = ssa.get_unique_entrypoint();
+        let guard_slot = (!entry.get_returns().is_empty()).then(|| {
+            entry
+                .get_param_types()
+                .iter()
+                .map(PrepareEntryPoint::flattened_field_count)
+                .sum::<usize>()
+        });
+
+        let mut driver = Driver::from_ssa(ssa, debug_output_dir.clone(), false);
+        if let Some(bits) = F::LOGUP_SOUNDNESS_BITS {
+            driver.set_logup_soundness(bits);
+        }
+        driver.make_struct_access_static()?;
+        driver.monomorphize()?;
+        driver.spill_witness()?;
+
+        let r1cs = driver.generate_r1cs::<F>()?;
+        let artifact = driver.compile_bytecode_artifact(CodeGenOptions {
+            // The VM checks constraints as it runs, so a disagreement shows up first as a trap
+            // rather than later as a wrong witness.
+            check_constraints: true,
+            include_debug_info: true,
+        })?;
+
+        let wasm = (&r1cs as &dyn Any)
+            .downcast_ref::<R1CS>()
+            .and_then(|r1cs| compile_wasm(&mut driver, r1cs));
+
+        let compiled = Self {
+            r1cs,
+            binary: artifact.binary,
+            debug_info: artifact.debug_info,
+            debug_output_dir,
+            scratch,
+            wasm,
+            guard_slot,
+        };
+        compiled.assert_the_ad_lane_agrees();
+        Ok(compiled)
+    }
+
+    /// Runs the AD entry point on each lane and holds it to the constraint system, panicking on a
+    /// disagreement, which is a compiler bug.
+    ///
+    /// AD weights each constraint matrix by random coefficients, which depends on the circuit
+    /// alone, so it is checked once per program. The coefficients come from a seed the panic names;
+    /// setting [`AD_SEED_ENV`] to it replays the failure.
+    fn assert_the_ad_lane_agrees(&self) {
+        let seed = match std::env::var(AD_SEED_ENV) {
+            Ok(seed) => seed
+                .parse()
+                .unwrap_or_else(|_| panic!("{AD_SEED_ENV} is not a u64: {seed:?}")),
+            Err(_) => rand::random(),
+        };
+        let mut rng = StdRng::seed_from_u64(seed);
+        let coeffs: Vec<F> = (0..self.r1cs.constraints.len())
+            .map(|_| F::random(&mut rng))
+            .collect();
+        let replay = format!("replay with {AD_SEED_ENV}={seed}");
+
+        let mut binary = self.binary.clone();
+        let (a, b, c, _) =
+            api::run_ad_from_binary(&mut binary, &self.r1cs, &coeffs, self.debug_info.clone())
+                .unwrap_or_else(|error| {
+                    panic!("the AD entry point trapped on the VM: {error}; {replay}")
+                });
+        assert!(
+            api::check_ad(&self.r1cs, &coeffs, &a, &b, &c),
+            "the VM's AD entry point disagrees with the constraint system; {replay}"
+        );
+
+        if let Some(wasm) = &self.wasm {
+            let (r1cs, coeffs) = (&self.r1cs as &dyn Any)
+                .downcast_ref::<R1CS>()
+                .zip((&coeffs as &dyn Any).downcast_ref::<Vec<Field>>())
+                .expect("only a bn254 program has a WASM lane");
+            let loaded = wasm.loaded().unwrap_or_else(|error| {
+                panic!("the WASM engine refused the module: {error}; {replay}")
+            });
+            let result = wasm_host::run_ad_loaded(loaded, r1cs, coeffs).unwrap_or_else(|error| {
+                panic!("the AD entry point trapped on WASM: {error}; {replay}")
+            });
+            assert!(
+                api::check_ad(r1cs, coeffs, &result.out_da, &result.out_db, &result.out_dc),
+                "the WASM AD entry point disagrees with the constraint system; {replay}"
+            );
+        }
+    }
 
     /// Where the pipeline wrote its per-stage SSA dumps, if they will outlive this value.
     ///
@@ -468,19 +566,19 @@ impl Compiled {
     ///
     /// The guard is a slot of the wrapper, not a value of the program, so a test gives only the
     /// parameters and the declared return, and this assembles the blob.
-    fn with_guard(&self, inputs: &[InputValueOrdered]) -> Vec<InputValueOrdered> {
+    fn with_guard(&self, inputs: &[InputValueOrdered<F>]) -> Vec<InputValueOrdered<F>> {
         let Some(slot) = self.guard_slot else {
             return inputs.to_vec();
         };
         let mut blob = inputs.to_vec();
-        blob.insert(slot, InputValueOrdered::Field(Field::from(1u64)));
+        blob.insert(slot, InputValueOrdered::Field(F::ONE));
         blob
     }
 
     /// Generates a witness for `inputs` by running the VM, and judges it.
     ///
     /// The counterpart of [`Self::run_wasm`], against the same R1CS.
-    pub fn run(&self, inputs: &[InputValueOrdered]) -> Verdict {
+    pub fn run(&self, inputs: &[InputValueOrdered<F>]) -> Verdict<F> {
         let inputs = self.with_guard(inputs);
         let inputs = inputs.as_slice();
         let mut binary = self.binary.clone();
@@ -522,7 +620,7 @@ impl Compiled {
     ///
     /// Delegates to [`R1CS::unsatisfied_constraint`].
     #[must_use]
-    pub fn first_unsatisfied_constraint(&self, witness: &[Field]) -> Option<usize> {
+    pub fn first_unsatisfied_constraint(&self, witness: &[F]) -> Option<usize> {
         self.r1cs.unsatisfied_constraint(witness)
     }
 }
@@ -531,7 +629,7 @@ impl Compiled {
 // ================================================================================================
 
 /// One compiled binary-operation program, held across operand pairs.
-pub struct BinaryOpOracle {
+pub struct BinaryOpOracle<F: HarnessField = Field> {
     /// The SSA operation the program computes.
     kind: BinaryArithOpKind,
 
@@ -544,27 +642,38 @@ pub struct BinaryOpOracle {
     bits: usize,
 
     /// The program itself, compiled once here and run once per operand pair.
-    compiled: Compiled,
+    compiled: Compiled<F>,
 }
 
 impl BinaryOpOracle {
-    /// Compiles `main(lhs, rhs) -> result { lhs op rhs }` at the given width.
+    /// [`Self::compile`] over bn254.
     ///
     /// # Errors
     ///
     /// Propagates a pipeline refusal. A pipeline _panic_ is not caught.
     pub fn new(kind: BinaryArithOpKind, bits: usize) -> Result<Self, DriverError> {
+        Self::compile(kind, bits)
+    }
+}
+
+impl<F: HarnessField> BinaryOpOracle<F> {
+    /// Compiles `main(lhs, rhs) -> result { lhs op rhs }` over `F` at the given width.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a pipeline refusal. A pipeline _panic_ is not caught.
+    pub fn compile(kind: BinaryArithOpKind, bits: usize) -> Result<Self, DriverError> {
         Ok(Self {
             kind,
             op: IntOp::from(kind),
             bits,
-            compiled: Compiled::new(binary_op_program(kind, bits))?,
+            compiled: Compiled::compile(binary_op_program_in(F::CONFIG, kind, bits))?,
         })
     }
 
     /// The compiled artifacts, for a caller that wants to inspect or mutate a witness.
     #[must_use]
-    pub fn compiled(&self) -> &Compiled {
+    pub fn compiled(&self) -> &Compiled<F> {
         &self.compiled
     }
 
@@ -592,7 +701,7 @@ impl BinaryOpOracle {
         let expectation = eval_expectation(self.op, lhs, rhs);
         let verdict = self
             .compiled
-            .run(&input_block(&[lhs, rhs, &expectation.declared_return]));
+            .run(&input_block_in(&[lhs, rhs, &expectation.declared_return]));
 
         if expectation.accepted {
             if verdict.is_accepted() {
@@ -651,7 +760,7 @@ impl BinaryOpOracle {
         // Flipping the low bit keeps the value in range, so only the return check can refuse it.
         let wrong = expected.xor(&IntBits::from_u128(expected.bits(), 1));
 
-        let verdict = self.compiled.run(&input_block(&[lhs, rhs, &wrong]));
+        let verdict = self.compiled.run(&input_block_in(&[lhs, rhs, &wrong]));
         match verdict {
             Verdict::Trapped {
                 in_return_check: true,

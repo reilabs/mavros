@@ -82,10 +82,10 @@ applications must associate the verifier artifact with their trusted circuit con
 execution uses a dedicated forward bytecode entry point: witness writes read the next value from
 `w`, linear combinations use field arithmetic, and constraints accumulate three scalars weighted by
 `r`. It allocates no AD expression nodes or matrix output vectors. Lookup and table constraints are
-evaluated from the same layouts. Bytecode format version 2 binds constraint layouts to each compiled
-artifact; recompile older artifacts before using the current VM. AD and verifier execution reject
-mismatched layouts. LLVM and WASM artifacts still expose the existing witgen and AD entry points;
-the forward verifier is currently available through the VM API and CLI.
+evaluated from the same layouts. Bytecode format version 3 binds the field and constraint layouts to
+each compiled artifact; recompile older artifacts before using the current VM. AD and verifier
+execution reject mismatched layouts. LLVM and WASM artifacts still expose the existing witgen and AD
+entry points; the forward verifier is currently available through the VM API and CLI.
 
 ### Per-Function FlameGraphs
 

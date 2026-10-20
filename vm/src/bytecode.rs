@@ -5,6 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use std::{any::TypeId, collections::BTreeMap, fmt::Display, ptr};
 
+use mavros_artifacts::FieldId;
+
 use crate::{
     ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, TableKind, WitnessLayout,
     array::{BoxedLayout, BoxedValue, DataType},
@@ -1558,7 +1560,7 @@ unsafe fn ad_kv_lookup_emit<F: mavros_artifacts::MavrosField>(
 ///
 ///   The spread opcodes are the exception: their `bits` is the number of bits read, which can be
 ///   fewer than the container holds, and the operand's width is a separate immediate or the cell.
-#[interpreter(fields(bn254 = Field, #[cfg(test)] test64 = crate::test_field::TestField))]
+#[interpreter(fields(bn254 = Field, goldilocks = mavros_artifacts::Goldilocks))]
 mod def {
     #[raw_opcode]
     fn jmp(pc: *const u64, frame: Frame, vm: &mut VM, target: JumpTarget) -> (*const u64, Frame) {
@@ -3901,6 +3903,8 @@ pub struct Program {
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], [`ENTRY_VERIFIER`]). Absent entries use
     /// [`NO_ENTRY_POINT`].
     pub entry_points: Vec<usize>,
+    /// The field the program computes over, which every field opcode in it belongs to.
+    pub field: FieldId,
     /// Flattened field count of the witgen entry blob
     pub entry_blob_field_count: usize,
     pub global_frame_size: usize,
@@ -3938,7 +3942,8 @@ pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 /// The program binary's format version, its second word. Changing existing production opcode
 /// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
 /// Appending opcodes without changing existing production encodings does not require a bump.
-pub const PROGRAM_FORMAT_VERSION: u64 = 2;
+/// The third word names the program's field ([`FieldId::code`]).
+pub const PROGRAM_FORMAT_VERSION: u64 = 3;
 
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
@@ -3961,7 +3966,7 @@ impl Program {
     }
 
     fn to_binary_impl(&self, include_debug_info: bool) -> (Vec<u64>, Option<DebugInfo>) {
-        let mut binary = vec![PROGRAM_MAGIC, PROGRAM_FORMAT_VERSION];
+        let mut binary = vec![PROGRAM_MAGIC, PROGRAM_FORMAT_VERSION, self.field.code()];
         binary.push(u64::from(self.constraint_layouts.is_some()));
         if let Some(layouts) = self.constraint_layouts {
             binary.extend_from_slice(&layouts.0);
@@ -4057,6 +4062,8 @@ impl Program {
 
 /// The decoded header of a program binary.
 pub struct ProgramHeader {
+    /// The field the program computes over.
+    pub field: FieldId,
     /// Layouts emitted by the compiler, checked before constraint execution.
     pub constraint_layouts: Option<ConstraintLayouts>,
     /// Interned constant pool (flat words), read at runtime by `mov_const_pool`.
@@ -4072,14 +4079,14 @@ pub struct ProgramHeader {
     pub code_start: usize,
 }
 
-/// Decode a program binary's layouts, constant pool, global frame size, entry blob field count
-/// and entry-point table.
+/// Decode a program binary's field, layouts, constant pool, global frame size, entry blob
+/// field count and entry-point table.
 ///
 /// # Panics
 ///
 /// If the binary does not open with [`PROGRAM_MAGIC`] followed by [`PROGRAM_FORMAT_VERSION`]: a
 /// binary of any other format numbers its opcodes differently, so they would select the wrong
-/// handlers.
+/// handlers. If its field word names no supported field.
 pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     assert!(
         program.first() == Some(&PROGRAM_MAGIC),
@@ -4090,11 +4097,17 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
         version == Some(PROGRAM_FORMAT_VERSION),
         "unsupported VM program format version {version:?}; expected {PROGRAM_FORMAT_VERSION}"
     );
-    let (constraint_layouts, off) = match program[2] {
-        0 => (None, 3),
+    let field = FieldId::from_code(program[2]).unwrap_or_else(|| {
+        panic!(
+            "the VM program names no supported field (word {})",
+            program[2]
+        )
+    });
+    let (constraint_layouts, off) = match program[3] {
+        0 => (None, 4),
         1 => (
-            Some(ConstraintLayouts(program[3..13].try_into().unwrap())),
-            13,
+            Some(ConstraintLayouts(program[4..14].try_into().unwrap())),
+            14,
         ),
         _ => panic!("invalid constraint layout tag"),
     };
@@ -4109,6 +4122,7 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
         .collect();
     let code_start = off + 3 + num_entries;
     ProgramHeader {
+        field,
         constraint_layouts,
         constant_pool,
         global_frame_size,
@@ -4161,8 +4175,9 @@ mod tests {
         )
     }
 
-    /// The number of the first test-field copy, `test64_r1c`; `opcode_numbers_are_pinned` checks it.
-    const FIRST_TEST_FIELD_OPCODE: usize = 131;
+    /// The number of the first Goldilocks copy, `goldilocks_r1c`, which `opcode_numbers_are_pinned`
+    /// checks.
+    const FIRST_GOLDILOCKS_OPCODE: usize = 131;
 
     /// A witgen VM over `F` without tapes.
     fn empty_witgen_vm<F: mavros_artifacts::MavrosField>() -> VM {
@@ -4223,6 +4238,7 @@ mod tests {
         ];
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
@@ -4343,6 +4359,7 @@ mod tests {
         ];
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
@@ -4423,6 +4440,7 @@ mod tests {
     #[should_panic(expected = "overlap")]
     fn a_scalar_result_inside_a_wide_operand_is_caught() {
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
@@ -4477,6 +4495,7 @@ mod tests {
             OpCode::Trap {},
         ];
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
@@ -4689,6 +4708,7 @@ mod tests {
                     code.push(OpCode::Trap {});
 
                     let program = Program {
+                        field: FieldId::Bn254,
                         constraint_layouts: None,
                         functions: vec![Function {
                             name: "main".to_string(),
@@ -4765,6 +4785,7 @@ mod tests {
         let (a, b, sum) = (2usize, 4, 6);
 
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
@@ -4827,6 +4848,7 @@ mod tests {
     fn a_result_sharing_cells_with_an_operand_is_caught() {
         const BITS: u64 = 192;
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
@@ -5019,13 +5041,13 @@ mod tests {
                 b: P(2),
                 c: P(2),
             },
-            OpCode::Test64R1C {
+            OpCode::GoldilocksR1C {
                 a: P(2),
                 b: P(2),
                 c: P(2),
             },
             OpCode::Bn254WriteWitness { val: P(2) },
-            OpCode::Test64WriteWitness { val: P(2) },
+            OpCode::GoldilocksWriteWitness { val: P(2) },
             OpCode::ArrayGet {
                 res: P(10),
                 array: P(20),
@@ -5054,8 +5076,8 @@ mod tests {
                 b: P(6),
             },
             OpCode::Bn254AssertEqField { a: P(2), b: P(2) },
-            OpCode::Test64AssertEqField { a: P(2), b: P(2) },
-            OpCode::Test64Rangecheck {
+            OpCode::GoldilocksAssertEqField { a: P(2), b: P(2) },
+            OpCode::GoldilocksRangecheck {
                 val: P(2),
                 max_bits: 8,
             },
@@ -5069,7 +5091,7 @@ mod tests {
                 flag: P(2),
                 bits: 1,
             },
-            OpCode::Test64SpreadLookupField {
+            OpCode::GoldilocksSpreadLookupField {
                 val: P(2),
                 result: P(2),
                 flag: P(2),
@@ -5081,7 +5103,7 @@ mod tests {
                 flag: P(2),
                 size: 1,
             },
-            OpCode::Test64Pow2LookupField {
+            OpCode::GoldilocksPow2LookupField {
                 amount: P(2),
                 factor: P(2),
                 flag: P(2),
@@ -5092,7 +5114,7 @@ mod tests {
                 flag: P(2),
                 bits: 1,
             },
-            OpCode::Test64RngchkField {
+            OpCode::GoldilocksRngchkField {
                 val: P(2),
                 flag: P(2),
                 bits: 1,
@@ -5105,7 +5127,7 @@ mod tests {
                 stride: 4,
                 elem_kind: ELEM_FIELD,
             },
-            OpCode::Test64ArrayLookupField {
+            OpCode::GoldilocksArrayLookupField {
                 array: P(20),
                 index: P(2),
                 result: P(2),
@@ -5118,8 +5140,8 @@ mod tests {
             // each field's copies run on tapes of that field.
             let mut bn254_tapes = vec![Field::ZERO; 8 * 16];
             let mut test_tapes =
-                vec![<crate::test_field::TestField as mavros_artifacts::MavrosField>::ZERO; 8 * 16];
-            let mut vm = if opcode.to_string().starts_with("test64_") {
+                vec![<mavros_artifacts::Goldilocks as mavros_artifacts::MavrosField>::ZERO; 8 * 16];
+            let mut vm = if opcode.to_string().starts_with("goldilocks_") {
                 witgen_vm_on(&mut test_tapes)
             } else {
                 witgen_vm_on(&mut bn254_tapes)
@@ -5180,12 +5202,12 @@ mod tests {
     /// opcode standing as its first field's copy, then each further field's copies), so
     /// inserting, removing or reordering an opcode renumbers every later one and breaks every
     /// compiled program. Byte sizes cannot see that, so this table pins the numbers, and a change
-    /// to existing production numbers must bump [`PROGRAM_FORMAT_VERSION`]. Appending production
-    /// opcodes only shifts the test field's copies, which are never persisted in artifacts.
+    /// to existing production numbers must bump [`PROGRAM_FORMAT_VERSION`]. Appending a declared
+    /// opcode also shifts Goldilocks' copies, which are persisted in artifacts.
     #[test]
     fn opcode_numbers_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 2,
+            PROGRAM_FORMAT_VERSION, 3,
             "the format version these numbers belong to"
         );
         let pinned: &[(usize, &str)] = &[
@@ -5320,51 +5342,51 @@ mod tests {
             (128, "bn254_verifier_spread_lookup_field"),
             (129, "bn254_verifier_pow2_lookup_field"),
             (130, "bn254_verifier_array_lookup_field"),
-            // The test field's copies: appended after every declared opcode, so they move whenever
+            // Goldilocks' copies: appended after every declared opcode, so they move whenever
             // an opcode is declared.
-            (131, "test64_r1c"),
-            (132, "test64_write_witness"),
-            (133, "test64_eq_field"),
-            (134, "test64_lt_field"),
-            (135, "test64_add_field"),
-            (136, "test64_sub_field"),
-            (137, "test64_div_field"),
-            (138, "test64_mul_field"),
-            (139, "test64_cast_field_to_int"),
-            (140, "test64_cast_field_to_int128"),
-            (141, "test64_cast_int_to_field"),
-            (142, "test64_cast_int128_to_field"),
-            (143, "test64_cast_field_to_intn"),
-            (144, "test64_cast_intn_to_field"),
-            (145, "test64_bump_da"),
-            (146, "test64_bump_db"),
-            (147, "test64_bump_dc"),
-            (148, "test64_next_d_coeff"),
-            (149, "test64_pure_to_witness_ref"),
-            (150, "test64_mul_const"),
-            (151, "test64_add_boxed"),
-            (152, "test64_assert_eq_field"),
-            (153, "test64_rangecheck"),
-            (154, "test64_to_bytes_be"),
-            (155, "test64_to_bytes_le"),
-            (156, "test64_to_bits_le"),
-            (157, "test64_to_bits_be"),
-            (158, "test64_spread_lookup_field"),
-            (159, "test64_dspread_lookup_field"),
-            (160, "test64_pow2_lookup_field"),
-            (161, "test64_dpow2_lookup_field"),
-            (162, "test64_rngchk_field"),
-            (163, "test64_array_lookup_field"),
-            (164, "test64_drngchk_field"),
-            (165, "test64_darray_lookup_field"),
-            (166, "test64_verifier_read_witness"),
-            (167, "test64_verifier_constant"),
-            (168, "test64_verifier_next_coeff"),
-            (169, "test64_verifier_accumulate"),
-            (170, "test64_verifier_rngchk_field"),
-            (171, "test64_verifier_spread_lookup_field"),
-            (172, "test64_verifier_pow2_lookup_field"),
-            (173, "test64_verifier_array_lookup_field"),
+            (131, "goldilocks_r1c"),
+            (132, "goldilocks_write_witness"),
+            (133, "goldilocks_eq_field"),
+            (134, "goldilocks_lt_field"),
+            (135, "goldilocks_add_field"),
+            (136, "goldilocks_sub_field"),
+            (137, "goldilocks_div_field"),
+            (138, "goldilocks_mul_field"),
+            (139, "goldilocks_cast_field_to_int"),
+            (140, "goldilocks_cast_field_to_int128"),
+            (141, "goldilocks_cast_int_to_field"),
+            (142, "goldilocks_cast_int128_to_field"),
+            (143, "goldilocks_cast_field_to_intn"),
+            (144, "goldilocks_cast_intn_to_field"),
+            (145, "goldilocks_bump_da"),
+            (146, "goldilocks_bump_db"),
+            (147, "goldilocks_bump_dc"),
+            (148, "goldilocks_next_d_coeff"),
+            (149, "goldilocks_pure_to_witness_ref"),
+            (150, "goldilocks_mul_const"),
+            (151, "goldilocks_add_boxed"),
+            (152, "goldilocks_assert_eq_field"),
+            (153, "goldilocks_rangecheck"),
+            (154, "goldilocks_to_bytes_be"),
+            (155, "goldilocks_to_bytes_le"),
+            (156, "goldilocks_to_bits_le"),
+            (157, "goldilocks_to_bits_be"),
+            (158, "goldilocks_spread_lookup_field"),
+            (159, "goldilocks_dspread_lookup_field"),
+            (160, "goldilocks_pow2_lookup_field"),
+            (161, "goldilocks_dpow2_lookup_field"),
+            (162, "goldilocks_rngchk_field"),
+            (163, "goldilocks_array_lookup_field"),
+            (164, "goldilocks_drngchk_field"),
+            (165, "goldilocks_darray_lookup_field"),
+            (166, "goldilocks_verifier_read_witness"),
+            (167, "goldilocks_verifier_constant"),
+            (168, "goldilocks_verifier_next_coeff"),
+            (169, "goldilocks_verifier_accumulate"),
+            (170, "goldilocks_verifier_rngchk_field"),
+            (171, "goldilocks_verifier_spread_lookup_field"),
+            (172, "goldilocks_verifier_pow2_lookup_field"),
+            (173, "goldilocks_verifier_array_lookup_field"),
         ];
         let actual: Vec<(usize, &str)> = OPCODE_NAMES.iter().copied().enumerate().collect();
         let mismatches: Vec<_> = actual.iter().zip(pinned).filter(|(a, p)| a != p).collect();
@@ -5373,23 +5395,27 @@ mod tests {
             "renumbered opcodes (actual, pinned): {mismatches:?}"
         );
         assert_eq!(actual.len(), pinned.len(), "opcode count changed");
-        assert_eq!(pinned[FIRST_TEST_FIELD_OPCODE], (131, "test64_r1c"));
-        assert!(!pinned[FIRST_TEST_FIELD_OPCODE - 1].1.starts_with("test64_"));
+        assert_eq!(pinned[FIRST_GOLDILOCKS_OPCODE], (131, "goldilocks_r1c"));
+        assert!(
+            !pinned[FIRST_GOLDILOCKS_OPCODE - 1]
+                .1
+                .starts_with("goldilocks_")
+        );
     }
 
-    /// The test field's frame-only arithmetic, comparison and cast copies, through real dispatch.
+    /// Goldilocks' frame-only arithmetic, comparison and cast copies, through real dispatch.
     ///
     /// Its elements are one cell wide, so operands sit in adjacent cells, where bn254's four-cell
     /// elements would overlap. Every other cell holds a sentinel and the whole frame is compared
     /// afterwards, so a copy that wrote bn254's width, or wrote an operand, fails.
     #[test]
-    fn test_field_opcodes_run_at_one_cell_per_element() {
-        use crate::test_field::TestField;
+    fn goldilocks_opcodes_run_at_one_cell_per_element() {
+        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
         const SENTINEL: u64 = 0xa5a5_a5a5_a5a5_a5a5;
-        let top = TestField::MODULUS - 1;
-        let field = |value: u64| TestField::from(value).storage_cell0();
+        let top = mavros_artifacts::field::goldilocks::MODULUS - 1;
+        let field = |value: u64| Goldilocks::from(value).storage_cell0();
         // `2^32` is stored as `p - 1`, above `top`'s cell, so this pair's cells order the opposite
         // way to its integers and the `lt` cases tell a canonical comparison from a cell one.
         let low = 1u64 << 32;
@@ -5399,85 +5425,85 @@ mod tests {
         // Each opcode, its `a` and `b` cells, where its result starts, and the result's cells.
         let cases: Vec<(OpCode, [u64; 2], usize, Vec<u64>)> = vec![
             (
-                OpCode::Test64AddField { res, a, b },
+                OpCode::GoldilocksAddField { res, a, b },
                 [field(top), field(2)],
                 4,
                 vec![field(1)],
             ),
             (
-                OpCode::Test64SubField { res, a, b },
+                OpCode::GoldilocksSubField { res, a, b },
                 [field(1), field(2)],
                 4,
                 vec![field(top)],
             ),
             (
-                OpCode::Test64MulField { res, a, b },
+                OpCode::GoldilocksMulField { res, a, b },
                 [field(top), field(top)],
                 4,
                 vec![field(1)],
             ),
             (
-                OpCode::Test64DivField { res, a, b },
+                OpCode::GoldilocksDivField { res, a, b },
                 [field(6), field(3)],
                 4,
                 vec![field(2)],
             ),
             (
-                OpCode::Test64DivField { res, a, b },
+                OpCode::GoldilocksDivField { res, a, b },
                 [field(5), field(0)],
                 4,
                 vec![field(0)],
             ),
             (
-                OpCode::Test64EqField { res, a, b },
+                OpCode::GoldilocksEqField { res, a, b },
                 [field(3), field(3)],
                 4,
                 vec![1],
             ),
             (
-                OpCode::Test64EqField { res, a, b },
+                OpCode::GoldilocksEqField { res, a, b },
                 [field(3), field(4)],
                 4,
                 vec![0],
             ),
             (
-                OpCode::Test64LtField { res, a, b },
+                OpCode::GoldilocksLtField { res, a, b },
                 [field(low), field(top)],
                 4,
                 vec![1],
             ),
             (
-                OpCode::Test64LtField { res, a, b },
+                OpCode::GoldilocksLtField { res, a, b },
                 [field(top), field(low)],
                 4,
                 vec![0],
             ),
             (
-                OpCode::Test64CastFieldToInt { res, a },
+                OpCode::GoldilocksCastFieldToInt { res, a },
                 [field(top), 0],
                 4,
                 vec![top],
             ),
             (
-                OpCode::Test64CastFieldToInt128 { res, a },
+                OpCode::GoldilocksCastFieldToInt128 { res, a },
                 [field(top), 0],
                 4,
                 vec![top, 0],
             ),
             (
-                OpCode::Test64CastIntToField { res, a },
+                OpCode::GoldilocksCastIntToField { res, a },
                 [u64::MAX, 0],
                 4,
                 vec![field((1 << 32) - 2)],
             ),
             (
-                OpCode::Test64CastInt128ToField { res, a },
+                OpCode::GoldilocksCastInt128ToField { res, a },
                 [0, 1],
                 4,
                 vec![field((1 << 32) - 1)],
             ),
             (
-                OpCode::Test64CastFieldToIntn {
+                OpCode::GoldilocksCastFieldToIntn {
                     bits: 128,
                     res: at(wide),
                     a,
@@ -5487,7 +5513,7 @@ mod tests {
                 vec![top, 0],
             ),
             (
-                OpCode::Test64CastIntnToField { bits: 64, res, a },
+                OpCode::GoldilocksCastIntnToField { bits: 64, res, a },
                 [5, 0],
                 4,
                 vec![field(5)],
@@ -5496,7 +5522,7 @@ mod tests {
         for (opcode, inputs, res_at, result) in cases {
             let mut image = [SENTINEL; 8];
             image[2..4].copy_from_slice(&inputs);
-            let mut vm = empty_witgen_vm::<TestField>();
+            let mut vm = empty_witgen_vm::<Goldilocks>();
             let frame = Frame::base_frame(8, &mut vm);
             unsafe { ptr::copy_nonoverlapping(image.as_ptr(), frame.data, 8) };
             image[res_at..res_at + result.len()].copy_from_slice(&result);
@@ -5505,8 +5531,8 @@ mod tests {
             opcode.to_binary(&mut binary, &mut Vec::new());
             let id = binary[0] as usize;
             assert!(
-                id >= FIRST_TEST_FIELD_OPCODE,
-                "{opcode} is a test-field copy, numbered after the declared opcodes"
+                id >= FIRST_GOLDILOCKS_OPCODE,
+                "{opcode} is a Goldilocks copy, numbered after the declared opcodes"
             );
             let end = OpCode::next_opcode(&binary, 0);
             assert_eq!(end, binary.len(), "{opcode}");
@@ -5518,15 +5544,15 @@ mod tests {
         }
     }
 
-    /// The test field's assertion and decomposition copies. The decompositions and range checks run
+    /// Goldilocks' assertion and decomposition copies. The decompositions and range checks run
     /// on `2^32`, stored as `p - 1`, and on the element stored as the cell `1`, whose integer is
     /// `R^-1 mod p`: a copy reading the storage cell gets each of those cases wrong.
     #[test]
-    fn test_field_assertions_and_decompositions_read_the_integer() {
-        use crate::test_field::TestField;
+    fn goldilocks_assertions_and_decompositions_read_the_integer() {
+        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
-        let cell = |value: u64| TestField::from(value).storage_cell0();
+        let cell = |value: u64| Goldilocks::from(value).storage_cell0();
         let low = 1u64 << 32;
         let (a, b, c, res) = (
             FramePosition(2),
@@ -5537,7 +5563,7 @@ mod tests {
         // Runs `opcode` with `cells` from position 2, and returns whether it trapped and the
         // `count` cells of the array it left at `res`, if any.
         let run = |opcode: OpCode, cells: &[u64], count: usize| -> (bool, Vec<u64>) {
-            let mut vm = empty_witgen_vm::<TestField>();
+            let mut vm = empty_witgen_vm::<Goldilocks>();
             let frame = Frame::base_frame(10, &mut vm);
             unsafe { ptr::write_bytes(frame.data, 0, 10) };
             for (index, value) in cells.iter().enumerate() {
@@ -5546,8 +5572,8 @@ mod tests {
             let mut binary = Vec::new();
             opcode.to_binary(&mut binary, &mut Vec::new());
             assert!(
-                binary[0] as usize >= FIRST_TEST_FIELD_OPCODE,
-                "{opcode} is a test-field copy"
+                binary[0] as usize >= FIRST_GOLDILOCKS_OPCODE,
+                "{opcode} is a Goldilocks copy"
             );
             let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
             let trapped = next_pc.is_null();
@@ -5565,7 +5591,7 @@ mod tests {
 
         assert!(
             !run(
-                OpCode::Test64AssertEqField { a, b },
+                OpCode::GoldilocksAssertEqField { a, b },
                 &[cell(low), cell(low)],
                 0
             )
@@ -5573,28 +5599,35 @@ mod tests {
         );
         assert!(
             run(
-                OpCode::Test64AssertEqField { a, b },
+                OpCode::GoldilocksAssertEqField { a, b },
                 &[cell(low), cell(1)],
                 0
             )
             .0
         );
-        let check = |max_bits| OpCode::Test64Rangecheck { val: a, max_bits };
+        let check = |max_bits| OpCode::GoldilocksRangecheck { val: a, max_bits };
         assert!(!run(check(33), &[cell(low)], 0).0);
         assert!(run(check(32), &[cell(low)], 0).0);
-        assert!(!run(check(64), &[cell(TestField::MODULUS - 1)], 0).0);
+        assert!(
+            !run(
+                check(64),
+                &[cell(mavros_artifacts::field::goldilocks::MODULUS - 1)],
+                0
+            )
+            .0
+        );
         assert!(run(check(8), &[1], 0).0);
 
         let mut bits = vec![0; 40];
         bits[32] = 1;
-        let to_bits = OpCode::Test64ToBitsLe {
+        let to_bits = OpCode::GoldilocksToBitsLe {
             res,
             val: a,
             count: 40,
         };
         assert_eq!(run(to_bits, &[cell(low)], 40), (false, bits.clone()));
         bits.reverse();
-        let to_bits = OpCode::Test64ToBitsBe {
+        let to_bits = OpCode::GoldilocksToBitsBe {
             res,
             val: a,
             count: 40,
@@ -5603,14 +5636,14 @@ mod tests {
         // Bytes past the field's one limb read as zero.
         let mut bytes = vec![0; 10];
         bytes[4] = 1;
-        let to_bytes = OpCode::Test64ToBytesLe {
+        let to_bytes = OpCode::GoldilocksToBytesLe {
             val: a,
             count: 10,
             res,
         };
         assert_eq!(run(to_bytes, &[cell(low)], 10), (false, bytes.clone()));
         bytes.reverse();
-        let to_bytes = OpCode::Test64ToBytesBe {
+        let to_bytes = OpCode::GoldilocksToBytesBe {
             val: a,
             count: 10,
             res,
@@ -5618,18 +5651,19 @@ mod tests {
         assert_eq!(run(to_bytes, &[cell(low)], 10), (false, bytes));
     }
 
-    /// The test field's tape opcodes on a witgen VM whose tapes are `TestField` vectors: each slot
+    /// Goldilocks' tape opcodes on a witgen VM whose tapes are `Goldilocks` vectors: each slot
     /// is one cell, the `u64` table indices, flags and counts land in cell 0 of a slot, and a
     /// lookup key is read as the integer it denotes. Every key is stored far past any row (`2` is
     /// stored as `2^33 - 2`), and the element stored as the cell `1` denotes no row.
     #[test]
-    fn test_field_tape_opcodes_fill_one_cell_slots() {
-        use crate::test_field::TestField;
+    fn goldilocks_tape_opcodes_fill_one_cell_slots() {
+        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
-        let cell = |value: u64| TestField::from(value).storage_cell0();
-        let field = |value: u64| TestField::from(value);
-        let zeros = |len| vec![TestField::ZERO; len];
+        let cell = |value: u64| Goldilocks::from(value).storage_cell0();
+        let field = |value: u64| Goldilocks::from(value);
+        let zero = <Goldilocks as mavros_artifacts::MavrosField>::ZERO;
+        let zeros = |len| vec![zero; len];
         let (mut out_a, mut out_b, mut out_c) = (zeros(40), zeros(40), zeros(40));
         let (mut witness, mut mults) = (zeros(8), zeros(32));
         let (mut lookups_a, mut lookups_b, mut lookups_c) = (zeros(8), zeros(8), zeros(8));
@@ -5667,29 +5701,29 @@ mod tests {
             let mut binary = Vec::new();
             opcode.to_binary(&mut binary, &mut Vec::new());
             assert!(
-                binary[0] as usize >= FIRST_TEST_FIELD_OPCODE,
-                "{opcode} is a test-field copy"
+                binary[0] as usize >= FIRST_GOLDILOCKS_OPCODE,
+                "{opcode} is a Goldilocks copy"
             );
             let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, vm);
             !next_pc.is_null()
         };
 
-        let r1c = || OpCode::Test64R1C {
+        let r1c = || OpCode::GoldilocksR1C {
             a: at(2),
             b: at(3),
             c: at(4),
         };
         assert!(step(&mut vm, r1c()) && step(&mut vm, r1c()));
-        let write = || OpCode::Test64WriteWitness { val: at(4) };
+        let write = || OpCode::GoldilocksWriteWitness { val: at(4) };
         assert!(step(&mut vm, write()) && step(&mut vm, write()));
         // A 16-row rangecheck table (table 0) and a 4-row spread table (table 1).
-        let rngchk = |val| OpCode::Test64RngchkField {
+        let rngchk = |val| OpCode::GoldilocksRngchkField {
             val: at(val),
             flag: at(6),
             bits: 4,
         };
         assert!(step(&mut vm, rngchk(5)));
-        let spread = OpCode::Test64SpreadLookupField {
+        let spread = OpCode::GoldilocksSpreadLookupField {
             val: at(7),
             result: at(8),
             flag: at(6),
@@ -5697,7 +5731,7 @@ mod tests {
         };
         assert!(step(&mut vm, spread));
         // Table 2: the array, whose elements are dumped into the x-slots of its constraints.
-        let lookup = OpCode::Test64ArrayLookupField {
+        let lookup = OpCode::GoldilocksArrayLookupField {
             array: at(11),
             index: at(9),
             result: at(10),
@@ -5711,7 +5745,7 @@ mod tests {
             *frame.data.add(13) = cell(1);
             *frame.data.add(14) = cell(2);
         }
-        let pow2 = OpCode::Test64Pow2LookupField {
+        let pow2 = OpCode::GoldilocksPow2LookupField {
             amount: at(13),
             factor: at(14),
             flag: at(6),
@@ -5725,16 +5759,16 @@ mod tests {
         array.dec_rc(&mut vm);
         frame.pop(&mut vm);
 
-        assert_eq!(out_a[..3], [field(2), field(2), TestField::ZERO]);
+        assert_eq!(out_a[..3], [field(2), field(2), zero]);
         assert_eq!(out_b[..2], [field(3), field(3)]);
         assert_eq!(out_c[..2], [field(6), field(6)]);
-        assert_eq!(witness[..3], [field(6), field(6), TestField::ZERO]);
+        assert_eq!(witness[..3], [field(6), field(6), zero]);
         // Table 0 starts at constraint 8 and takes 16 + 1, table 1 takes 4 + 1, so table 2's
         // x-slots start at 30.
         let x_slots: Vec<u64> = (0..4).map(|i| out_a[30 + 2 * i].storage_cell0()).collect();
         assert_eq!(x_slots, elements.map(cell));
         let counts =
-            |slots: &[TestField]| slots.iter().map(|v| v.storage_cell0()).collect::<Vec<_>>();
+            |slots: &[Goldilocks]| slots.iter().map(|v| v.storage_cell0()).collect::<Vec<_>>();
         // Multiplicities are plain counts: row 9 of table 0, row 3 of table 1 (at 16), row 2 of
         // table 2 (at 20), row 1 of table 3 (at 24).
         let mut expected = vec![0; 26];
@@ -5908,15 +5942,15 @@ mod tests {
         (tapes, coeff)
     }
 
-    /// The test field's AD copies, through real dispatch on one-cell tapes, against bn254's.
+    /// Goldilocks' AD copies, through real dispatch on one-cell tapes, against bn254's.
     ///
     /// Every value is a small integer, so both fields must produce the same signed integers, and
     /// the negative ones discriminate each field's arithmetic. The tapes hold one cell per element
-    /// for the test field, so a write at bn254's stride lands on another witness's slot.
+    /// for Goldilocks, so a write at bn254's stride lands on another witness's slot.
     #[test]
-    fn test_field_ad_opcodes_agree_with_bn254() {
+    fn goldilocks_ad_opcodes_agree_with_bn254() {
         let (bn254, coeff) = run_ad_program::<Field>(FieldOpCode::bn254);
-        let test64 = run_ad_program::<crate::test_field::TestField>(FieldOpCode::test64);
+        let goldilocks = run_ad_program::<mavros_artifacts::Goldilocks>(FieldOpCode::goldilocks);
         assert_eq!(coeff, -4);
         // Witness 1 reaches the tapes only through the multiply by -3, under the sum, under the
         // sum; witness 2 only through the outer sum.
@@ -5924,7 +5958,7 @@ mod tests {
         assert_eq!(witness(1), [-21, 33, -39]);
         assert_eq!(witness(2), [7, -11, 13]);
         assert!(bn254.iter().flatten().filter(|&&value| value != 0).count() > 20);
-        assert_eq!(test64, (bn254, coeff));
+        assert_eq!(goldilocks, (bn254, coeff));
     }
 
     /// The guard behind `Tape`'s one-field-per-run pairing.
@@ -5932,7 +5966,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "ran on a VM built for another field")]
     fn a_field_opcode_panics_on_a_vm_built_for_another_field() {
-        let mut vm = empty_witgen_vm::<crate::test_field::TestField>();
+        let mut vm = empty_witgen_vm::<mavros_artifacts::Goldilocks>();
         let frame = Frame::base_frame(16, &mut vm);
         let opcode = FieldOpCode::AddField {
             res: FramePosition(10),
@@ -5997,6 +6031,7 @@ mod tests {
         let middle_location = location("middle", 17);
         let callee_location = location("helper", 24);
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![
                 Function {
@@ -6089,7 +6124,7 @@ mod tests {
     #[test]
     fn boxed_layout_encodings_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 2,
+            PROGRAM_FORMAT_VERSION, 3,
             "the format version these encodings belong to"
         );
         let codes = [
@@ -6160,11 +6195,12 @@ mod tests {
 
     #[test]
     fn compact_binary_header_parses_without_debug_metadata() {
-        // Magic and version, then no constants, globals, entry blob fields or entries: code starts
-        // at the marker.
+        // Magic, version, field and absent layouts, then no constants, globals, entry blob fields
+        // or entries: code starts at the marker.
         let binary = [
             PROGRAM_MAGIC,
             PROGRAM_FORMAT_VERSION,
+            FieldId::Goldilocks.code(),
             0, // No constraint layouts.
             0,
             0,
@@ -6175,7 +6211,8 @@ mod tests {
         ];
         let header = parse_program_header(&binary);
 
-        assert_eq!(header.code_start, 7);
+        assert_eq!(header.field, FieldId::Goldilocks);
+        assert_eq!(header.code_start, 8);
         assert!(header.constant_pool.is_empty());
     }
 
@@ -6187,15 +6224,66 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported VM program format version Some(0); expected 2")]
+    #[should_panic(expected = "unsupported VM program format version Some(1); expected 3")]
     fn a_binary_of_another_format_version_is_refused() {
-        parse_program_header(&[PROGRAM_MAGIC, 0, 0, 0, 0, 0, u64::MAX, 0]);
+        // A version-1 binary, which has no field word.
+        parse_program_header(&[PROGRAM_MAGIC, 1, 0, 0, 0, 0, u64::MAX, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the VM program names no supported field (word 0)")]
+    fn a_binary_naming_no_field_is_refused() {
+        parse_program_header(&[
+            PROGRAM_MAGIC,
+            PROGRAM_FORMAT_VERSION,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u64::MAX,
+            0,
+        ]);
+    }
+
+    /// The header's field word round-trips each field, and its codes are pinned: they are part of
+    /// the format [`PROGRAM_FORMAT_VERSION`] names.
+    #[test]
+    fn the_program_header_names_its_field() {
+        assert_eq!(
+            PROGRAM_FORMAT_VERSION, 3,
+            "the format version these codes belong to"
+        );
+        assert_eq!([FieldId::Bn254.code(), FieldId::Goldilocks.code()], [1, 2]);
+        for field in [FieldId::Bn254, FieldId::Goldilocks] {
+            let binary = Program {
+                constraint_layouts: None,
+                functions: vec![Function {
+                    name: "main".to_string(),
+                    frame_size: 2,
+                    code: vec![OpCode::Ret {}],
+                    source_locations: vec![SourceLocation::new("<test>", 1, 1)],
+                }],
+                field,
+                entry_points: vec![0],
+                entry_blob_field_count: 0,
+                global_frame_size: 0,
+                constant_pool: Vec::new(),
+            }
+            .to_binary();
+            assert_eq!(binary[2], field.code());
+            assert_eq!(parse_program_header(&binary).field, field);
+            assert_eq!(FieldId::from_code(field.code()), Some(field));
+        }
+        assert_eq!(FieldId::from_code(0), None);
+        assert_eq!(FieldId::from_code(3), None);
     }
 
     #[test]
     fn bytecode_debug_info_is_always_standalone() {
         let source_location = location("main", 10);
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
@@ -6226,6 +6314,7 @@ mod tests {
     fn debug_info_serialization_interns_files_and_validates_the_version() {
         let source_location = location("shared", 10);
         let program = Program {
+            field: FieldId::Bn254,
             constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),

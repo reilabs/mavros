@@ -172,9 +172,8 @@ pub fn for_each_constant_word(constant: &Constant, visit: &mut impl FnMut(u64)) 
             }
         }
         Constant::Field(val) => {
-            // FIELD-ASSUMPTION: L3-frame
-            for limb in val.montgomery_limbs() {
-                visit(limb);
+            for &cell in val.storage_cells() {
+                visit(cell);
             }
         }
         Constant::Blob(blob) => {

@@ -27,17 +27,23 @@ pub fn unsupported_on_this_field(attempted: fmt::Arguments<'_>, field: FieldConf
 mod tests {
     use super::*;
 
-    /// The half of the message the callers do not write.
-    ///
-    /// On the only configured field every caller's predicate holds, so this is the one property of
-    /// this refusal testable without a second field: the tail names what the field offers, in the
-    /// units the caller's half of the message uses.
+    /// The half of the message the callers do not write: the tail names what the field offers, in
+    /// the units the caller's half of the message uses.
     #[test]
     #[should_panic(expected = "254-bit modulus and a 64-bit witness limb")]
-    fn the_refusal_names_what_the_field_offers() {
+    fn the_refusal_names_what_bn254_offers() {
         unsupported_on_this_field(
             format_args!("a lowering that does not exist"),
             FieldConfig::bn254(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "64-bit modulus and a 32-bit witness limb")]
+    fn the_refusal_names_what_goldilocks_offers() {
+        unsupported_on_this_field(
+            format_args!("a lowering that does not exist"),
+            FieldConfig::goldilocks(),
         );
     }
 }

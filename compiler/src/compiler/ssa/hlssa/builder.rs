@@ -1,4 +1,4 @@
-use mavros_artifacts::FieldConfig;
+use mavros_artifacts::{FieldConfig, IntoFieldElement};
 use mavros_int_semantics::IntBits;
 
 use crate::compiler::ssa::{
@@ -235,10 +235,11 @@ pub trait HLEmitter {
     // -- Constants --
 
     // FIELD-ASSUMPTION: L2-builder
-    // Accepts anything convertible to a field element (including the raw `ark_bn254::Fr` that the
-    // Noir frontend and some call sites still hold), so migrating the payload type is a no-op here.
-    fn field_const(&mut self, value: impl Into<crate::compiler::Field>) -> ValueId {
-        self.emit_constant(Constant::Field(value.into()))
+    // Embeds into the emitter's field, reducing an integer and refusing another field's element.
+    #[track_caller]
+    fn field_const(&mut self, value: impl IntoFieldElement) -> ValueId {
+        let value = self.field().constant(value);
+        self.emit_constant(Constant::Field(value))
     }
 
     /// A constant integer carrying `pattern`, at the width the pattern itself declares.
@@ -960,6 +961,52 @@ mod tests {
             Constant::Int(pattern) => pattern.clone(),
             other => panic!("expected an integer constant, got {other:?}"),
         }
+    }
+
+    /// The field constant `build` mints in a program over `field`.
+    fn minted_field(
+        field: FieldConfig,
+        build: impl FnOnce(&mut HLInstrBuilder<'_>) -> ValueId,
+    ) -> crate::compiler::Field {
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let fid = ssa.get_unique_entrypoint_id();
+        let mut function = ssa.take_function(fid);
+        let mut instrs = Vec::new();
+        let id = {
+            let mut b = HLInstrBuilder::new(
+                &mut function,
+                &mut ssa,
+                &mut instrs,
+                SourceLocation::synthetic("test"),
+            );
+            build(&mut b)
+        };
+        match &*ssa.get_const(id).expect("a constant was interned") {
+            Constant::Field(value) => *value,
+            other => panic!("expected a field constant, got {other:?}"),
+        }
+    }
+
+    /// `field_const` embeds into the program's field, so an integer reduces modulo its modulus.
+    #[test]
+    fn a_field_constant_belongs_to_the_programs_field() {
+        let goldilocks = FieldConfig::goldilocks();
+        let five = minted_field(goldilocks, |b| b.field_const(5u64));
+        assert_eq!(five, goldilocks.constant(5u64));
+        let wrapped = minted_field(goldilocks, |b| b.field_const(u64::MAX));
+        assert_eq!(wrapped, goldilocks.constant((1u64 << 32) - 2));
+        let bn254 = FieldConfig::bn254();
+        assert_eq!(
+            minted_field(bn254, |b| b.field_const(u64::MAX)),
+            bn254.constant(u64::MAX)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "which it does not belong to")]
+    fn a_field_constant_of_another_field_is_refused() {
+        let bn254_five = FieldConfig::bn254().constant(5u64);
+        minted_field(FieldConfig::goldilocks(), |b| b.field_const(bn254_five));
     }
 
     /// A power of two past the host word is a constant like any other.

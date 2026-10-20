@@ -454,12 +454,12 @@ mod tests {
     #[test]
     fn the_injective_widths_of_the_two_moduli() {
         assert_eq!(widest_injective_int_bits(FieldConfig::bn254()), 253);
-        assert_eq!(widest_injective_int_bits_for_modulus(&goldilocks()), 63);
+        assert_eq!(widest_injective_int_bits(FieldConfig::goldilocks()), 63);
     }
 
-    /// `2^64 - 2^32 + 1`, written out because `FieldConfig` has no goldilocks.
+    /// Goldilocks' modulus.
     fn goldilocks() -> BigInt {
-        (BigInt::one() << 64) - (BigInt::one() << 32) + BigInt::one()
+        field_modulus(FieldConfig::goldilocks())
     }
 
     /// The default budget with `accumulated_products` overridden.

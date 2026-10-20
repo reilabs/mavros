@@ -307,6 +307,7 @@ impl CodeGen {
         bytecode::Program {
             constraint_layouts: None,
             functions,
+            field: ssa.field().id(),
             entry_points: if self.mode == WitnessMode::Verifier {
                 vec![bytecode::NO_ENTRY_POINT, bytecode::NO_ENTRY_POINT, 0]
             } else {
@@ -2385,8 +2386,6 @@ fn lookup_elem_kind(elem_type: &Type, field: FieldConfig, mode: WitnessMode) -> 
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::FieldElement;
-
     use super::*;
 
     #[test]
@@ -2463,7 +2462,7 @@ mod tests {
     #[test]
     fn a_constants_words_fill_its_frame_slot() {
         let layouter = FrameLayouter::new(FieldConfig::bn254(), WitnessMode::Ad);
-        let field = hlssa::Constant::Field(FieldElement::ONE);
+        let field = hlssa::Constant::Field(FieldConfig::bn254().one());
         let blob = hlssa::Constant::Blob(hlssa::Blob::new(
             Type::field(),
             vec![field.clone(), field.clone()],
@@ -2483,7 +2482,10 @@ mod tests {
     fn a_field_constant_wider_than_its_slot_is_refused() {
         // Three cells, which no field has: bn254's four words overrun the slot.
         let layouter = FrameLayouter::with_field_cells(3, WitnessMode::Ad);
-        constant_cell_count(&hlssa::Constant::Field(FieldElement::ONE), &layouter);
+        constant_cell_count(
+            &hlssa::Constant::Field(FieldConfig::bn254().one()),
+            &layouter,
+        );
     }
 
     #[test]

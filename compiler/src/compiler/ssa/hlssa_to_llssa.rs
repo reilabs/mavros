@@ -683,7 +683,7 @@ fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
         // FIELD-ASSUMPTION: L2-lower
         Constant::Field(fr) => {
             let values = fr
-                .montgomery_limbs()
+                .storage_cells()
                 .iter()
                 .map(|&limb| LLConstant::int(64, limb as u128))
                 .collect();
@@ -4638,10 +4638,7 @@ fn generate_drngchk_ad_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{
-        Field,
-        ssa::{DefaultSSAAnnotator, llssa::builder::LLSSABuilder},
-    };
+    use crate::compiler::ssa::{DefaultSSAAnnotator, llssa::builder::LLSSABuilder};
     use mavros_int_semantics::IntBits;
 
     /// Exercise the backend backstop directly, without the earlier guard-insertion passes.
@@ -5189,7 +5186,7 @@ mod tests {
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.test_block(entry);
-            let value = e.field_const(Field::from(13));
+            let value = e.field_const(13u64);
             let bits = e.to_bits(value, Endianness::Big, 5);
             e.terminate_return(vec![bits]);
         });

@@ -230,10 +230,11 @@ pub struct FieldRuntimeSymbols {
 }
 
 impl FieldRuntimeSymbols {
-    /// The entry points of `field`'s runtime instance.
-    pub fn of(field: FieldConfig) -> Self {
+    /// The entry points of `field`'s runtime instance, or [`None`] when the runtime has no instance
+    /// for `field`, which the WASM path then refuses.
+    pub fn of(field: FieldConfig) -> Option<Self> {
         match field.id() {
-            FieldId::Bn254 => FieldRuntimeSymbols {
+            FieldId::Bn254 => Some(FieldRuntimeSymbols {
                 mul: "__field_mul",
                 add: "__field_add",
                 sub: "__field_sub",
@@ -241,7 +242,8 @@ impl FieldRuntimeSymbols {
                 lt: "__field_lt",
                 from_limbs: "__field_from_limbs",
                 to_limbs: "__field_to_limbs",
-            },
+            }),
+            FieldId::Goldilocks => None,
         }
     }
 }
@@ -840,7 +842,12 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let bool_type = self.context.bool_type();
         let void_type = self.context.void_type();
         let limbs_type = self.limbs_llvm_type();
-        let field_symbols = FieldRuntimeSymbols::of(self.field);
+        let field_symbols = FieldRuntimeSymbols::of(self.field).unwrap_or_else(|| {
+            ice!(
+                "{:?} has no WASM runtime, which the driver refuses before codegen",
+                self.field.id()
+            )
+        });
 
         // mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
@@ -2626,7 +2633,7 @@ mod tests {
     fn bn254_keeps_its_field_runtime_symbol_names() {
         assert_eq!(
             FieldRuntimeSymbols::of(FieldConfig::bn254()),
-            FieldRuntimeSymbols {
+            Some(FieldRuntimeSymbols {
                 mul: "__field_mul",
                 add: "__field_add",
                 sub: "__field_sub",
@@ -2634,8 +2641,14 @@ mod tests {
                 lt: "__field_lt",
                 from_limbs: "__field_from_limbs",
                 to_limbs: "__field_to_limbs",
-            }
+            })
         );
+    }
+
+    /// The runtime archive has no Goldilocks instance, so the WASM path refuses Goldilocks.
+    #[test]
+    fn goldilocks_has_no_field_runtime() {
+        assert_eq!(FieldRuntimeSymbols::of(FieldConfig::goldilocks()), None);
     }
 
     /// The runtime archive defines every field entry point codegen declares, at the ABI codegen
