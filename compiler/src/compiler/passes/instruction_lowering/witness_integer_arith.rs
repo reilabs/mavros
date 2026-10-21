@@ -733,7 +733,7 @@ fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
 // The sign is packed with `field.two_pow(bits)` / `field.two_pow(bits - 1)` place values, which
 // wrap once they reach the field's size. Sums and differences past `widest_cell_sum_bits` are
 // routed elsewhere first, and assert it; products and divisions are held to
-// `single_cell_signed_product_fits`, which keeps `2^(2·bits)` below the modulus.
+// `single_cell_signed_product_fits`, which keeps `2^bits·(2^bits − 1)` below the modulus.
 fn signed_value_from_encoded(
     b: &mut HLBlockEmitter<'_>,
     encoded_field: ValueId,
@@ -838,8 +838,8 @@ fn lower_unsigned_divmod(
     guard: Option<ValueId>,
     guard_is_witness: bool,
 ) -> DivModResult {
-    // A quotient range-checked at `bits` times a divisor of `bits` reaches `2^(2 * bits)`, and
-    // past the modulus the single product below could wrap onto a wrong quotient that passes.
+    // A quotient and a remainder range-checked at `bits` reach `q·d + r <= 2^bits·(2^bits − 1)`,
+    // and past the modulus the identity below could wrap onto a wrong quotient that passes.
     assert!(
         single_cell_product_fits(b.field(), bits),
         "ICE: an int{bits} division reached the single-cell lowering, whose product the field cannot hold"

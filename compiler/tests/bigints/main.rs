@@ -4,7 +4,8 @@ mod goldilocks;
 mod harness;
 
 use harness::{
-    BinaryOpOracle, Compiled, HarnessField, Verdict, bytecode_listing, input_block, main_program,
+    BinaryOpOracle, Compiled, HarnessField, Verdict, bytecode_listing, input_block, input_block_in,
+    main_program, main_program_in,
 };
 use mavros_artifacts::{Field, FieldConfig, InputValueOrdered};
 use mavros_compiler::{
@@ -1447,16 +1448,28 @@ fn check_limbed_shifts(
     amounts: &[IntBits],
     rhs: Rhs,
 ) {
-    let pairs: Vec<(IntBits, IntBits)> = values
+    check_limbed_grid_in::<Field>(limbed, bits, values, amounts, rhs);
+}
+
+/// Every left operand against every right one over `F`, checked by [`check_limbed_pairs_in`]
+/// twenty pairs to a program.
+fn check_limbed_grid_in<F: HarnessField>(
+    limbed: Limbed,
+    bits: usize,
+    lefts: &[IntBits],
+    rights: &[IntBits],
+    rhs: Rhs,
+) {
+    let pairs: Vec<(IntBits, IntBits)> = lefts
         .iter()
-        .flat_map(|value| {
-            amounts
+        .flat_map(|left| {
+            rights
                 .iter()
-                .map(move |amount| (value.clone(), amount.clone()))
+                .map(move |right| (left.clone(), right.clone()))
         })
         .collect();
     for pairs in pairs.chunks(20) {
-        check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
+        check_limbed_pairs_in::<F>(limbed, bits, pairs.to_vec(), rhs);
     }
 }
 
@@ -1866,7 +1879,13 @@ enum Rhs {
     AgainstPure,
 }
 
-/// `limbed` over `pairs`, all in one program, against the model.
+/// `limbed` over `pairs`, all in one program, against the model, on bn254 and its WASM lane.
+fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)>, rhs: Rhs) {
+    check_limbed_pairs_in::<Field>(limbed, bits, pairs, rhs);
+}
+
+/// `limbed` over `pairs`, all in one program over `F`, against the model, and on the WASM lane
+/// where `F` has one.
 ///
 /// Each operand is a corner constant selected by a witnessed bit: a witnessed value held as limbs.
 ///
@@ -1875,7 +1894,12 @@ enum Rhs {
 /// ([`Limbed::idle_rhs`]). The pipeline must refuse on that run only. A constant right operand is
 /// not selected, so only the left goes idle, to zero or to all ones where zero is rejected (as
 /// `0 - INT_MIN` is); a pure left operand likewise leaves only the right to go idle.
-fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)>, rhs: Rhs) {
+fn check_limbed_pairs_in<F: HarnessField>(
+    limbed: Limbed,
+    bits: usize,
+    pairs: Vec<(IntBits, IntBits)>,
+    rhs: Rhs,
+) {
     let answers: Vec<Option<IntBits>> = pairs.iter().map(|(a, b)| limbed.model(a, b)).collect();
     let zero = IntBits::zero(bits);
     let idle_rhs: Vec<IntBits> = pairs.iter().map(|_| limbed.idle_rhs(bits)).collect();
@@ -1906,7 +1930,8 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
         .collect();
 
     let (program_pairs, program_answers) = (pairs.clone(), answers.clone());
-    let ssa = main_program(
+    let ssa = main_program_in(
+        F::CONFIG,
         &[Type::int(1), Type::int(32), Type::int(1)],
         &[Type::int(1)],
         move |e, params| {
@@ -1958,13 +1983,21 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
             vec![all.expect("there is at least one corner pair")]
         },
     );
-    let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+    let compiled = Compiled::<F>::compile(ssa).unwrap_or_else(|error| {
         panic!("{limbed:?} at {bits} bits, {rhs:?} right operand, does not compile: {error}")
     });
 
     let one = IntBits::from_u128(1, 1);
-    let inputs =
-        |selected: u128| input_block(&[&one, &IntBits::from_u128(32, selected), &one, &one]);
+    let block = |selected: u128| {
+        [
+            one.clone(),
+            IntBits::from_u128(32, selected),
+            one.clone(),
+            one.clone(),
+        ]
+    };
+    let inputs = |selected: u128| input_block_in::<F>(&block(selected).each_ref());
+    let wasm_inputs = |selected: u128| input_block(&block(selected).each_ref());
 
     let none = u128::from(u32::MAX);
     let verdict = compiled.run(&inputs(none));
@@ -1972,13 +2005,15 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
         verdict.is_accepted(),
         "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on some pair it accepts: {verdict:?}"
     );
-    let verdict = compiled
-        .run_wasm(&inputs(none))
-        .expect("the WASM lane builds");
-    assert!(
-        verdict.is_accepted(),
-        "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on the WASM lane: {verdict:?}"
-    );
+    if let Some(bn254) = compiled.as_bn254() {
+        let verdict = bn254
+            .run_wasm(&wasm_inputs(none))
+            .expect("the WASM lane builds");
+        assert!(
+            verdict.is_accepted(),
+            "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on the WASM lane: {verdict:?}"
+        );
+    }
 
     for (index, ((lhs, rhs), answer)) in pairs.iter().zip(&answers).enumerate() {
         if answer.is_some() {
@@ -1990,14 +2025,16 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
             "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
              pipeline answered {verdict:?}"
         );
-        let verdict = compiled
-            .run_wasm(&inputs(index as u128))
-            .expect("the WASM lane builds");
-        assert!(
-            verdict.rejects(),
-            "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the WASM \
-             lane answered {verdict:?}"
-        );
+        if let Some(bn254) = compiled.as_bn254() {
+            let verdict = bn254
+                .run_wasm(&wasm_inputs(index as u128))
+                .expect("the WASM lane builds");
+            assert!(
+                verdict.rejects(),
+                "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
+                 WASM lane answered {verdict:?}"
+            );
+        }
     }
 }
 
@@ -2272,7 +2309,11 @@ fn the_whole_corner_matrix_agrees_with_the_model() {
 /// value at the lowest limb boundary and at the top limb's, so that a carry or a borrow crosses a
 /// limb and leaves the top under every combination of signs.
 fn signed_limb_corners(bits: usize) -> Vec<IntBits> {
-    let limb = witness_limb_bits(FieldConfig::bn254());
+    signed_limb_corners_at(bits, witness_limb_bits(FieldConfig::bn254()))
+}
+
+/// [`signed_limb_corners`] for a `limb`-bit witness limb.
+fn signed_limb_corners_at(bits: usize, limb: usize) -> Vec<IntBits> {
     let top_limb = (bits - 1) / limb * limb;
     let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
     let power = |place: usize| SignedValue::from(BigUint::from(1u8) << place);

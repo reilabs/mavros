@@ -418,6 +418,12 @@ impl Compiled {
 }
 
 impl<F: HarnessField> Compiled<F> {
+    /// This program as a bn254 one, the field with a WASM lane, or [`None`] over any other field.
+    #[must_use]
+    pub fn as_bn254(&self) -> Option<&Compiled> {
+        (self as &dyn Any).downcast_ref::<Compiled>()
+    }
+
     /// Runs the production pipeline over `ssa`, from `make_struct_access_static` to the VM
     /// binary. The Noir frontend is the only stage skipped, because the program did not come
     /// from Noir source.
