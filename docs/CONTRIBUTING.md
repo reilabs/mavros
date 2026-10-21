@@ -53,6 +53,29 @@ for Mavros:
   They are most easily run using `make func-test`.
 - The **unit tests** in the codebase can be run simply using `make unit-test`.
 
+`make unit-test` uses [cargo-nextest](https://nexte.st/), pinned by the Nix flake, to schedule tests
+across all workspace test binaries in parallel. It first builds the WASM runtime once and shares its
+archive with the tests, avoiding repeated Cargo invocations and build-lock contention. The optimized
+Cargo test profile and 8 MiB test-thread stack are preserved. As before, ignored tests and doctests
+are not part of this target.
+
+Pass nextest options through `NEXTEST_ARGS`, for example:
+
+```bash
+make unit-test NEXTEST_ARGS='--test-threads 4'
+make unit-test NEXTEST_ARGS="-E 'binary(bigints)'"
+make unit-test NEXTEST_ARGS='--profile ci'
+make unit-test NEXTEST_ARGS='--profile ci --partition hash:1/4'
+```
+
+By default, nextest runs as many tests concurrently as there are available CPUs. The CI profile runs
+all selected tests even after a failure, without retries, and writes per-test results and timings to
+`target/nextest/ci/junit.xml`, which CI uploads even when tests fail. The existing `JOBS` variable
+controls only the functional test runner. CI divides the suite into four disjoint hash partitions,
+each on its own runner. Every shard builds the same test binaries, so they share a build cache; only
+the first shard uploads it. The aggregate `Run Unit Tests` check succeeds only when all four shards
+pass.
+
 ## Integer Semantics
 
 Noir is what determines the [semantics](./int-semantics.md) of integer operations in Mavros, so the
