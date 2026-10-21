@@ -65,15 +65,15 @@ Pass nextest options through `NEXTEST_ARGS`, for example:
 make unit-test NEXTEST_ARGS='--test-threads 4'
 make unit-test NEXTEST_ARGS="-E 'binary(bigints)'"
 make unit-test NEXTEST_ARGS='--profile ci'
-make unit-test NEXTEST_ARGS='--profile ci --partition hash:1/4'
+make unit-test NEXTEST_ARGS='--profile ci --partition hash:1/2'
 ```
 
 By default, nextest runs as many tests concurrently as there are available CPUs. The CI profile runs
 all selected tests even after a failure, without retries, and writes per-test results and timings to
 `target/nextest/ci/junit.xml`, which CI uploads even when tests fail. The existing `JOBS` variable
-controls only the functional test runner. CI divides the suite into four disjoint hash partitions,
+controls only the functional test runner. CI divides the suite into two disjoint hash partitions,
 each on its own runner. Every shard builds the same test binaries, so they share a build cache; only
-the first shard uploads it. The aggregate `Run Unit Tests` check succeeds only when all four shards
+the first shard uploads it. The aggregate `Run Unit Tests` check succeeds only when both shards
 pass.
 
 ## Integer Semantics
