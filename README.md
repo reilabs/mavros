@@ -27,9 +27,10 @@ To use Mavros, navigate to the **root of a Noir project** (the directory contain
 your shell. Then run `mavros compile`.
 
 This writes one file, `target/program.mavros`. It starts with a `MAVR1CS` header (format version,
-field tag, digest) followed by the witness manifest, the R1CS, the VM bytecode with the witgen and
-AD entry points, the ABI as JSON, and the compiler version. The digest covers everything except the
-compiler version and is checked whenever the file is read.
+field tag, digest) followed by the compiler's release version (the workspace `version` in
+`Cargo.toml`), the witness manifest, the R1CS, the VM bytecode with the witgen and AD entry points,
+and the ABI as JSON. The digest covers everything except the compiler version and is checked
+whenever the file is read.
 
 Pass `--include-debug-info` to additionally write `target/program.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;
@@ -61,7 +62,8 @@ The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, a
 strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation is a
 component of a verifier, not a complete proof verification protocol.
 
-Prover artifacts contain only witgen and AD. To additionally emit a separate verifier artifact:
+The bytecode in `program.mavros` holds only the witgen and AD entry points. To additionally emit a
+separate verifier artifact:
 
 ```bash
 mavros compile ./my-noir-project --verifier-output target/verifier.json
