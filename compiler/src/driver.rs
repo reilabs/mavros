@@ -17,7 +17,7 @@ use noirc_frontend::{
 use tracing::info;
 
 use mavros_artifacts::{
-    FieldConfig, FieldId, ManifestParam, MavrosField, ParamVisibility, R1CSArtifact, ReturnSlot,
+    Artifact, FieldConfig, FieldId, ManifestParam, MavrosField, ParamVisibility, ReturnSlot,
     WitnessManifest,
 };
 
@@ -100,6 +100,9 @@ pub struct EntryColumns {
 /// single challenge already exceeds this, so the default is a byte-identical no-op; it becomes
 /// the forward tripwire once a small field (goldilocks) needs more than one challenge.
 pub const DEFAULT_LOGUP_SOUNDNESS_BITS: u32 = 128;
+
+/// Recorded in every artifact: the release version of the Mavros workspace.
+pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Driver {
     /// The Noir package being compiled, or `None` for a driver seeded with a hand-built
@@ -227,7 +230,7 @@ impl Driver {
     /// feature can be prototyped before the frontend supports it.
     ///
     /// Such a driver has no [`Self::abi`], so [`Self::entry_blob_field_count`],
-    /// [`Self::witness_manifest`], [`Self::r1cs_artifact`] and the WASM metadata sidecar are
+    /// [`Self::witness_manifest`], [`Self::artifact`] and the WASM metadata sidecar are
     /// unavailable, and no [`Self::package_root`]: all belong to the Noir package, which an SSA
     /// does not carry.
     ///
@@ -1040,12 +1043,22 @@ impl Driver {
         Ok(manifest)
     }
 
-    pub fn r1cs_artifact<F: MavrosField>(
+    /// Packs `r1cs` and `bytecode` with this driver's witness manifest and ABI; requires what
+    /// [`Self::witness_manifest`] does.
+    pub fn artifact<F: MavrosField>(
         &self,
         r1cs: SealedR1CS<F>,
-    ) -> Result<R1CSArtifact<F>, Error> {
+        bytecode: Vec<u64>,
+    ) -> Result<Artifact<F>, Error> {
         let manifest = self.witness_manifest(&r1cs)?;
-        Ok(R1CSArtifact::new(manifest, r1cs))
+        let abi = serde_json::to_vec(self.abi()).expect("a Noir ABI always serializes to JSON");
+        Ok(Artifact::new(
+            manifest,
+            r1cs,
+            bytecode,
+            abi,
+            COMPILER_VERSION.to_string(),
+        ))
     }
 
     /// The parameters only; the return is computed, not an input.

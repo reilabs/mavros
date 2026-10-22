@@ -604,8 +604,8 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
         );
     };
     invoke(&[]);
-    let prover_path = project.path().join("target/basic.json");
-    let original_prover = std::fs::read(&prover_path).unwrap();
+    let program_path = project.path().join("target/program.mavros");
+    let original_program = std::fs::read(&program_path).unwrap();
     assert!(
         !project
             .path()
@@ -617,7 +617,7 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
         "target/verifier.json",
         "--include-debug-info",
     ]);
-    assert_eq!(std::fs::read(&prover_path).unwrap(), original_prover);
+    assert_eq!(std::fs::read(&program_path).unwrap(), original_program);
     let artifact: serde_json::Value = serde_json::from_slice(
         &std::fs::read(project.path().join("target/verifier.json")).unwrap(),
     )
