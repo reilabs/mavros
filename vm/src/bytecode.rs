@@ -261,6 +261,9 @@ impl VM {
 /// opcode proc macro.
 pub const ELEM_WORD: usize = 0;
 pub const ELEM_FIELD: usize = 1;
+/// A witness linear combination evaluated at w, stored as an inline field value.
+/// Unlike a pure field table element, it already includes the constant-column contribution.
+pub const ELEM_VERIFIER: usize = 5;
 pub const ELEM_WITNESS: usize = 2;
 pub const ELEM_U128: usize = 3;
 
@@ -1022,6 +1025,7 @@ pub struct AdArrays {
 pub union Arrays {
     pub as_forward: FwdArrays,
     pub as_ad: AdArrays,
+    pub(crate) as_verifier: crate::verifier::VerifierArrays,
 }
 
 /// Number of slots in the fixed-size table caches ([`VM::rgchk_tables`]/[`VM::spread_tables`]).
@@ -1147,8 +1151,8 @@ impl VM {
         globals: *mut u64,
         constants: Vec<u64>,
     ) -> Self {
-        Self {
-            data: Arrays {
+        Self::new_constraint::<F>(
+            Arrays {
                 as_ad: AdArrays {
                     out_da: Tape::of(out_da),
                     out_db: Tape::of(out_db),
@@ -1168,6 +1172,18 @@ impl VM {
                     current_cnst_lookups_off: constraints_layout.lookups_data_start(),
                 },
             },
+            globals,
+            constants,
+        )
+    }
+
+    pub(crate) fn new_constraint<F: mavros_artifacts::MavrosField>(
+        data: Arrays,
+        globals: *mut u64,
+        constants: Vec<u64>,
+    ) -> Self {
+        Self {
+            data,
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
@@ -1340,11 +1356,10 @@ fn program_offset(program_base: *const u64, program_len: usize, pc: *const u64) 
 
 /// The value column of a powers-of-two table: `2^n` as a field element, for `n` in `0..len`.
 ///
-/// Shared by both VM fills (`run_phase2`'s and `dpow2_lookup_field`'s) so they cannot diverge. Two
-/// more fills build the same column independently and must agree at every row or the backends
-/// disagree about the table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same
-/// accumulator through the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates
-/// instead.
+/// Shared by the VM's witness generation, AD, and verifier table fills. Two more fills build the
+/// same column independently and must agree at every row or the backends disagree about the
+/// table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same accumulator through
+/// the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates instead.
 pub(crate) fn pow2_rows<F: mavros_artifacts::MavrosField>(len: usize) -> impl Iterator<Item = F> {
     let mut acc = F::ONE;
     (0..len).map(move |_| {
@@ -3675,6 +3690,161 @@ mod def {
             std::ptr::copy_nonoverlapping(vm.constants.as_ptr().add(pool_offset), res, size);
         }
     }
+    #[opcode]
+    #[field_opcode]
+    fn verifier_read_witness<F: mavros_artifacts::MavrosField>(#[out] res: *mut F, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *res = data.w::<F>(data.witness_cursor);
+            data.witness_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_constant<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut F,
+        #[frame] v: F,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            *res = v * vm.data.as_verifier.w::<F>(0);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_next_coeff<F: mavros_artifacts::MavrosField>(#[out] v: *mut F, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *v = *data.coeffs.at::<F>(data.constraint_cursor);
+            data.constraint_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_accumulate<F: mavros_artifacts::MavrosField>(
+        #[frame] v: F,
+        #[frame] coeff: F,
+        matrix: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            *vm.data.as_verifier.outputs[matrix].slot::<F>() += coeff * v;
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_rngchk_field<F: mavros_artifacts::MavrosField>(
+        #[frame] val: F,
+        #[frame] flag: F,
+        bits: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.rgchk_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::RangeCheck, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, (0..length).map(|_| F::ZERO));
+                vm.rgchk_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.rgchk_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, None, flag);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_spread_lookup_field<F: mavros_artifacts::MavrosField>(
+        #[frame] val: F,
+        #[frame] result: F,
+        #[frame] flag: F,
+        bits: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.spread_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Spread, length);
+                vm.data.as_verifier.constant_table(
+                    &table,
+                    mult,
+                    (0..length).map(|i| F::from(mavros_limb_arith::spread_u32_to_u64(i as u32))),
+                );
+                vm.spread_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.spread_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, Some(result), flag);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_pow2_lookup_field<F: mavros_artifacts::MavrosField>(
+        #[frame] amount: F,
+        #[frame] factor: F,
+        #[frame] flag: F,
+        size: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.pow2_tables[size].is_none() {
+                let length = 1usize << size;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Pow2, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, pow2_rows::<F>(length));
+                vm.pow2_tables[size] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.pow2_tables[size].unwrap()];
+            vm.data
+                .as_verifier
+                .lookup(table, amount, Some(factor), flag);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_array_lookup_field<F: mavros_artifacts::MavrosField>(
+        #[frame] array: BoxedValue,
+        #[frame] index: F,
+        #[frame] result: F,
+        #[frame] flag: F,
+        stride: usize,
+        elem_kind: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            let table_id = array.table_id();
+            if *table_id == u64::MAX {
+                let (mut table, mult) = vm.data.as_verifier.begin_table(TableKind::Array);
+                let length = for_each_array_leaf(array, stride, |i, elem| {
+                    let value = if elem_kind == ELEM_VERIFIER {
+                        *(elem as *const F)
+                    } else {
+                        read_pure_elem_as_field::<F>(elem, elem_kind, stride)
+                            * vm.data.as_verifier.w::<F>(0)
+                    };
+                    vm.data.as_verifier.array_row(&table, mult, i, value);
+                });
+                table.length = length;
+                vm.data.as_verifier.reserve_table(&table);
+                vm.data.as_verifier.array_sum::<F>(&table);
+                *table_id = vm.tables.len() as u64;
+                vm.tables.push(table);
+            }
+            vm.data
+                .as_verifier
+                .lookup(&vm.tables[*table_id as usize], index, Some(result), flag);
+        }
+    }
 }
 
 pub struct Function {
@@ -3699,11 +3869,39 @@ impl Display for Function {
 pub const ENTRY_WITGEN: usize = 0;
 /// Index of the AD entry point in a program's entry table.
 pub const ENTRY_AD: usize = 1;
+/// Index of the direct forward verifier entry point.
+pub const ENTRY_VERIFIER: usize = 2;
+/// An absent entry in a program or serialized entry table.
+pub const NO_ENTRY_POINT: usize = usize::MAX;
+
+/// Buffer layouts bound to the compiled constraint traversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstraintLayouts([u64; 10]);
+
+impl ConstraintLayouts {
+    pub fn new(witness: WitnessLayout, constraints: ConstraintsLayout) -> Self {
+        Self([
+            witness.guard_index.map_or(u64::MAX, |index| index as u64),
+            witness.return_len as u64,
+            witness.algebraic_size as u64,
+            witness.multiplicities_size as u64,
+            witness.challenges_size as u64,
+            witness.tables_data_size as u64,
+            witness.lookups_data_size as u64,
+            constraints.algebraic_size as u64,
+            constraints.tables_data_size as u64,
+            constraints.lookups_data_size as u64,
+        ])
+    }
+}
 
 pub struct Program {
+    /// Required for AD/verifier execution; absent for programs built only for inspection or witgen.
+    pub constraint_layouts: Option<ConstraintLayouts>,
     pub functions: Vec<Function>,
     /// Indices into `functions` of the program's entry points, in entry-table order
-    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...).
+    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], [`ENTRY_VERIFIER`]). Absent entries use
+    /// [`NO_ENTRY_POINT`].
     pub entry_points: Vec<usize>,
     /// The field the program computes over, which every field opcode in it belongs to.
     pub field: FieldId,
@@ -3741,11 +3939,11 @@ impl Display for Program {
 /// The first word of every program binary: `MAVROSVM` as big-endian ASCII.
 pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 
-/// The program binary's format version, its second word. An opcode's number is its position in the
-/// generated opcode list, so a change to that list, to an opcode's operands, to the `BoxedLayout`
-/// encoding or to the header layout must bump this. The third word names the program's field
-/// ([`FieldId::code`]).
-pub const PROGRAM_FORMAT_VERSION: u64 = 2;
+/// The program binary's format version, its second word. Changing existing production opcode
+/// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
+/// Appending opcodes without changing existing production encodings does not require a bump.
+/// The third word names the program's field ([`FieldId::code`]).
+pub const PROGRAM_FORMAT_VERSION: u64 = 3;
 
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
@@ -3769,6 +3967,10 @@ impl Program {
 
     fn to_binary_impl(&self, include_debug_info: bool) -> (Vec<u64>, Option<DebugInfo>) {
         let mut binary = vec![PROGRAM_MAGIC, PROGRAM_FORMAT_VERSION, self.field.code()];
+        binary.push(u64::from(self.constraint_layouts.is_some()));
+        if let Some(layouts) = self.constraint_layouts {
+            binary.extend_from_slice(&layouts.0);
+        }
 
         // Constant pool: [pool_len, ...words...].
         binary.push(self.constant_pool.len() as u64);
@@ -3842,7 +4044,11 @@ impl Program {
         }
 
         for (slot, fn_idx) in self.entry_points.iter().enumerate() {
-            binary[entry_table_start + slot] = function_markers[*fn_idx] as u64;
+            binary[entry_table_start + slot] = if *fn_idx == NO_ENTRY_POINT {
+                NO_ENTRY_POINT as u64
+            } else {
+                function_markers[*fn_idx] as u64
+            };
         }
         for (jump_position, add_offset) in jumps_to_fix {
             let target = binary[jump_position];
@@ -3858,6 +4064,8 @@ impl Program {
 pub struct ProgramHeader {
     /// The field the program computes over.
     pub field: FieldId,
+    /// Layouts emitted by the compiler, checked before constraint execution.
+    pub constraint_layouts: Option<ConstraintLayouts>,
     /// Interned constant pool (flat words), read at runtime by `mov_const_pool`.
     pub constant_pool: Vec<u64>,
     pub global_frame_size: usize,
@@ -3865,14 +4073,14 @@ pub struct ProgramHeader {
     pub entry_blob_field_count: usize,
     /// Absolute word offsets of each entry point's function marker, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
-    /// its first opcode at `offset + 2`.
+    /// its first opcode at `offset + 2`. [`NO_ENTRY_POINT`] marks an absent entry.
     pub entry_points: Vec<usize>,
     /// Word offset of the first function marker, i.e. where the opcode stream begins.
     pub code_start: usize,
 }
 
-/// Decode a program binary's header: field, constant pool, global frame size, entry blob field
-/// count and the entry-point table.
+/// Decode a program binary's field, layouts, constant pool, global frame size, entry blob
+/// field count and entry-point table.
 ///
 /// # Panics
 ///
@@ -3895,7 +4103,14 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
             program[2]
         )
     });
-    let off = 3;
+    let (constraint_layouts, off) = match program[3] {
+        0 => (None, 4),
+        1 => (
+            Some(ConstraintLayouts(program[4..14].try_into().unwrap())),
+            14,
+        ),
+        _ => panic!("invalid constraint layout tag"),
+    };
     let pool_len = program[off] as usize;
     let constant_pool = program[off + 1..off + 1 + pool_len].to_vec();
     let off = off + 1 + pool_len;
@@ -3908,6 +4123,7 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     let code_start = off + 3 + num_entries;
     ProgramHeader {
         field,
+        constraint_layouts,
         constant_pool,
         global_frame_size,
         entry_blob_field_count,
@@ -3961,7 +4177,7 @@ mod tests {
 
     /// The number of the first Goldilocks copy, `goldilocks_r1c`, which `opcode_numbers_are_pinned`
     /// checks.
-    const FIRST_GOLDILOCKS_OPCODE: usize = 123;
+    const FIRST_GOLDILOCKS_OPCODE: usize = 131;
 
     /// A witgen VM over `F` without tapes.
     fn empty_witgen_vm<F: mavros_artifacts::MavrosField>() -> VM {
@@ -4023,6 +4239,7 @@ mod tests {
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 20,
@@ -4143,6 +4360,7 @@ mod tests {
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: FRAME,
@@ -4223,6 +4441,7 @@ mod tests {
     fn a_scalar_result_inside_a_wide_operand_is_caught() {
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4277,6 +4496,7 @@ mod tests {
         ];
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4489,6 +4709,7 @@ mod tests {
 
                     let program = Program {
                         field: FieldId::Bn254,
+                        constraint_layouts: None,
                         functions: vec![Function {
                             name: "main".to_string(),
                             frame_size,
@@ -4565,6 +4786,7 @@ mod tests {
 
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4627,6 +4849,7 @@ mod tests {
         const BITS: u64 = 192;
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4979,11 +5202,12 @@ mod tests {
     /// opcode standing as its first field's copy, then each further field's copies), so
     /// inserting, removing or reordering an opcode renumbers every later one and breaks every
     /// compiled program. Byte sizes cannot see that, so this table pins the numbers, and a change
-    /// to it must bump [`PROGRAM_FORMAT_VERSION`].
+    /// to existing production numbers must bump [`PROGRAM_FORMAT_VERSION`]. Appending a declared
+    /// opcode also shifts Goldilocks' copies, which are persisted in artifacts.
     #[test]
     fn opcode_numbers_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 2,
+            PROGRAM_FORMAT_VERSION, 3,
             "the format version these numbers belong to"
         );
         let pinned: &[(usize, &str)] = &[
@@ -5110,43 +5334,59 @@ mod tests {
             (120, "read_global"),
             (121, "drop_global"),
             (122, "mov_const_pool"),
+            (123, "bn254_verifier_read_witness"),
+            (124, "bn254_verifier_constant"),
+            (125, "bn254_verifier_next_coeff"),
+            (126, "bn254_verifier_accumulate"),
+            (127, "bn254_verifier_rngchk_field"),
+            (128, "bn254_verifier_spread_lookup_field"),
+            (129, "bn254_verifier_pow2_lookup_field"),
+            (130, "bn254_verifier_array_lookup_field"),
             // Goldilocks' copies: appended after every declared opcode, so they move whenever
             // an opcode is declared.
-            (123, "goldilocks_r1c"),
-            (124, "goldilocks_write_witness"),
-            (125, "goldilocks_eq_field"),
-            (126, "goldilocks_lt_field"),
-            (127, "goldilocks_add_field"),
-            (128, "goldilocks_sub_field"),
-            (129, "goldilocks_div_field"),
-            (130, "goldilocks_mul_field"),
-            (131, "goldilocks_cast_field_to_int"),
-            (132, "goldilocks_cast_field_to_int128"),
-            (133, "goldilocks_cast_int_to_field"),
-            (134, "goldilocks_cast_int128_to_field"),
-            (135, "goldilocks_cast_field_to_intn"),
-            (136, "goldilocks_cast_intn_to_field"),
-            (137, "goldilocks_bump_da"),
-            (138, "goldilocks_bump_db"),
-            (139, "goldilocks_bump_dc"),
-            (140, "goldilocks_next_d_coeff"),
-            (141, "goldilocks_pure_to_witness_ref"),
-            (142, "goldilocks_mul_const"),
-            (143, "goldilocks_add_boxed"),
-            (144, "goldilocks_assert_eq_field"),
-            (145, "goldilocks_rangecheck"),
-            (146, "goldilocks_to_bytes_be"),
-            (147, "goldilocks_to_bytes_le"),
-            (148, "goldilocks_to_bits_le"),
-            (149, "goldilocks_to_bits_be"),
-            (150, "goldilocks_spread_lookup_field"),
-            (151, "goldilocks_dspread_lookup_field"),
-            (152, "goldilocks_pow2_lookup_field"),
-            (153, "goldilocks_dpow2_lookup_field"),
-            (154, "goldilocks_rngchk_field"),
-            (155, "goldilocks_array_lookup_field"),
-            (156, "goldilocks_drngchk_field"),
-            (157, "goldilocks_darray_lookup_field"),
+            (131, "goldilocks_r1c"),
+            (132, "goldilocks_write_witness"),
+            (133, "goldilocks_eq_field"),
+            (134, "goldilocks_lt_field"),
+            (135, "goldilocks_add_field"),
+            (136, "goldilocks_sub_field"),
+            (137, "goldilocks_div_field"),
+            (138, "goldilocks_mul_field"),
+            (139, "goldilocks_cast_field_to_int"),
+            (140, "goldilocks_cast_field_to_int128"),
+            (141, "goldilocks_cast_int_to_field"),
+            (142, "goldilocks_cast_int128_to_field"),
+            (143, "goldilocks_cast_field_to_intn"),
+            (144, "goldilocks_cast_intn_to_field"),
+            (145, "goldilocks_bump_da"),
+            (146, "goldilocks_bump_db"),
+            (147, "goldilocks_bump_dc"),
+            (148, "goldilocks_next_d_coeff"),
+            (149, "goldilocks_pure_to_witness_ref"),
+            (150, "goldilocks_mul_const"),
+            (151, "goldilocks_add_boxed"),
+            (152, "goldilocks_assert_eq_field"),
+            (153, "goldilocks_rangecheck"),
+            (154, "goldilocks_to_bytes_be"),
+            (155, "goldilocks_to_bytes_le"),
+            (156, "goldilocks_to_bits_le"),
+            (157, "goldilocks_to_bits_be"),
+            (158, "goldilocks_spread_lookup_field"),
+            (159, "goldilocks_dspread_lookup_field"),
+            (160, "goldilocks_pow2_lookup_field"),
+            (161, "goldilocks_dpow2_lookup_field"),
+            (162, "goldilocks_rngchk_field"),
+            (163, "goldilocks_array_lookup_field"),
+            (164, "goldilocks_drngchk_field"),
+            (165, "goldilocks_darray_lookup_field"),
+            (166, "goldilocks_verifier_read_witness"),
+            (167, "goldilocks_verifier_constant"),
+            (168, "goldilocks_verifier_next_coeff"),
+            (169, "goldilocks_verifier_accumulate"),
+            (170, "goldilocks_verifier_rngchk_field"),
+            (171, "goldilocks_verifier_spread_lookup_field"),
+            (172, "goldilocks_verifier_pow2_lookup_field"),
+            (173, "goldilocks_verifier_array_lookup_field"),
         ];
         let actual: Vec<(usize, &str)> = OPCODE_NAMES.iter().copied().enumerate().collect();
         let mismatches: Vec<_> = actual.iter().zip(pinned).filter(|(a, p)| a != p).collect();
@@ -5155,7 +5395,7 @@ mod tests {
             "renumbered opcodes (actual, pinned): {mismatches:?}"
         );
         assert_eq!(actual.len(), pinned.len(), "opcode count changed");
-        assert_eq!(pinned[FIRST_GOLDILOCKS_OPCODE], (123, "goldilocks_r1c"));
+        assert_eq!(pinned[FIRST_GOLDILOCKS_OPCODE], (131, "goldilocks_r1c"));
         assert!(
             !pinned[FIRST_GOLDILOCKS_OPCODE - 1]
                 .1
@@ -5792,6 +6032,7 @@ mod tests {
         let callee_location = location("helper", 24);
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![
                 Function {
                     name: "main".to_string(),
@@ -5883,7 +6124,7 @@ mod tests {
     #[test]
     fn boxed_layout_encodings_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 2,
+            PROGRAM_FORMAT_VERSION, 3,
             "the format version these encodings belong to"
         );
         let codes = [
@@ -5954,12 +6195,13 @@ mod tests {
 
     #[test]
     fn compact_binary_header_parses_without_debug_metadata() {
-        // Magic, version and field, then no constants, globals, entry blob fields or entries: code
-        // starts at the marker.
+        // Magic, version, field and absent layouts, then no constants, globals, entry blob fields
+        // or entries: code starts at the marker.
         let binary = [
             PROGRAM_MAGIC,
             PROGRAM_FORMAT_VERSION,
             FieldId::Goldilocks.code(),
+            0, // No constraint layouts.
             0,
             0,
             0,
@@ -5970,7 +6212,7 @@ mod tests {
         let header = parse_program_header(&binary);
 
         assert_eq!(header.field, FieldId::Goldilocks);
-        assert_eq!(header.code_start, 7);
+        assert_eq!(header.code_start, 8);
         assert!(header.constant_pool.is_empty());
     }
 
@@ -5982,7 +6224,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported VM program format version Some(1); expected 2")]
+    #[should_panic(expected = "unsupported VM program format version Some(1); expected 3")]
     fn a_binary_of_another_format_version_is_refused() {
         // A version-1 binary, which has no field word.
         parse_program_header(&[PROGRAM_MAGIC, 1, 0, 0, 0, 0, u64::MAX, 0]);
@@ -6009,12 +6251,13 @@ mod tests {
     #[test]
     fn the_program_header_names_its_field() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 2,
+            PROGRAM_FORMAT_VERSION, 3,
             "the format version these codes belong to"
         );
         assert_eq!([FieldId::Bn254.code(), FieldId::Goldilocks.code()], [1, 2]);
         for field in [FieldId::Bn254, FieldId::Goldilocks] {
             let binary = Program {
+                constraint_layouts: None,
                 functions: vec![Function {
                     name: "main".to_string(),
                     frame_size: 2,
@@ -6041,6 +6284,7 @@ mod tests {
         let source_location = location("main", 10);
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 3,
@@ -6071,6 +6315,7 @@ mod tests {
         let source_location = location("shared", 10);
         let program = Program {
             field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 3,

@@ -41,8 +41,8 @@ const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
 ///   `passes::wide_witness_ints` works limb by limb beyond that;
 /// - unsigned sum, difference and ordering: one cell while the field holds the sum, and the carry
 ///   chain in `passes::wide_witness_ints` beyond it;
-/// - unsigned product, and division and remainder (whose check is that product): one cell while
-///   [`single_cell_product_fits`] holds, and the schoolbook beyond it;
+/// - unsigned product, and division and remainder (whose check is a product plus the remainder):
+///   one cell while [`single_cell_product_fits`] holds, and the schoolbook beyond it;
 /// - unsigned shifts: one cell while [`single_cell_shift_fits`] holds, and limb-wise beyond it;
 /// - equality: no width limit;
 /// - signed sum, difference and ordering: the unsigned route, with the sign bits checked beside it;
@@ -96,41 +96,12 @@ fn widest_pow2_row(size: usize) -> BigInt {
 // THE WITNESS LIMB WIDTH
 // ================================================================================================
 
-/// The narrowest admissible limb width, and the fallback for a field too small for any limb, so
-/// [`limb_bits_for_modulus`] is total and the width guards downstream do the refusing.
+/// The narrowest admissible limb width, and the fallback that keeps [`narrow_int_bits_for_modulus`]
+/// total.
 const NARROWEST_LIMB_BITS: usize = 1;
 
-/// What a witness limb has to be able to fit: the parameters that determine its width.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LimbBudget {
-    /// How many `h`-bit partial products must fit in one field element at once.
-    ///
-    /// `1` asks only that a bare `a·b` not wrap. A bigger budget narrows the limb, trading more
-    /// limbs and partial products for longer runs between carry extractions.
-    ///
-    /// Where this binds, `1` is too little for the schoolbook in `passes::wide_witness_ints`, whose
-    /// accumulator holds a limb beside the next product: the lowering refuses such a field, and a
-    /// larger budget narrows the limb until it fits.
-    ///
-    /// This counts **products**, not place-value headroom. Scaling a column, spreading, or
-    /// recombining need the stronger predicates listed on [`witness_limb_bits`].
-    pub accumulated_products: u32,
-}
-
-impl LimbBudget {
-    /// The budget the compiler runs on.
-    ///
-    /// `accumulated_products: 1` gives the **widest** limb the field allows, which suits the
-    /// corpus's 8-, 16- and 32-bit lookup traffic.
-    pub const DEFAULT: LimbBudget = LimbBudget {
-        accumulated_products: 1,
-    };
-}
-
-/// The admissible limb widths, widest first: the powers of two up to [`HOST_LIMB_BITS`].
-///
-/// Never empty: [`NARROWEST_LIMB_BITS`] is always last. The ceiling is not a budget knob, because a
-/// limb lives in a host word.
+/// The admissible limb widths, widest first: the powers of two from [`NARROWEST_LIMB_BITS`] up to
+/// [`HOST_LIMB_BITS`], since a limb lives in a host word.
 fn candidate_widths() -> Vec<usize> {
     (NARROWEST_LIMB_BITS..=HOST_LIMB_BITS)
         .rev()
@@ -141,8 +112,8 @@ fn candidate_widths() -> Vec<usize> {
 /// The witness limb width `h` for `field`.
 ///
 /// The width a value is cut into before its pieces are packed into field elements; see
-/// [`limb_bits_for_modulus`] and [`LimbBudget`]. Each condition below asks for more than one bare
-/// `a·b`, so each is a separate predicate:
+/// [`limb_bits_for_modulus`]. Each condition below asks for more than a limb product, so each is a
+/// separate predicate:
 ///
 /// - that a lowering which scales a limb column by a place value still fits
 ///   ([`two_limb_product_packing_fits`]);
@@ -150,23 +121,27 @@ fn candidate_widths() -> Vec<usize> {
 /// - that the limbs recombine into one cell, which [`combine_limbs_of_value`] asks of the width of
 ///   the value they came from.
 pub fn witness_limb_bits(field: FieldConfig) -> usize {
-    limb_bits_for_modulus(&field_modulus(field), LimbBudget::DEFAULT)
+    limb_bits_for_modulus(&field_modulus(field))
 }
 
-/// The widest admissible limb whose partial products still fit `modulus`, under `budget`.
+/// The widest admissible `h` with `2h <= widest_injective_int_bits`: every product of two limbs is
+/// then a distinct element of `modulus`.
 ///
-/// Stated against the **modulus**, not its bit length: `(2^32 - 1)^2` is below goldilocks by
-/// exactly `2^32`, so a bound such as `2h < field_bits` would reject a 32-bit limb that fits.
-pub fn limb_bits_for_modulus(modulus: &BigInt, budget: LimbBudget) -> usize {
+/// So is a limb times a power of two up to `2^h`, and on bn254 and goldilocks the bits between `2h`
+/// and the injective width hold the partial products and carries a schoolbook column accumulates.
+/// Asking only that a bare `(2^h - 1)^2` stay below the modulus would give goldilocks a 32-bit
+/// limb, whose product has 64 bits: past the injective width that the lowerings state their bounds
+/// against.
+///
+/// # Panics
+///
+/// If `modulus` is below 4, where two bits are not injective.
+pub fn limb_bits_for_modulus(modulus: &BigInt) -> usize {
+    let widest = widest_injective_int_bits_for_modulus(modulus);
     candidate_widths()
         .into_iter()
-        .find(|&limb_bits| {
-            let max_limb = (BigInt::one() << limb_bits) - BigInt::one();
-            let budgeted = (&max_limb * &max_limb) * BigInt::from(budget.accumulated_products);
-            budgeted < *modulus
-        })
-        // A field too small for any limb: the width guards downstream refuse it.
-        .unwrap_or(NARROWEST_LIMB_BITS)
+        .find(|&limb_bits| 2 * limb_bits <= widest)
+        .unwrap_or_else(|| panic!("a field of modulus {modulus} has no witness limb"))
 }
 
 /// Half a witness limb: the width the spread-based bitwise lowering works at.
@@ -176,8 +151,8 @@ pub fn limb_bits_for_modulus(modulus: &BigInt, budget: LimbBudget) -> usize {
 /// # Panics
 ///
 /// If the limb has no exact half: a decomposition range-checks its derived low half to exactly this
-/// many bits, so an odd `h` would leave a bit unconstrained. [`LimbBudget`] admits only powers of
-/// two.
+/// many bits, so an odd `h` would leave a bit unconstrained. [`limb_bits_for_modulus`] admits only
+/// powers of two.
 pub fn witness_half_limb_bits(field: FieldConfig) -> usize {
     let limb_bits = witness_limb_bits(field);
     assert!(
@@ -190,8 +165,8 @@ pub fn witness_half_limb_bits(field: FieldConfig) -> usize {
 /// Whether a `bits`-wide value's two-limb schoolbook product recombines into one field element.
 ///
 /// `bits` must split into exactly two limbs, and the packed column must fit: [`witness_limb_bits`]
-/// certifies only one partial product, and `lo·lo + (lo·hi + hi·lo)·2^h` scales a two-product
-/// column ([`two_limb_packing_fits_modulus`]).
+/// certifies only that one `2h`-bit partial product is injective, and
+/// `lo·lo + (lo·hi + hi·lo)·2^h` scales a two-product column ([`two_limb_packing_fits_modulus`]).
 pub fn two_limb_product_packing_fits(field: FieldConfig, bits: usize) -> bool {
     let limb_bits = witness_limb_bits(field);
     bits.div_ceil(limb_bits) == 2 && two_limb_packing_fits_modulus(&field_modulus(field), limb_bits)
@@ -200,7 +175,7 @@ pub fn two_limb_product_packing_fits(field: FieldConfig, bits: usize) -> bool {
 /// Whether `lo·lo + (lo·hi + hi·lo)·2^h` stays below `modulus` for limbs of `limb_bits` bits.
 ///
 /// With `M = 2^h − 1` the packed value reaches `M²·(2^{h+1} + 1)`, about `2^{3h+1}` (~2^193 on
-/// bn254). The limb width does not imply it: the budget asks only for `M²`.
+/// bn254). The limb width does not imply it: the limb rule asks only that `2h` bits be injective.
 pub fn two_limb_packing_fits_modulus(modulus: &BigInt, limb_bits: usize) -> bool {
     let max_limb = (BigInt::one() << limb_bits) - BigInt::one();
     let packed = &max_limb * &max_limb * ((BigInt::one() << (limb_bits + 1)) + BigInt::one());
@@ -217,9 +192,8 @@ pub fn spread_sum_fits_field(bits: usize, field: FieldConfig) -> bool {
 
 /// Whether the sum of two `bits`-wide spreads stays below `modulus`.
 ///
-/// A `bits`-wide spread is at most `(4^bits − 1)/3`. Stated against the modulus, as
-/// [`limb_bits_for_modulus`] is: a bit-length bound would lose a whole width, refusing a `u32`
-/// bitwise op on goldilocks.
+/// A `bits`-wide spread is at most `(4^bits − 1)/3`. Stated against the modulus: a bit-length bound
+/// would lose a whole width, refusing a `u32` bitwise op on goldilocks.
 pub fn spread_sum_fits_modulus(bits: usize, modulus: &BigInt) -> bool {
     let max_spread = ((BigInt::one() << (2 * bits)) - BigInt::one()) / 3;
     (max_spread << 1) < *modulus
@@ -264,35 +238,50 @@ pub fn widest_cell_sum_bits(field: FieldConfig) -> usize {
 
 /// Whether the single-cell multiplier handles a witnessed unsigned product at `bits`.
 ///
-/// It forms the product in one field element, so `2^(2 * bits)` must stay below the modulus for
-/// the range check on it to tell an honest product from a wrapped one. The one exception is the
-/// two-limb schoolbook at exactly a double host limb, which has a separate packing predicate.
+/// An unsigned division or remainder takes the single cell at the same widths, and its
+/// `q·d + r` reaches past the bare product `(2^bits − 1)^2`, so both are held to
+/// [`single_cell_division_fits_modulus`]. The one exception is the two-limb schoolbook at exactly
+/// a double host limb, which has a separate packing predicate.
 ///
-/// Past this, an unsigned product goes through the schoolbook in `passes::wide_witness_ints`,
-/// which runs first and so is the pass that reads this predicate. So does an unsigned division or
-/// remainder, whose single-cell lowering checks the product `q·d` formed in one element.
+/// Past this, an unsigned product, division or remainder goes through `passes::wide_witness_ints`,
+/// which runs first and so is the pass that reads this predicate.
 pub fn single_cell_product_fits(field: FieldConfig, bits: usize) -> bool {
-    2 * bits <= widest_injective_int_bits(field)
+    single_cell_division_fits_modulus(&field_modulus(field), bits)
         || (bits == 2 * HOST_LIMB_BITS && two_limb_product_packing_fits(field, bits))
 }
 
 /// Whether the single cell takes a witnessed **signed** product, quotient or remainder at `bits`.
 ///
-/// It forms the signed product in one element, which spans `2^(2 · bits − 1)` around zero, and it
-/// divides magnitudes of up to `2^(bits − 1)` with the unsigned single cell's `q·d`, so it needs
-/// `2^(2 · bits)` below the modulus like the unsigned one.
+/// Its gadgets reach less than the unsigned division: the decoded product spans
+/// `±2^(2 · bits − 2)`, and the magnitudes it divides are at most `2^(bits − 1)`. The unsigned
+/// bound is sufficient for both, and one width short on bn254, where an int127 would fit.
 pub fn single_cell_signed_product_fits(field: FieldConfig, bits: usize) -> bool {
-    2 * bits <= widest_injective_int_bits(field)
+    single_cell_division_fits_modulus(&field_modulus(field), bits)
 }
 
 /// Whether the single-cell shift takes a witnessed unsigned shift at `bits`, `left` for a `<<`.
 ///
-/// A left shift forms `value · 2^n` in one field element, and `n` is at most `bits − 1`, so the
-/// product reaches `2^(2 · bits − 1)`. A right shift divides by `2^n` through the single-cell
-/// division, which reads its divisor at the full width.
+/// A left shift forms `value · 2^n` with `n` at most `bits − 1` and splits it at `2^bits`, which is
+/// unique while `2^(2 · bits − 1)` is injective. A right shift is the single-cell division by
+/// `2^n`, which reads its divisor at the full width, so it takes the division's bound.
 pub fn single_cell_shift_fits(field: FieldConfig, bits: usize, left: bool) -> bool {
-    let reach = if left { 2 * bits - 1 } else { 2 * bits };
-    reach <= widest_injective_int_bits(field)
+    if left {
+        2 * bits - 1 <= widest_injective_int_bits(field)
+    } else {
+        single_cell_division_fits_modulus(&field_modulus(field), bits)
+    }
+}
+
+/// Whether the single-cell division `n == q·d + r` at `bits` holds as integers below `modulus`.
+///
+/// `d` is a `bits`-wide operand, and `q` and the derived `r` are range-checked at `bits` at most,
+/// so `q·d + r` reaches `(2^bits − 1)^2 + 2^bits − 1 = 2^bits · (2^bits − 1)`. Below the modulus
+/// both sides are canonical, so the identity modulo `p` is one between integers. Stated against the
+/// modulus: on goldilocks `2^32 · (2^32 − 1)` is exactly `p − 1`, which a bit-length bound would
+/// refuse.
+pub fn single_cell_division_fits_modulus(modulus: &BigInt, bits: usize) -> bool {
+    let top = BigInt::one() << bits;
+    &top * (&top - BigInt::one()) < *modulus
 }
 
 /// `ceil(log2(n))`, the number of bits that count `0..n`: the width of a `bits`-wide shift's legal
@@ -457,64 +446,96 @@ mod tests {
         assert_eq!(widest_injective_int_bits(FieldConfig::goldilocks()), 63);
     }
 
+    /// On bn254 the division's bound answers `2 · bits <= 253` at every width, so every bn254
+    /// product, division and right shift takes the single cell exactly where a bit-length bound
+    /// sends it.
+    #[test]
+    fn the_single_cell_bounds_are_a_bit_length_bound_on_bn254() {
+        let bn254 = FieldConfig::bn254();
+        let widest = widest_injective_int_bits(bn254);
+        for bits in 1..=MAX_SUPPORTED_INT_BITS {
+            let by_length = 2 * bits <= widest;
+            let double_lane = bits == 2 * HOST_LIMB_BITS;
+            assert_eq!(
+                single_cell_product_fits(bn254, bits),
+                by_length || double_lane,
+                "int{bits} product"
+            );
+            assert_eq!(
+                single_cell_signed_product_fits(bn254, bits),
+                by_length,
+                "int{bits} signed"
+            );
+            assert_eq!(
+                single_cell_shift_fits(bn254, bits, false),
+                by_length,
+                "int{bits} right shift"
+            );
+        }
+    }
+
+    /// On goldilocks a `u32` division's `q·d + r` reaches `p - 1`, so the single cell takes every
+    /// product, quotient and shift through 32 bits, and none at 33.
+    #[test]
+    fn goldilocks_divides_a_u32_in_one_cell_with_nothing_to_spare() {
+        let p = goldilocks();
+        let top = BigInt::one() << 32;
+        assert_eq!(&top * (&top - BigInt::one()), &p - BigInt::one());
+
+        let goldilocks_config = FieldConfig::goldilocks();
+        for (bits, fits) in [(32, true), (33, false)] {
+            assert_eq!(single_cell_product_fits(goldilocks_config, bits), fits);
+            assert_eq!(
+                single_cell_signed_product_fits(goldilocks_config, bits),
+                fits
+            );
+            assert_eq!(single_cell_shift_fits(goldilocks_config, bits, false), fits);
+            assert_eq!(single_cell_shift_fits(goldilocks_config, bits, true), fits);
+        }
+    }
+
     /// Goldilocks' modulus.
     fn goldilocks() -> BigInt {
         field_modulus(FieldConfig::goldilocks())
     }
 
-    /// The default budget with `accumulated_products` overridden.
-    fn products(count: u32) -> LimbBudget {
-        LimbBudget {
-            accumulated_products: count,
-        }
-    }
-
-    /// The widest multiple of `alignment` whose budgeted product fits `modulus`.
+    /// The widest multiple of `alignment` whose product with another limb is injective.
     ///
     /// A rule this module deliberately does **not** implement, for
     /// `a_coarser_granularity_would_buy_a_step_but_leave_a_ragged_limb` to compare against.
-    fn coarser_limb_bits(modulus: &BigInt, alignment: usize, count: u32) -> usize {
+    fn coarser_limb_bits(modulus: &BigInt, alignment: usize) -> usize {
+        let widest = widest_injective_int_bits_for_modulus(modulus);
         (alignment..=HOST_LIMB_BITS)
             .rev()
             .filter(|w| w % alignment == 0)
-            .find(|&w| {
-                let max_limb = (BigInt::one() << w) - BigInt::one();
-                &max_limb * &max_limb * BigInt::from(count) < *modulus
-            })
+            .find(|&w| 2 * w <= widest)
             .expect("goldilocks admits at least a byte-wide limb")
     }
 
     #[test]
     fn bn254_is_capped_by_the_host_not_by_the_field() {
         // Every lowering's output depends on `h = 64` on bn254.
-        assert_eq!(witness_limb_bits(FieldConfig::bn254()), 64);
-        assert_eq!(witness_half_limb_bits(FieldConfig::bn254()), 32);
+        let bn254 = FieldConfig::bn254();
+        assert_eq!(witness_limb_bits(bn254), 64);
+        assert_eq!(witness_half_limb_bits(bn254), 32);
 
-        // The host cap binds, not the modulus, so any sane budget gives the same answer.
-        let p = field_modulus(FieldConfig::bn254());
-        for count in [1u32, 2, 16, 1 << 20] {
-            assert_eq!(
-                limb_bits_for_modulus(&p, products(count)),
-                HOST_LIMB_BITS,
-                "bn254 at {count} products"
-            );
-        }
+        // The modulus alone would admit a limb past the host word.
+        assert!(2 * (HOST_LIMB_BITS + 1) <= widest_injective_int_bits(bn254));
     }
 
     #[test]
-    fn goldilocks_gets_a_32_bit_limb_because_a_bare_product_fits() {
-        // Why the predicate uses the modulus: the largest 32-bit product is below goldilocks by
-        // exactly `2^32`.
+    fn goldilocks_gets_a_16_bit_limb_because_a_32_bit_product_is_not_injective() {
+        let goldilocks_config = FieldConfig::goldilocks();
+        assert_eq!(witness_limb_bits(goldilocks_config), 16);
+        assert_eq!(witness_half_limb_bits(goldilocks_config), 8);
+
+        // The largest 32-bit product is below goldilocks, by exactly `2^32`, but has 64 bits
+        // against an injective 63.
         let p = goldilocks();
         let max32 = (BigInt::one() << 32) - BigInt::one();
         assert!(&max32 * &max32 < p, "a bare 32x32 product fits goldilocks");
         assert_eq!(p.clone() - &max32 * &max32, BigInt::one() << 32);
-
-        // So asking only that `a*b` not wrap gives 32, as the default does ...
-        assert_eq!(limb_bits_for_modulus(&p, products(1)), 32);
-        assert_eq!(limb_bits_for_modulus(&p, LimbBudget::DEFAULT), 32);
-        // ... and room for a second product drops it to 16, the next power of two.
-        assert_eq!(limb_bits_for_modulus(&p, products(2)), 16);
+        assert!(2 * 32 > widest_injective_int_bits(goldilocks_config));
     }
 
     #[test]
@@ -522,18 +543,14 @@ mod tests {
         // A byte-aligned rule would reach 24 on goldilocks, where powers of two stop at 16: four
         // limbs per u96 instead of six.
         let p = goldilocks();
-        assert_eq!(coarser_limb_bits(&p, 8, 2), 24);
-        assert_eq!(limb_bits_for_modulus(&p, products(2)), 16);
+        assert_eq!(coarser_limb_bits(&p, 8), 24);
+        assert_eq!(limb_bits_for_modulus(&p), 16);
 
         // Not offered: 24 divides none of the widths lowered, so a u128 would widen to 144 bits,
         // past the narrow threshold.
         assert_ne!(32 % 24, 0);
         assert_ne!(128 % 24, 0);
         assert!(128usize.div_ceil(24) * 24 > narrow_int_bits(FieldConfig::bn254()));
-
-        // At `DEFAULT` the two rules agree on 32, so nothing is lost.
-        assert_eq!(coarser_limb_bits(&p, 8, 1), 32);
-        assert_eq!(limb_bits_for_modulus(&p, LimbBudget::DEFAULT), 32);
     }
 
     /// The pow2 ceiling is a field question, which the two moduli answer differently. That bn254
@@ -599,60 +616,52 @@ mod tests {
             );
 
             // A limb-wise shift shifts a limb by `0..h`, so the limb width needs a table.
-            let h = limb_bits_for_modulus(&modulus, LimbBudget::DEFAULT);
+            let h = limb_bits_for_modulus(&modulus);
             assert!(h <= rows, "limb width {h} has no table at size {size}");
         }
     }
 
     #[test]
-    fn the_default_budget_is_the_one_the_compiler_runs_on() {
-        // `witness_limb_bits` uses the default budget.
-        let p = field_modulus(FieldConfig::bn254());
-        assert_eq!(
-            witness_limb_bits(FieldConfig::bn254()),
-            limb_bits_for_modulus(&p, LimbBudget::DEFAULT)
-        );
-        assert_eq!(LimbBudget::DEFAULT.accumulated_products, 1);
-    }
-
-    #[test]
     fn the_candidate_widths_are_the_powers_of_two_up_to_a_host_word() {
         let widths = candidate_widths();
-        // The ceiling is not a knob: no budget can ask for a limb wider than a host word.
         assert_eq!(*widths.first().unwrap(), HOST_LIMB_BITS);
-        // And the list is never empty, which is what makes `limb_bits_for_modulus` total.
         assert_eq!(*widths.last().unwrap(), NARROWEST_LIMB_BITS);
         assert!(widths.iter().all(|w| w.is_power_of_two()));
         assert!(widths.windows(2).all(|w| w[0] > w[1]));
     }
 
     #[test]
-    fn a_limb_always_multiplies_inside_the_field_within_its_budget() {
+    fn a_limb_product_is_injective_on_every_modulus() {
         // The defining property, checked across every modulus width a field could plausibly have.
         let widths = candidate_widths();
-        for b in [LimbBudget::DEFAULT, products(2), products(7)] {
-            for field_bits in 2..=256usize {
-                // The smallest modulus a `field_bits`-wide field could have, the hardest case.
-                let p = (BigInt::one() << (field_bits - 1)) + BigInt::one();
-                let h = limb_bits_for_modulus(&p, b);
-                assert!(
-                    widths.contains(&h),
-                    "{h} not admissible at {field_bits} bits"
-                );
-                assert!(h <= HOST_LIMB_BITS, "at {field_bits} bits");
+        for field_bits in 3..=256usize {
+            // The smallest modulus a `field_bits`-wide field could have, the hardest case.
+            let p = (BigInt::one() << (field_bits - 1)) + BigInt::one();
+            let h = limb_bits_for_modulus(&p);
+            assert!(
+                widths.contains(&h),
+                "{h} not admissible at {field_bits} bits"
+            );
 
-                let fits = |w: usize| {
-                    let m = (BigInt::one() << w) - BigInt::one();
-                    &m * &m * BigInt::from(b.accumulated_products) < p
-                };
-                // The limb fits, or the field is too small for any limb.
-                assert!(fits(h) || h == NARROWEST_LIMB_BITS, "at {field_bits} bits");
-                // And nothing wider was passed over.
-                for &wider in widths.iter().take_while(|&&w| w > h) {
-                    assert!(!fits(wider), "{wider} was skipped at {field_bits} bits");
-                }
+            // A `2h`-bit value, which every limb product is, is one distinct element ...
+            assert!(
+                combined_limbs_fit_modulus(&p, 2 * h, 1),
+                "at {field_bits} bits"
+            );
+            // ... and nothing wider was passed over.
+            for &wider in widths.iter().take_while(|&&w| w > h) {
+                assert!(
+                    !combined_limbs_fit_modulus(&p, 2 * wider, 1),
+                    "{wider} was skipped at {field_bits} bits"
+                );
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "has no witness limb")]
+    fn a_field_below_four_has_no_limb() {
+        limb_bits_for_modulus(&BigInt::from(3));
     }
 
     #[test]
@@ -668,15 +677,15 @@ mod tests {
     }
 
     #[test]
-    fn a_two_limb_schoolbook_packing_asks_more_than_the_budget_does() {
-        // A field wide enough for `(2^h - 1)^2`, all the budget asks, can be far too narrow for
-        // `(2^h - 1)^2 * 2^(h+1)`.
+    fn a_two_limb_schoolbook_packing_asks_more_than_the_limb_rule_does() {
+        // A field wide enough for a `2h`-bit product, all the limb rule asks, can be far too narrow
+        // for `(2^h - 1)^2 * 2^(h+1)`.
         let h = 64usize;
         let just_fits_the_product = (BigInt::one() << 160) + BigInt::one();
         assert_eq!(
-            limb_bits_for_modulus(&just_fits_the_product, LimbBudget::DEFAULT),
+            limb_bits_for_modulus(&just_fits_the_product),
             h,
-            "the budget's own condition holds at 160 bits"
+            "the limb rule holds at 160 bits"
         );
         assert!(!two_limb_packing_fits_modulus(&just_fits_the_product, h));
 
@@ -746,11 +755,11 @@ mod tests {
             2
         ));
 
-        // The limb width alone does not settle it: two goldilocks 32-bit limbs do not recombine.
+        // The limb width alone does not settle it: four goldilocks 16-bit limbs do not recombine.
         let p = goldilocks();
-        assert_eq!(limb_bits_for_modulus(&p, LimbBudget::DEFAULT), 32);
-        assert!(!combined_limbs_fit_modulus(&p, 32, 2));
-        assert!(combined_limbs_fit_modulus(&p, 32, 1));
+        assert_eq!(limb_bits_for_modulus(&p), 16);
+        assert!(!combined_limbs_fit_modulus(&p, 16, 4));
+        assert!(combined_limbs_fit_modulus(&p, 16, 3));
     }
 
     /// [`combine_limbs_of_value`] refuses a value wider than the field carries injectively, rather

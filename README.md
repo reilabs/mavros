@@ -38,6 +38,55 @@ versioned source map records VM bytecode word offsets, function names, and Noir 
 the executable bytecode in `basic.json` remains byte-for-byte unchanged. Source paths are relative
 to the Noir package root by default; pass `--absolute-paths` to retain absolute paths.
 
+### Verifier Mode
+
+Compute the Spartan matrix contractions `(rAw, rBw, rCw)` with caller-supplied field vectors:
+
+```bash
+mavros --root ./my-noir-project --verify --r r.json --w w.json
+```
+
+Both files contain JSON arrays of decimal field strings, for example `["3", "17", "42"]`. `r` has
+one entry per R1CS constraint. `w` covers the complete witness layout in order: algebraic witnesses
+(including column zero), multiplicities, challenges, table data, and lookup data. Vector lengths
+must match exactly. All entries may be arbitrary, including `w[0]`; the caller supplies any protocol
+randomness. Paths to vector files are relative to the current working directory.
+
+Each string must be canonical: unsigned decimal without leading zeros (except `"0"`), and strictly
+less than the field modulus. Values are rejected rather than reduced modulo the field.
+
+Verifier mode requires a single binary package. For a multi-binary workspace, select a member with
+`--root` or configure `default-member` in `Nargo.toml`; otherwise the command fails before compiling
+any member or writing a result.
+
+The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, and `r_cw` as decimal
+strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation is a
+component of a verifier, not a complete proof verification protocol.
+
+Prover artifacts contain only witgen and AD. To additionally emit a separate verifier artifact:
+
+```bash
+mavros compile ./my-noir-project --verifier-output target/verifier.json
+```
+
+`verifier.json` contains only verifier bytecode plus `witness_layout` and `constraints_layout`; it
+contains no matrix rows or prover entry points. `--include-debug-info` also writes
+`verifier.debug.json`. Default compilation emits no verifier code. `--verify` compiles and runs only
+the verifier artifact.
+
+Rust callers compile it with `mavros_compiler::api::compile_verifier_bytecode(&mut driver, options)`
+and pass that binary to
+`run_verifier_from_binary(&binary, &r, &w, witness_layout, constraints_layout, None)`. No R1CS
+matrices are required at runtime. Both artifacts must come from the same circuit compilation;
+applications must associate the verifier artifact with their trusted circuit configuration. Verifier
+execution uses a dedicated forward bytecode entry point: witness writes read the next value from
+`w`, linear combinations use field arithmetic, and constraints accumulate three scalars weighted by
+`r`. It allocates no AD expression nodes or matrix output vectors. Lookup and table constraints are
+evaluated from the same layouts. Bytecode format version 3 binds the field and constraint layouts to
+each compiled artifact; recompile older artifacts before using the current VM. AD and verifier
+execution reject mismatched layouts. LLVM and WASM artifacts still expose the existing witgen and AD
+entry points; the forward verifier is currently available through the VM API and CLI.
+
 ### Per-Function FlameGraphs
 
 Run the full compiler and VM pipeline with `--profile` to generate interactive per-function

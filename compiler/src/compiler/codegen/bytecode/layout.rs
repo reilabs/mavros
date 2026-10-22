@@ -1,5 +1,6 @@
 //! Tools and utilities for computing layouts when generating bytecode.
 
+use super::WitnessMode;
 use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::{IntBits, int_bits::HOST_LIMB_BITS};
 
@@ -22,6 +23,7 @@ use crate::{
 /// Assists in computing the layout for a single virtual machine stack frame.
 pub struct FrameLayouter {
     pub next_free: usize,
+    mode: WitnessMode,
     pub variables: HashMap<ValueId, usize>,
 
     /// The cells one element of the program's field occupies.
@@ -29,13 +31,14 @@ pub struct FrameLayouter {
 }
 
 impl FrameLayouter {
-    pub fn new(field: FieldConfig) -> Self {
-        Self::with_field_cells(field.storage_cells())
+    pub fn new(field: FieldConfig, mode: WitnessMode) -> Self {
+        Self::with_field_cells(field.storage_cells(), mode)
     }
 
-    pub(super) fn with_field_cells(field_cells: usize) -> Self {
+    pub(super) fn with_field_cells(field_cells: usize, mode: WitnessMode) -> Self {
         Self {
             next_free: 2,
+            mode,
             variables: HashMap::default(),
             field_cells,
         }
@@ -89,7 +92,7 @@ impl FrameLayouter {
 
     /// Returns the size of `tp` in `u64` cells.
     pub fn type_size(&self, tp: &Type) -> usize {
-        slot_cells(tp, self.field_cells)
+        slot_cells(tp, self.field_cells, self.mode)
     }
 
     pub fn alloc_scratch(&mut self, count: usize) -> bytecode::FramePosition {
@@ -189,17 +192,18 @@ pub struct GlobalFrameLayouter {
     pub offsets: Vec<usize>,
     pub sizes: Vec<usize>,
     pub total_size: usize,
+    witnesses: Vec<bool>,
 }
 
 impl GlobalFrameLayouter {
-    pub fn new(ssa: &HLSSA) -> Self {
+    pub fn new(ssa: &HLSSA, mode: WitnessMode) -> Self {
         let global_types = ssa.get_global_types();
         let field_cells = ssa.field().storage_cells();
         let mut offsets = Vec::new();
         let mut sizes = Vec::new();
         let mut next_free = 0usize;
         for typ in global_types.iter() {
-            let size = slot_cells(typ, field_cells);
+            let size = slot_cells(typ, field_cells, mode);
             offsets.push(next_free);
             sizes.push(size);
             next_free += size;
@@ -208,7 +212,12 @@ impl GlobalFrameLayouter {
             offsets,
             sizes,
             total_size: next_free,
+            witnesses: global_types.iter().map(|ty| ty.is_witness_of()).collect(),
         }
+    }
+
+    pub fn is_witness(&self, global: usize) -> bool {
+        self.witnesses[global]
     }
 
     pub fn get_offset(&self, global: usize) -> usize {
@@ -221,10 +230,11 @@ impl GlobalFrameLayouter {
 }
 
 /// The `u64` cells a value of type `tp` occupies in a frame or in the globals, where a field
-/// element takes `field_cells`.
-pub fn slot_cells(tp: &Type, field_cells: usize) -> usize {
+/// element takes `field_cells` and witnesses use the representation selected by `mode`.
+fn slot_cells(tp: &Type, field_cells: usize, mode: WitnessMode) -> usize {
     match &tp.expr {
         TypeExpr::Field => field_cells,
+        TypeExpr::WitnessOf(_) if mode == WitnessMode::Verifier => field_cells,
         // Width-driven, and it must stay that way: `alloc_int` advances the frame by
         // `int_cell_count`, so a second formula here would silently disagree with it for any width
         // needing more than one cell.
@@ -237,7 +247,7 @@ pub fn slot_cells(tp: &Type, field_cells: usize) -> usize {
         }
         TypeExpr::Tuple(_) => ice_non_elided_tuple(),
         // Blobs are stored by value, inline in the frame.
-        TypeExpr::Blob(elem, n) => n * slot_cells(elem, field_cells),
+        TypeExpr::Blob(elem, n) => n * slot_cells(elem, field_cells, mode),
         TypeExpr::Function(_) => ice!("function types are erased before codegen: {tp}"),
     }
 }
@@ -298,6 +308,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_and_global_witness_blobs_have_the_same_layout() {
+        let mut ssa = HLSSA::new();
+        let witness = Type::witness_of(Type::field());
+        ssa.set_global_types(vec![
+            witness.clone(),
+            Type::blob(witness.clone(), 3),
+            Type::blob(Type::blob(witness, 2), 3),
+            Type::field(),
+        ]);
+        for mode in [WitnessMode::Ad, WitnessMode::Verifier] {
+            let local = FrameLayouter::new(ssa.field(), mode);
+            let global = GlobalFrameLayouter::new(&ssa, mode);
+            let witness_cells = match mode {
+                WitnessMode::Ad => constants::POINTER_SIZE_CELLS,
+                WitnessMode::Verifier => ssa.field().storage_cells(),
+            };
+            let expected = [
+                witness_cells,
+                3 * witness_cells,
+                6 * witness_cells,
+                ssa.field().storage_cells(),
+            ];
+            let mut offset = 0;
+            for (i, (ty, size)) in ssa.get_global_types().iter().zip(expected).enumerate() {
+                assert_eq!(local.type_size(ty), size);
+                assert_eq!(global.get_size(i), size);
+                assert_eq!(global.get_offset(i), offset);
+                offset += size;
+            }
+            assert_eq!(global.total_size, offset);
+        }
+    }
+
+    #[test]
     fn a_width_past_the_old_cap_is_laid_out_rather_than_refused() {
         // No corpus program reaches these widths, so these asserts pin the layout there:
         // `IntBits::limbs_for_bits` is width-generic, and what is checked is that the bound in
@@ -305,7 +349,8 @@ mod tests {
         assert_eq!(int_cell_count(200), 4, "200 bits is four 64-bit cells");
         assert_eq!(int_cell_count(MAX_SUPPORTED_INT_BITS), 256);
         assert_eq!(
-            FrameLayouter::new(FieldConfig::bn254()).type_size(&Type::int(MAX_SUPPORTED_INT_BITS)),
+            FrameLayouter::new(FieldConfig::bn254(), WitnessMode::Ad)
+                .type_size(&Type::int(MAX_SUPPORTED_INT_BITS)),
             256
         );
     }
@@ -314,7 +359,7 @@ mod tests {
     fn the_two_frame_size_formulas_agree_at_every_width() {
         // `alloc_value` uses `type_size` and `alloc_int` uses `int_cell_count`, and a value can be
         // allocated by either, so the two must agree at every width.
-        let layouter = FrameLayouter::new(FieldConfig::bn254());
+        let layouter = FrameLayouter::new(FieldConfig::bn254(), WitnessMode::Ad);
         for bits in [
             1usize,
             8,
@@ -342,12 +387,12 @@ mod tests {
     fn a_field_slot_is_the_fields_storage_cells() {
         let bn254 = FieldConfig::bn254();
         assert_eq!(
-            FrameLayouter::new(bn254).type_size(&Type::field()),
+            FrameLayouter::new(bn254, WitnessMode::Ad).type_size(&Type::field()),
             bn254.storage_cells()
         );
 
         // Three cells, which no field has, so a slot sized by a literal fails.
-        let mut layouter = FrameLayouter::with_field_cells(3);
+        let mut layouter = FrameLayouter::with_field_cells(3, WitnessMode::Ad);
         assert_eq!(layouter.type_size(&Type::field()), 3);
         assert_eq!(layouter.type_size(&Type::blob(Type::field(), 2)), 6);
         let named = layouter.alloc_field(ValueId(0));

@@ -11,8 +11,8 @@ use crate::{
     ConstraintsLayout, TableKind, WitnessLayout,
     array::BoxedValue,
     bytecode::{
-        self, AllocationInstrumenter, AllocationType, ENTRY_AD, ENTRY_WITGEN, Int128, OpCode,
-        TableInfo, VM, parse_program_header, pow2_rows,
+        self, AllocationInstrumenter, AllocationType, Arrays, ENTRY_AD, ENTRY_VERIFIER,
+        ENTRY_WITGEN, Int128, OpCode, TableInfo, VM, parse_program_header, pow2_rows,
     },
 };
 
@@ -455,7 +455,11 @@ fn run_phase1_impl<F: mavros_artifacts::MavrosField>(
     let entry = *header
         .entry_points
         .get(ENTRY_WITGEN)
-        .expect("Program has no witgen entry point");
+        .filter(|entry| **entry != bytecode::NO_ENTRY_POINT)
+        .ok_or_else(|| TrapError {
+            message: Some("Program has no witgen entry point; use the prover artifact".to_string()),
+            stack_trace: Vec::new(),
+        })?;
     let global_frame_size = header.global_frame_size;
     let mut out_a = vec![F::ZERO; constraints_layout.size()];
     let mut out_b = vec![F::ZERO; constraints_layout.size()];
@@ -909,6 +913,58 @@ pub fn run_profiled<F: mavros_artifacts::MavrosField>(
     ))
 }
 
+/// The three matrix contractions used by a Spartan verifier. These values do not
+/// indicate whether a witness satisfies the circuit.
+// FIELD-ASSUMPTION: L1-alias
+// The default result type is the compiler's BN254 field.
+pub struct VerifierResult<F = crate::Field> {
+    pub r_aw: F,
+    pub r_bw: F,
+    pub r_cw: F,
+    pub instrumenter: AllocationInstrumenter,
+}
+
+/// Compute `(r A w, r B w, r C w)` from the compiled constraint traversal.
+///
+/// `r` has one entry per constraint and `w` covers the entire witness layout,
+/// including multiplicities, challenges, and lookup witnesses. Every entry is
+/// arbitrary: in particular, `w[0]` need not be one. No prover inputs or satisfying
+/// witness are required. The dedicated verifier entry point reads witness values
+/// from `w` and evaluates linear combinations forward, without allocating AD
+/// nodes, AD output vectors, or materializing the R1CS matrices.
+/// Pass the separate verifier artifact, not the witgen/AD prover binary.
+#[instrument(skip_all, name = "Interpreter::run_verifier")]
+pub fn run_verifier<F: mavros_artifacts::MavrosField>(
+    program: &[u64],
+    r: &[F],
+    w: &[F],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<bytecode::DebugInfo>,
+) -> Result<VerifierResult<F>, TrapError> {
+    let mut a = F::ZERO;
+    let mut b = F::ZERO;
+    let mut c = F::ZERO;
+    let (instrumenter, _) = run_constraint_program(
+        program,
+        r,
+        witness_layout,
+        constraints_layout,
+        debug_info,
+        false,
+        ConstraintOutputs::Verifier {
+            outputs: [&mut a, &mut b, &mut c],
+            witness: w,
+        },
+    )?;
+    Ok(VerifierResult {
+        r_aw: a,
+        r_bw: b,
+        r_cw: c,
+        instrumenter,
+    })
+}
+
 #[instrument(skip_all, name = "Interpreter::run_ad")]
 pub fn run_ad<F: mavros_artifacts::MavrosField>(
     program: &[u64],
@@ -973,34 +1029,137 @@ fn run_ad_impl<F: mavros_artifacts::MavrosField>(
     ),
     TrapError,
 > {
-    let header = parse_program_header(program);
-    check_program_field::<F>(&header);
-    let debug_info = debug_info.unwrap_or_default();
-    let entry = *header
-        .entry_points
-        .get(ENTRY_AD)
-        .expect("Program has no AD entry point");
-    let global_frame_size = header.global_frame_size;
-    assert!(
-        coeffs.len() == constraints_layout.size(),
-        "{} AD coefficients for {} constraints",
-        coeffs.len(),
-        constraints_layout.size()
-    );
     let mut out_da = vec![F::ZERO; witness_layout.size()];
     let mut out_db = vec![F::ZERO; witness_layout.size()];
     let mut out_dc = vec![F::ZERO; witness_layout.size()];
-    let mut global_frame = vec![0u64; global_frame_size];
-    let mut vm = VM::new_ad(
-        out_da.as_mut_ptr(),
-        out_db.as_mut_ptr(),
-        out_dc.as_mut_ptr(),
-        coeffs.as_ptr(),
+    let (instrumenter, profile) = run_constraint_program(
+        program,
+        coeffs,
         witness_layout,
         constraints_layout,
-        global_frame.as_mut_ptr(),
-        header.constant_pool,
-    );
+        debug_info,
+        profile,
+        ConstraintOutputs::Ad([&mut out_da, &mut out_db, &mut out_dc]),
+    )?;
+    Ok((out_da, out_db, out_dc, instrumenter, profile))
+}
+
+/// Borrowed buffers encode which output capacities each execution mode needs.
+enum ConstraintOutputs<'a, F> {
+    /// Allocated by `run_ad_impl` with exactly `witness_layout.size()` elements each.
+    Ad([&'a mut [F]; 3]),
+    Verifier {
+        outputs: [&'a mut F; 3],
+        witness: &'a [F],
+    },
+}
+
+impl<F> ConstraintOutputs<'_, F> {
+    fn entry(&self) -> usize {
+        match self {
+            Self::Ad(_) => ENTRY_AD,
+            Self::Verifier { .. } => ENTRY_VERIFIER,
+        }
+    }
+
+    #[cfg(feature = "vm-profile")]
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Ad(_) => "AD",
+            Self::Verifier { .. } => "Verifier",
+        }
+    }
+}
+
+/// Shared dispatch for AD and verifier execution. The output storage is owned by
+/// the callers above and remains alive until dispatch and reference-counted
+/// sensitivity propagation finish.
+fn run_constraint_program<F: mavros_artifacts::MavrosField>(
+    program: &[u64],
+    coeffs: &[F],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<bytecode::DebugInfo>,
+    profile: bool,
+    outputs: ConstraintOutputs<'_, F>,
+) -> Result<(AllocationInstrumenter, crate::FlamegraphProfile), TrapError> {
+    if coeffs.len() != constraints_layout.size() {
+        return Err(TrapError {
+            message: Some(format!(
+                "constraint coefficient length: expected {}, got {}",
+                constraints_layout.size(),
+                coeffs.len()
+            )),
+            stack_trace: Vec::new(),
+        });
+    }
+    if let ConstraintOutputs::Verifier { witness, .. } = &outputs
+        && witness.len() != witness_layout.size()
+    {
+        return Err(TrapError {
+            message: Some(format!(
+                "verifier w length: expected {}, got {}",
+                witness_layout.size(),
+                witness.len()
+            )),
+            stack_trace: Vec::new(),
+        });
+    }
+    let header = parse_program_header(program);
+    check_program_field::<F>(&header);
+    let debug_info = debug_info.unwrap_or_default();
+    let entry = *header.entry_points.get(outputs.entry())
+        .filter(|entry| **entry != bytecode::NO_ENTRY_POINT)
+        .ok_or_else(|| TrapError {
+            message: Some(match &outputs {
+                ConstraintOutputs::Ad(_) => "Program has no AD entry point",
+                ConstraintOutputs::Verifier { .. } => "Program has no forward verifier entry point; compile a separate verifier artifact",
+            }.to_string()),
+            stack_trace: Vec::new(),
+        })?;
+    if header.constraint_layouts
+        != Some(bytecode::ConstraintLayouts::new(
+            witness_layout,
+            constraints_layout,
+        ))
+    {
+        return Err(TrapError {
+            message: Some("constraint layouts do not match bytecode".to_string()),
+            stack_trace: Vec::new(),
+        });
+    }
+    #[cfg(feature = "vm-profile")]
+    let profile_name = outputs.name();
+    let mut global_frame = vec![0u64; header.global_frame_size];
+    // Exclusive borrows keep these buffers alive throughout dispatch and AD propagation.
+    let mut vm = match outputs {
+        ConstraintOutputs::Ad(buffers) => {
+            let [a, b, c] = buffers.map(|buffer| buffer.as_mut_ptr());
+            VM::new_ad(
+                a,
+                b,
+                c,
+                coeffs.as_ptr(),
+                witness_layout,
+                constraints_layout,
+                global_frame.as_mut_ptr(),
+                header.constant_pool,
+            )
+        }
+        ConstraintOutputs::Verifier { outputs, witness } => VM::new_constraint::<F>(
+            Arrays {
+                as_verifier: crate::verifier::VerifierArrays::new(
+                    outputs.map(|output| output as *mut F),
+                    witness.as_ptr(),
+                    coeffs.as_ptr(),
+                    witness_layout,
+                    constraints_layout,
+                ),
+            },
+            global_frame.as_mut_ptr(),
+            header.constant_pool,
+        ),
+    };
 
     let frame = Frame::push(
         program[entry + 1],
@@ -1022,7 +1181,7 @@ fn run_ad_impl<F: mavros_artifacts::MavrosField>(
     unsafe { dispatch(pc, frame, &mut vm) };
 
     #[cfg(feature = "vm-profile")]
-    vm.report_opcode_profile("AD");
+    vm.report_opcode_profile(profile_name);
 
     if vm.trapped {
         return Err(TrapError {
@@ -1032,13 +1191,7 @@ fn run_ad_impl<F: mavros_artifacts::MavrosField>(
     }
 
     let instruction_profile = vm.take_instruction_profile();
-    Ok((
-        out_da,
-        out_db,
-        out_dc,
-        vm.allocation_instrumenter,
-        instruction_profile,
-    ))
+    Ok((vm.allocation_instrumenter, instruction_profile))
 }
 
 /// Flatten ordered input values into the entry blob's field sequence.
@@ -1093,6 +1246,101 @@ mod tests {
     use super::*;
     use crate::Field;
     use mavros_int_semantics::IntBits;
+
+    #[test]
+    fn verifier_dispatch_uses_each_fields_storage_width() {
+        use bytecode::{FieldOpCode as Op, FramePosition as P, Function, Program};
+        use mavros_artifacts::MavrosField;
+
+        fn check<F: MavrosField>(emit: impl Fn(Op) -> OpCode) {
+            let wl = WitnessLayout {
+                guard_index: None,
+                return_len: 0,
+                algebraic_size: 2,
+                multiplicities_size: 2,
+                challenges_size: 1,
+                tables_data_size: 2,
+                lookups_data_size: 1,
+            };
+            let cl = ConstraintsLayout {
+                algebraic_size: 1,
+                tables_data_size: 3,
+                lookups_data_size: 1,
+            };
+            // Adjacent field slots catch handlers that assume bn254's four-cell width.
+            let [one, value, constant, coeff] =
+                std::array::from_fn(|i| P(2 + i * F::STORAGE_CELLS));
+            let mut code: Vec<_> = [
+                Op::VerifierReadWitness { res: one },
+                Op::VerifierReadWitness { res: value },
+                Op::VerifierConstant {
+                    res: constant,
+                    v: value,
+                },
+                Op::VerifierNextCoeff { v: coeff },
+                Op::VerifierAccumulate {
+                    v: constant,
+                    coeff,
+                    matrix: 0,
+                },
+                Op::VerifierAccumulate {
+                    v: value,
+                    coeff,
+                    matrix: 1,
+                },
+                Op::VerifierAccumulate {
+                    v: one,
+                    coeff,
+                    matrix: 2,
+                },
+                Op::VerifierRngchkField {
+                    val: value,
+                    flag: one,
+                    bits: 1,
+                },
+            ]
+            .into_iter()
+            .map(emit)
+            .collect();
+            code.push(OpCode::Ret {});
+            let program = Program {
+                field: F::ID,
+                constraint_layouts: Some(bytecode::ConstraintLayouts::new(wl, cl)),
+                functions: vec![Function {
+                    name: "verifier".into(),
+                    frame_size: 2 + 4 * F::STORAGE_CELLS,
+                    code,
+                    source_locations: vec![],
+                }],
+                entry_points: vec![bytecode::NO_ENTRY_POINT, bytecode::NO_ENTRY_POINT, 0],
+                entry_blob_field_count: 0,
+                global_frame_size: 0,
+                constant_pool: vec![],
+            }
+            .to_binary();
+            let w = [3u64, 5, 7, 11, 13, 17, 19, 23].map(F::from);
+            let r = [29u64, 31, 37, 41, 43].map(F::from);
+            let [w0, value, m0, m1, alpha, y0, y1, lookup] = w;
+            // Explicit matrix rows, including table sum and lookup rows, at arbitrary w.
+            let rows = [
+                [w0 * value, value, w0],
+                [y0, alpha, m0],
+                [y1, alpha - w0, m1],
+                [y0 + y1, w0, lookup],
+                [lookup, alpha - value, w0],
+            ];
+            let expected = std::array::from_fn::<_, 3, _>(|column| {
+                rows.iter()
+                    .zip(r)
+                    .fold(F::ZERO, |sum, (row, r)| sum + row[column] * r)
+            });
+            let result = run_verifier(&program, &r, &w, wl, cl, None).unwrap();
+            assert_eq!([result.r_aw, result.r_bw, result.r_cw], expected);
+            assert_eq!(result.instrumenter.final_memory_usage(), 0);
+        }
+        check::<Field>(Op::bn254);
+        check::<mavros_artifacts::Goldilocks>(Op::goldilocks);
+    }
 
     /// The frame's cell count and the compiler's are the same.
     #[test]
@@ -1228,8 +1476,10 @@ mod tests {
             source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1); code.len()],
             code,
         };
+        let (wl, cl) = every_table_layouts();
         Program {
             field: F::ID,
+            constraint_layouts: Some(bytecode::ConstraintLayouts::new(wl, cl)),
             functions: vec![function("main", 36, witgen), function("ad", 8, ad)],
             entry_points: vec![0, 1],
             entry_blob_field_count: 6,
@@ -1413,7 +1663,7 @@ mod tests {
 
     /// A program whose witgen entry has a `frame_size`-cell frame and an `inputs`-element blob, and
     /// whose two entries return at once.
-    fn empty_program(frame_size: usize, inputs: usize) -> Vec<u64> {
+    fn empty_program(frame_size: usize, inputs: usize, constraints: usize) -> Vec<u64> {
         use bytecode::{Function, Program};
 
         let function = |name: &str, frame_size| Function {
@@ -1422,8 +1672,10 @@ mod tests {
             code: vec![OpCode::Ret {}],
             source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1)],
         };
+        let (wl, cl) = empty_layouts(constraints);
         Program {
             field: mavros_artifacts::FieldId::Bn254,
+            constraint_layouts: Some(bytecode::ConstraintLayouts::new(wl, cl)),
             functions: vec![function("main", frame_size), function("ad", 2)],
             entry_points: vec![0, 1],
             entry_blob_field_count: inputs,
@@ -1458,7 +1710,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let inputs = [1u64, 2].map(Field::from);
         let result = run(
-            &empty_program(10, 2),
+            &empty_program(10, 2, 0),
             witness_layout,
             constraints_layout,
             &inputs,
@@ -1473,7 +1725,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let inputs = [1u64, 2].map(Field::from);
         let _ = run(
-            &empty_program(9, 2),
+            &empty_program(9, 2, 0),
             witness_layout,
             constraints_layout,
             &inputs,
@@ -1488,7 +1740,7 @@ mod tests {
     fn a_witgen_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let _ = run::<mavros_artifacts::Goldilocks>(
-            &empty_program(2, 0),
+            &empty_program(2, 0, 0),
             witness_layout,
             constraints_layout,
             &[],
@@ -1501,7 +1753,21 @@ mod tests {
     fn an_ad_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let _ = run_ad::<mavros_artifacts::Goldilocks>(
-            &empty_program(2, 0),
+            &empty_program(2, 0, 0),
+            &[],
+            witness_layout,
+            constraints_layout,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a VM program over Bn254 cannot run over Goldilocks")]
+    fn a_verifier_run_over_another_field_is_refused() {
+        let (witness_layout, constraints_layout) = empty_layouts(0);
+        let _ = run_verifier::<mavros_artifacts::Goldilocks>(
+            &empty_program(2, 0, 0),
+            &[],
             &[],
             witness_layout,
             constraints_layout,
@@ -1514,7 +1780,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(2);
         let coeffs = [1u64, 2].map(Field::from);
         let result = run_ad(
-            &empty_program(2, 0),
+            &empty_program(2, 0, 2),
             &coeffs,
             witness_layout,
             constraints_layout,
@@ -1524,29 +1790,39 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "3 AD coefficients for 2 constraints")]
     fn an_ad_run_with_a_coefficient_past_its_constraints_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(2);
         let coeffs = [1u64, 2, 3].map(Field::from);
-        let _ = run_ad(
-            &empty_program(2, 0),
+        let error = run_ad(
+            &empty_program(2, 0, 2),
             &coeffs,
             witness_layout,
             constraints_layout,
             None,
+        )
+        .err()
+        .expect("invalid coefficient length must fail");
+        assert_eq!(
+            error.message(),
+            Some("constraint coefficient length: expected 2, got 3")
         );
     }
 
     #[test]
-    #[should_panic(expected = "1 AD coefficients for 2 constraints")]
     fn an_ad_run_short_of_coefficients_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(2);
-        let _ = run_ad(
-            &empty_program(2, 0),
+        let error = run_ad(
+            &empty_program(2, 0, 2),
             &[Field::from(1u64)],
             witness_layout,
             constraints_layout,
             None,
+        )
+        .err()
+        .expect("invalid coefficient length must fail");
+        assert_eq!(
+            error.message(),
+            Some("constraint coefficient length: expected 2, got 1")
         );
     }
 

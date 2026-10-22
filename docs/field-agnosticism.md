@@ -100,7 +100,7 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   constants through `FieldConfig` (`constant` takes `IntoFieldElement`), which refuses an element of
   another field.
 - **The VM** carries `goldilocks_*` copies of every field opcode in every build. A program binary
-  names its field in its header (format version 2), and a run over another field is refused.
+  names its field in its header (format version 3), and a run over another field is refused.
 - **The R1CS** is generic (`R1CS<F>`, with bn254 as the default): `Driver::generate_r1cs::<F>`
   refuses an `F` other than the program's field, `R1CGen<F>` converts constants with
   `MavrosField::from_element`, and a serialized coefficient is `F::CANONICAL_LIMBS` limbs.
@@ -115,13 +115,47 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
 
 Goldilocks is tested through hand-built SSA (`compiler/tests/bigints/goldilocks.rs`): field
 arithmetic, equality and constant folding at the field's boundary values, a witnessed 64-bit
-decomposition, every integer operation against the integer model below 32 bits, add/sub/bitwise and
-the comparisons up to 63 bits, and the column-pinning probes on both sides of each lowering switch.
-Every other gap is a refusal through the `unsupported` funnel: products, quotients and right shifts
-from 32 bits and left shifts from 33 (the schoolbook and the limb-wise shift take 32-bit witness
-limbs, whose product with a limb or a place value exceeds the field), a witnessed `Field` bit window
-(`x as uN`), whose canonical decomposition is bn254's, and an integer entry parameter wider than 63
-bits, since an `Int` entry parameter is one entry-blob element.
+decomposition, and the integer operations of Phase 5b. Two gaps refuse through the `unsupported`
+funnel: a witnessed `Field` bit window (`x as uN`), whose canonical decomposition is bn254's, and an
+integer entry parameter wider than 63 bits, since an `Int` entry parameter is one entry-blob
+element.
+
+**Phase 5b (integer arithmetic on Goldilocks):** the witness limb is the widest power of two `h`
+whose limb product is an injective integer, `2h <= widest_injective_int_bits`
+(`shared/limbs.rs::limb_bits_for_modulus`): 64 bits on bn254, where the host word caps it, and 16 on
+Goldilocks. A limb times a limb or a place value then has one reading as an element, and a
+schoolbook column has `2^31` partial products of headroom on Goldilocks, so the schoolbook, the
+division and the limb-wise shift take every width. Below them, the single-cell product, division and
+right shift are bounded against the modulus, so they hold every `u32` and `i32`.
+
+The suite checks every integer operation against the integer model on Goldilocks either side of each
+lowering switch up to 63 bits, and the limbed operations at 63, 64, 100 and 128 bits (256 in an
+ignored test) with a witnessed or a constant right operand and with a pure left one, building the
+wide operands inside the program from constants selected by witnessed bits. The column-pinning
+probes run on each lowering, and `wide_witness_ints`' structural audits run on both fields: a
+missing range check on a carry or an answer limb is exploited by moving value between limbs through
+a carry, which neither column probe reaches.
+
+The rest of Phase 5 is open:
+
+- **K-challenge LogUp** (`L4-logup-challenges`): needs a prover-facing challenge layout.
+- **An R1CS format word** (`L1-serde`): the serialized R1CS names neither its field nor its format,
+  and a prover reading K-challenge layouts must tell them apart.
+- **A witnessed `Field`'s bit window** (`L3-felt-limbs`): a decomposition against the configured
+  modulus in `bit_range.rs::lower_witness_field_bit_range`.
+- **Integer entry parameters wider than 63 bits** (`prepare_entry_point.rs`): parameters assembled
+  from ABI limbs.
+- **The Noir path** (`L1-noir-frontend`): the `--field` selector, and Noir's compile-time bn254
+  builtins.
+- **Cast semantics** (`analysis/types.rs::check_casts_into_field`, which is to be removed): the
+  frontend refuses a non-injective `Int → Field` cast, and HLSSA defines `Int → Field` as reduction
+  modulo `p` and `Field → Int` as truncation or zero-extension of the canonical value. Every
+  evaluator (the VM, `hlssa_to_r1cs`, the symbolic evaluators, WASM and `WideWitnessInts`' limb
+  casts) must implement exactly these semantics, and the witness lowering of a reducing cast of a
+  wide witnessed integer needs dedicated constraints. This subsumes the bare
+  `cast WitnessOf(Field) -> Int(n)` item under `L1-noir-frontend`.
+- **A Goldilocks WASM runtime** (`L3-llstruct`, the `[4 x i64]` runtime ABI, `field_runtime!`).
+- **`crypto-primitives`** (Layer 5).
 
 The current state has each site of a field assumption tagged with `// FIELD-ASSUMPTION: <tag>`
 directly in code. The `<tag>` values match the section headings below.
@@ -143,8 +177,8 @@ Repetitive clusters of the same operation get one marker per file with a count.
 
 Completion gate (Phase 5):
 `rg -t rust 'ark_bn254|into_bigint\(|\.0\.0|FELT_LIMBS|FIELD_SIZE|\b254\b'` over
-`compiler/ vm/ mavros-artifacts/ opcode-gen/ wasm-runtime/` returns only façade-internal hits. After
-P5a it returns 162 lines, 43 of them in `compiler/tests/`.
+`compiler/ vm/ mavros-artifacts/ opcode-gen/ wasm-runtime/` returns only façade-internal hits. The
+gate is open: the search returns 158 lines, 43 of them in `compiler/tests/`.
 
 ---
 
@@ -220,10 +254,10 @@ stays raw by design until P5. By file (count):
 - [x] `mavros-artifacts/src/lib.rs` — `lc_serde` writes each coefficient as its `F::CANONICAL_LIMBS`
       canonical limbs, a fixed-size array (`MavrosField::Limbs`) with no length: four limbs for a
       bn254 coefficient and one for a Goldilocks one. The serialized R1CS names no field; a reader
-      must know it (the R1CS version word is a P5b item).
+      must know it (the R1CS version word is a P5 item).
 - [x] `mavros-artifacts/src/lib.rs` — `InputValueOrdered::field_sizes` answers `F::STORAGE_CELLS`.
 
-### `L1-noir-frontend` — The Noir Frontend Computes in bn254 (Hardcoded upstream, P5b)
+### `L1-noir-frontend` — The Noir Frontend Computes in bn254 (Hardcoded upstream, P5)
 
 Noir's `acir_field` chooses bn254 or bls12_381 when Noir is built, so anything Noir evaluates at
 compile time wraps modulo bn254's prime. A `Field` literal crosses the boundary unreduced, as the
@@ -605,7 +639,7 @@ non-native fields; neither is the Noir `Field` used to constrain their arithmeti
       later, benchmarked swap behind the façade impls only; Goldilocks is hand-written (Phase 5).
 - [x] **Program header** — `vm/src/bytecode.rs` (`to_binary`/`to_binary_impl` write it,
       `ProgramHeader`/`parse_program_header` read it) opens with `PROGRAM_MAGIC`,
-      `PROGRAM_FORMAT_VERSION` (2) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
+      `PROGRAM_FORMAT_VERSION` (3) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
       0 names none). Dispatch needs no field selection, since the opcodes name the field
       (`bn254_add_field`, …); the word lets `interpreter::run*::<F>` refuse, in every build, a
       program over another field, whose handlers would read and write the wrong element width.
@@ -637,22 +671,23 @@ Let `B = floor(log2 p)` (bn254: 253; goldilocks: 63). For standard widths on gol
 **mostly representational**:
 
 - `u8/u16` and their products (≤ 32 bits): fit — single cell, any field.
-- `u32`: operands fit; `u32 × u32` (max `= p − 2³²`) _fits_ with zero headroom (matches "u32 can
-  technically be made to fit"); bitwise natural-spread (≤ 32 bits) and shl fit. All **fragile** —
-  correct standalone, but a fused `q·divisor + r` reconstruction can tip over.
+- `u32`: operands fit, and so do bitwise natural-spread (≤ 32 bits), shl, the product and the
+  division. `u32 × u32` (max `= p − 2³²`) is below `p`, and a `u32` division's `q·d + r` reaches
+  exactly `p − 1`, so the single cell holds it with nothing to spare. The bound is stated against
+  the modulus (`shared/limbs.rs::single_cell_division_fits_modulus`), since `2·32` bits exceeds
+  `B = 63`.
 - `u64 / u128 / i64`: a bare value's range `≥ p` (`2⁶⁴ − 1 > p`) ⇒ it **cannot be held injectively
   in one cell**; every recombination into one cell (`shared/limbs.rs`'s `combine_limbs_of_value`,
   signed `sign·2⁶⁴` packing) wraps. `lower_not`'s all-ones mask is **not** in that list: the
   representation splits a witnessed `u64` into limbs on such a field before the complement is
   lowered, so the mask is only ever minted at a width the cell holds.
 
-So on goldilocks standard widths collapse to **{single-field for n ≤ 32, multi-cell for n ≥ 64}**;
-the "operation-strategy-only" band is empty for standard widths. `range_fits_field_injectively`
-(`witness_integer_arith.rs`) flips correctly on a small field, and the FALSE-case codegen is the
-multi-cell representation in `WideWitnessInts`, which takes each operation past the width its
-single-cell lowering holds. The single-cell u128 mul packs `lo + cross·2ʰ ≈ 2³ʰ⁺¹` into one cell
-(~2¹⁹³ at the bn254 limb) and refuses through the funnel below where that does not fit. The
-per-lowering list is under `L6-int-op-strategy`.
+So on goldilocks standard widths collapse to **{single-field for n ≤ 32, multi-cell for n ≥ 64}**,
+operations included. `range_fits_field_injectively` (`witness_integer_arith.rs`) flips correctly on
+a small field, and the FALSE-case codegen is the multi-cell representation in `WideWitnessInts`,
+which takes each operation past the width its single-cell lowering holds. The single-cell u128 mul
+packs `lo + cross·2ʰ ≈ 2³ʰ⁺¹` into one cell (~2¹⁹³ at the bn254 limb) and refuses through the funnel
+below where that does not fit. The per-lowering list is under `L6-int-op-strategy`.
 
 ### Refusing On a Narrow Field
 
@@ -667,7 +702,7 @@ the limb _count_ as well as the packing); `shared/limbs.rs`'s `combine_limbs_of_
 recombination); `witness_field`'s `to_bits` and `to_radix`; `bit_range`'s
 `lower_witness_field_bit_range` (the canonical decomposition at 128-bit halves, which Noir's
 `x as uN` on a witnessed `Field` reaches); and `wide_witness_ints`' `schoolbook` (the product and
-the division) and `lower_shift` (the limb-wise shift).
+the division).
 
 One kind of neighboring check deliberately stays out: an internal invariant no field choice can
 violate (`bit_range`'s "a field `BitRange` cannot exceed a field element").
@@ -717,14 +752,14 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       range-checked carry, and the partial products past the top are held to zero by one constraint
       per left limb. The reductions are planned from the operands' bounds against the modulus, as
       often as the field requires; where one partial product plus its headroom does not fit, the
-      lowering refuses through the funnel above. The one known case is goldilocks at the default
-      `LimbBudget`, whose 32-bit limb's product alone fills the field; `accumulated_products` is the
-      knob that narrows the limb until it fits. Every product that reaches `lower_unsigned_mul`
-      passes `single_cell_product_fits`, directly or as the `q·d` that `lower_unsigned_divmod`
-      re-emits after asserting it, so its two refusals cannot fire and stay as a backstop.
+      lowering refuses through the funnel above. On both configured fields that is out of reach: a
+      column has `2^(B − 2h)` partial products of headroom (`2^125` on bn254, `2^31` on goldilocks).
+      Every product that reaches `lower_unsigned_mul` passes `single_cell_product_fits`, directly or
+      as the `q·d` that `lower_unsigned_divmod` re-emits after asserting it, so its two refusals
+      cannot fire and stay as a backstop.
 - [x] `witness_integer_arith.rs` — `lower_unsigned_divmod` (`q·divisor + r` in one field element).
       The FALSE case is the **division** in `WideWitnessInts`, which takes every unsigned witnessed
-      division and remainder whose product `single_cell_product_fits` says one cell cannot hold. The
+      division and remainder whose `q·d + r` one cell cannot hold (`single_cell_product_fits`). The
       quotient and remainder are witnessed as range-checked limbs, and `q·d + r == n` is one
       schoolbook: the remainder is added to its columns, and each column is held to the dividend's
       limb, with no range check. `r < d` is the carry chain with its top borrow forced out, which
@@ -736,16 +771,15 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       `2^n`). The FALSE case is the **limb-wise shift** in `WideWitnessInts`, which takes every
       unsigned witnessed shift that `single_cell_shift_fits` (`shared/limbs.rs`) says one cell
       cannot hold: a left shift whose `2^(2·bits − 1)` passes the modulus, and a right shift whose
-      division has a product that does. A known amount cuts each limb where its bits land on a limb
+      division's `q·d + r` does. A known amount cuts each limb where its bits land on a limb
       boundary of the answer. Any other amount is `q·h + r`: `r` is keyed into the powers-of-two
       table the narrow shift already uses, every limb is split at `2^r` into two range-checked
-      halves, and a barrel moves limbs by the bits of `q`. `limb_shift_fits` refuses, through the
-      funnel above, a field where a limb times a power of two below it passes an element, which is
-      goldilocks at the default `LimbBudget`. A signed left shift is the unsigned one, and a signed
-      right shift is the unsigned one with the sign filled in: by a known amount the vacated bits
-      are the sign times a constant, and by any other the operand is complemented by its sign before
-      the shift and the answer after it. What reaches `lower_shift` fits the cell, and it asserts
-      so.
+      halves, and a barrel moves limbs by the bits of `q`. The split is unique because the limb rule
+      keeps a limb times a power of two below `2^h` injective. A signed left shift is the unsigned
+      one, and a signed right shift is the unsigned one with the sign filled in: by a known amount
+      the vacated bits are the sign times a constant, and by any other the operand is complemented
+      by its sign before the shift and the answer after it. What reaches `lower_shift` fits the
+      cell, and it asserts so.
 - [x] `witness_integer_arith.rs` — `lower_unsigned_addsub`; `witness_compare.rs` —
       `lower_unsigned_lt` for an unsigned ordering; and `witness_assert.rs` —
       `lower_unsigned_assert_lt` for an asserted one. The FALSE case is the **carry chain** in
@@ -767,7 +801,11 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       The FALSE case is the **sign fill** in `WideWitnessInts`, which takes every witnessed target
       held as limbs and fills each limb past the source with the source's sign bit. What reaches the
       single-element lowering has a target the field carries, and it asserts so.
-- [ ] `witness_bitwise.rs` — `lower_word_bitwise` (spread width).
+- [x] `witness_bitwise.rs` — `lower_word_bitwise` (spread width). The FALSE case is the **half-limb
+      decomposition**: `lower_binary_bitwise` asks `spread_sum_fits_field` before taking the
+      whole-width arm, so a width whose spread sum the field cannot hold falls through to it. A
+      half-limb spread sum is below `2^h`, inside the `2h` bits the limb rule keeps injective, so
+      the refusal states the coupling; it guards no reachable case.
 - [x] `witness_bitwise.rs` — `lower_not`. The FALSE case is the **representation**, with no second
       lowering: `WideWitnessInts` runs before this pass, with only the narrowing-cast lowering
       between them, and splits a witnessed value wider than `multi_cell_int_bits` into limbs,
@@ -775,26 +813,19 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       all-ones mask this mints is bounded by `2^(bits(p) - 1) - 1 < p` on any field and cannot wrap
       at any width. The assert on the bound states the coupling; it guards no reachable case.
 
-**The one open site refuses**, and so never miscompiles, when its span does not fit (see the funnel
-above): `lower_word_bitwise`. What remains for P5 there is the FALSE-case lowering itself, which
-partly exists. `lower_binary_bitwise` asks `spread_sum_fits_field` before taking the whole-width
-arm, so a width whose spread sum the field cannot hold falls through to the half-limb decomposition,
-which does not refuse. What that site refuses is a field whose **half-limb** spread sum does not
-fit, which no decomposition below it helps.
-
 The `signed_value_from_encoded`/`encode_signed_value` sign packing carries a `FIELD-ASSUMPTION`
 comment but no unchecked assumption: every lowering that reads it asserts the bound that keeps its
 place values below the modulus, `widest_cell_sum_bits` for the sum and the difference and
 `single_cell_signed_product_fits` for the product and the division.
 
-Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a bare
-`a·b` fits. A lowering that additionally scales a column by a place value asks
+Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a limb
+product is injective. A lowering that additionally scales a column by a place value asks
 `two_limb_product_packing_fits`, one that spreads asks `spread_sum_fits_field`, and one that
 recombines asks for the width of the value its limbs came from, which is `widest_injective_int_bits`
 — all three in `shared/limbs.rs`, alongside the limb rule they each strengthen. The recombination
-asks the value's width, and leaves the limbs' nominal span (`combined_limbs_fit_modulus`, which the
-limb rule uses) aside, because a decomposition may bound its top limb below a full one, and the
-nominal question would then refuse widths that fit.
+asks the value's width, and leaves the limbs' nominal span (`combined_limbs_fit_modulus`) aside,
+because a decomposition may bound its top limb below a full one, and the nominal question would then
+refuse widths that fit.
 
 ### `L6-int-representation` — Value Range `≥ p` Assumed to Fit One Cell (Representation, P5 multi-cell)
 

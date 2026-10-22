@@ -1012,8 +1012,9 @@ fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: usize) -> Value
 // `U(bits*2)`), so on a ~64-bit field even a 32-bit spread nearly saturates p. A half-limb operand
 // satisfies `2*bits <= h` by construction, which is why every width past the whole-width arm goes
 // through a half-limb decomposition. The whole-width arm checks this same predicate before taking
-// an operand, so the refusal below only covers a field where two spreads of a half-limb do not
-// fit, which no smaller decomposition can avoid.
+// an operand, so the refusal below could fire only on two half-limb spreads. Their sum is below
+// `2^h`, inside the `2h` bits the limb rule in `shared/limbs.rs` keeps injective, so the refusal
+// guards no reachable case.
 fn lower_word_bitwise(
     b: &mut impl HLEmitter,
     kind: BinaryArithOpKind,

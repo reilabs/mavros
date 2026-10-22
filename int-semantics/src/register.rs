@@ -292,7 +292,7 @@ pub const EVALUATORS: &[Evaluator] = &[
             "compiler/src/compiler/passes/shared/shift_guard.rs",
             "compiler/src/compiler/passes/instruction_lowering/witness_bitwise.rs",
             "compiler/src/compiler/passes/instruction_lowering/witness_integer_arith.rs",
-            "compiler/src/compiler/passes/wide_witness_ints.rs",
+            "compiler/src/compiler/passes/wide_witness_ints/mod.rs",
         ],
         conformance: &[
             // The one predicate here that _deletes_ a check rather than building one, and so the

@@ -39,7 +39,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "64-bit modulus and a 32-bit witness limb")]
+    #[should_panic(expected = "64-bit modulus and a 16-bit witness limb")]
     fn the_refusal_names_what_goldilocks_offers() {
         unsupported_on_this_field(
             format_args!("a lowering that does not exist"),

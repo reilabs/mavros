@@ -418,6 +418,12 @@ impl Compiled {
 }
 
 impl<F: HarnessField> Compiled<F> {
+    /// This program as a bn254 one, the field with a WASM lane, or [`None`] over any other field.
+    #[must_use]
+    pub fn as_bn254(&self) -> Option<&Compiled> {
+        (self as &dyn Any).downcast_ref::<Compiled>()
+    }
+
     /// Runs the production pipeline over `ssa`, from `make_struct_access_static` to the VM
     /// binary. The Noir frontend is the only stage skipped, because the program did not come
     /// from Noir source.
@@ -811,10 +817,13 @@ fn eval_expectation(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Expectation {
 pub fn bytecode_listing(ssa: &HLSSA) -> String {
     let flow_analysis = FlowAnalysis::run(ssa);
     let type_info = Types::new().run(ssa, &flow_analysis);
-    let program = CodeGen::new(CodeGenOptions {
-        check_constraints: false,
-        include_debug_info: false,
-    })
+    let program = CodeGen::new(
+        CodeGenOptions {
+            check_constraints: false,
+            include_debug_info: false,
+        },
+        mavros_compiler::compiler::codegen::bytecode::WitnessMode::Ad,
+    )
     .run(ssa, &flow_analysis, &type_info);
     format!("{program}")
 }

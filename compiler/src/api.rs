@@ -11,7 +11,9 @@ use crate::{
     driver::Driver,
     vm::{bytecode::DebugInfo, interpreter},
 };
-use mavros_artifacts::{Field as RawField, InputValueOrdered, MavrosField};
+use mavros_artifacts::{
+    ConstraintsLayout, Field as RawField, InputValueOrdered, MavrosField, WitnessLayout,
+};
 use noirc_abi::input_parser::Format;
 
 type Error = Box<dyn std::error::Error>;
@@ -137,7 +139,7 @@ pub fn run_witgen_phase2<F: MavrosField>(
     )
 }
 
-/// Compiles the whole program (witgen and AD entry points) into a single VM binary.
+/// Compiles witgen and AD into the prover binary. Verifier code is emitted separately.
 pub fn compile_bytecode(
     driver: &mut Driver,
     options: crate::compiler::codegen::CodeGenOptions,
@@ -151,6 +153,22 @@ pub fn compile_bytecode_artifact(
     options: crate::compiler::codegen::CodeGenOptions,
 ) -> Result<crate::driver::BytecodeArtifact, Error> {
     Ok(driver.compile_bytecode_artifact(options)?)
+}
+
+/// Compile the forward verifier binary without witgen or AD functions.
+pub fn compile_verifier_bytecode(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<Vec<u64>, Error> {
+    Ok(driver.compile_verifier_bytecode(options)?)
+}
+
+/// Compile verifier-only bytecode and optional standalone debug metadata.
+pub fn compile_verifier_bytecode_artifact(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<crate::driver::BytecodeArtifact, Error> {
+    Ok(driver.compile_verifier_bytecode_artifact(options)?)
 }
 
 pub fn run_ad_from_binary<F: MavrosField>(
@@ -174,6 +192,24 @@ pub fn run_ad_from_binary<F: MavrosField>(
         r1cs.constraints_layout,
         debug_info,
     )
+}
+
+/// Compute `(r A w, r B w, r C w)` for arbitrary field vectors, without executing
+/// witness generation or checking satisfaction. `r` must have one element per
+/// constraint; `w` must cover the complete witness layout, including column zero
+/// and the post-commitment sections. Randomness is supplied by the caller.
+///
+/// `binary` must come from [`compile_verifier_bytecode`].
+/// Only bytecode and layouts are required; no R1CS matrices are needed.
+pub fn run_verifier_from_binary<F: MavrosField>(
+    binary: &[u64],
+    r: &[F],
+    w: &[F],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<DebugInfo>,
+) -> Result<interpreter::VerifierResult<F>, interpreter::TrapError> {
+    interpreter::run_verifier(binary, r, w, witness_layout, constraints_layout, debug_info)
 }
 
 pub fn run_ad_profiled_from_binary<F: MavrosField>(

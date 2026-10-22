@@ -1224,6 +1224,12 @@ fn gen_opcode_enum(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
 }
 
 fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
+    let field_cases = codes.iter().map(|code| {
+        let name = format_ident!("{}", code.struct_name());
+        let cfg = cfg_attr(&code.cfg);
+        let is_field = code.field.is_some();
+        quote! { #cfg Self::#name { .. } => #is_field }
+    });
     let opcode_writer_cases = codes
         .iter()
         .enumerate()
@@ -1349,6 +1355,11 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
         #tables
 
         impl OpCode {
+            /// Whether this opcode is specialized for a field.
+            pub fn is_field_opcode(&self) -> bool {
+                match self { #(#field_cases),* }
+            }
+
             pub fn to_binary(&self, binary: &mut Vec<u64>, jumps_to_fix: &mut Vec<(usize, isize)>) {
                 match self {
                     #(#opcode_writer_cases),*
