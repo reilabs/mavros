@@ -149,7 +149,7 @@ impl WitnessManifest {
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
 
 /// Domain separator of [`Artifact::digest`]. Bump when its preimage encoding changes.
 pub const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mavros-artifact-v1\0";
@@ -228,9 +228,8 @@ impl<F: MavrosField> Artifact<F> {
         let mut hasher = Sha256::new();
         hasher.update(ARTIFACT_DIGEST_DOMAIN);
         hasher.update(r1cs.digest());
-        bincode::serialize_into(&mut hasher, &(&manifest, &bytecode))
+        bincode::serialize_into(&mut hasher, &(&manifest, &bytecode, &abi))
             .expect("hashing cannot fail: the hasher accepts every byte");
-        hasher.update(&abi);
         Self {
             compiler,
             manifest,
@@ -245,9 +244,9 @@ impl<F: MavrosField> Artifact<F> {
         self.r1cs.field()
     }
 
-    /// SHA-256 over [`ARTIFACT_DIGEST_DOMAIN`], the field-bound [`R1CS::digest`], the
-    /// bincode-encoded manifest and bytecode, and the ABI bytes. Pin this digest to identify the
-    /// whole program; [`SealedR1CS::digest`] identifies only the constraint system.
+    /// SHA-256 over [`ARTIFACT_DIGEST_DOMAIN`], the field-bound [`R1CS::digest`] and the
+    /// bincode-encoded manifest, bytecode and ABI. Pin this digest to identify the whole program;
+    /// [`SealedR1CS::digest`] identifies only the constraint system.
     pub fn digest(&self) -> [u8; 32] {
         self.digest
     }
@@ -490,7 +489,7 @@ mod tests {
             read(&bytes[..HEADER_LEN - 1]),
             Err(ArtifactError::MissingHeader)
         ));
-        for version in [0, ARTIFACT_FORMAT_VERSION + 1] {
+        for version in [0, ARTIFACT_FORMAT_VERSION - 1, ARTIFACT_FORMAT_VERSION + 1] {
             bytes[VERSION_OFFSET..FIELD_OFFSET].copy_from_slice(&version.to_le_bytes());
             assert!(matches!(
                 read(&bytes),
@@ -559,7 +558,21 @@ mod tests {
         );
         assert_eq!(
             hex(&artifact(manifest(), r1cs()).digest()),
-            "b99bd3f535b2a9e8536834ae55ffe41732c9ae1b92a44564b89f9f30e9c7fd9c"
+            "ed60cb0a19c5725509c601e780ffb5869f58d6f5d05db0be110f6bf0f4cb4de6"
+        );
+
+        // The compiler version stays outside the digest.
+        let other = Artifact::new(
+            manifest(),
+            SealedR1CS::new(r1cs()),
+            bytecode(),
+            abi(),
+            "other".into(),
+        );
+        assert_eq!(other.digest(), artifact(manifest(), r1cs()).digest());
+        assert_eq!(
+            read(&other.to_bytes().unwrap()).unwrap().compiler(),
+            "other"
         );
     }
 
