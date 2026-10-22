@@ -98,7 +98,7 @@ pub enum Command {
         #[arg(default_value = DEFAULT_NOIR_PROJECT_PATH, value_parser = parse_path)]
         path: PathBuf,
 
-        /// Output path for the artifact: header, witness manifest, R1CS, VM bytecode and ABI.
+        /// Output path for the Mavros artifact.
         #[arg(long, default_value = "target/program.mavros")]
         output: PathBuf,
 
@@ -222,22 +222,17 @@ pub fn run_compile(
         ).into());
     }
     run_packages(&roots, |root| {
-        let rebase = root != &requested_root;
-        let output = if rebase {
-            root.join(output)
-        } else {
-            output.clone()
-        };
-        let verifier_output = verifier_output.map(|output| {
-            if rebase {
-                root.join(output)
+        let rebase = |path: &PathBuf| {
+            if root != &requested_root {
+                root.join(path)
             } else {
-                output.clone()
+                path.clone()
             }
-        });
+        };
+        let verifier_output = verifier_output.map(rebase);
         run_compile_package(
             root,
-            &output,
+            &rebase(output),
             verifier_output.as_ref(),
             draw_graphs,
             include_debug_info,
@@ -269,15 +264,15 @@ fn run_compile_package(
     )?;
 
     if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+        fs::create_dir_all(parent)?;
     }
 
-    let abi = serde_json::to_vec(driver.abi())?;
-    let artifact = driver.artifact(r1cs, bytecode.binary, abi)?;
-    let bytes = artifact.to_bytes()?;
-    fs::write(output, &bytes)?;
+    let artifact = driver.artifact(r1cs, bytecode.binary)?;
+    let artifact_bytes = {
+        let bytes = artifact.to_bytes()?;
+        fs::write(output, &bytes)?;
+        bytes.len()
+    };
 
     write_vm_debug_info(output, bytecode.debug_info, &driver, absolute_paths)?;
 
@@ -289,7 +284,7 @@ fn run_compile_package(
                 ..CodeGenOptions::default()
             },
         )?;
-        if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(
@@ -306,7 +301,7 @@ fn run_compile_package(
     info!(
         message = %"Artifact saved successfully",
         output = ?output,
-        artifact_bytes = bytes.len(),
+        artifact_bytes,
         r1cs_constraints = artifact.r1cs().constraints.len(),
         binary_size = artifact.bytecode().len() * 8,
     );
@@ -822,6 +817,7 @@ mod tests {
         let root = dir.path();
         for (output, verifier) in [
             ("p.mavros", "p.mavros"),
+            ("p.mavros", "p.json"),
             ("p.mavros", "p.debug.json"),
             ("p.debug.json", "p.json"),
             ("p.mavros", "./p.mavros"),
@@ -872,6 +868,7 @@ mod tests {
         fs::create_dir(root.join("nested")).unwrap();
         let case_insensitive = root.join("SENTINEL").exists();
         for (output, verifier) in [
+            ("sentinel", "SENTINEL"),
             ("p.mavros", "P.mavros"),
             ("p.mavros", "P.json"),
             ("new/p.mavros", "NEW/P.json"),
@@ -1135,7 +1132,10 @@ mod tests {
         let abi: noirc_abi::Abi = serde_json::from_slice(artifact.abi()).unwrap();
         let names: Vec<_> = abi.parameters.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["unused", "unused_u8", "x", "y"]);
-        assert_eq!(artifact.compiler(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            artifact.compiler(),
+            mavros_compiler::driver::COMPILER_VERSION
+        );
         let columns: Vec<_> = manifest
             .parameters
             .iter()

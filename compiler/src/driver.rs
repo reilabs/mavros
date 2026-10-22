@@ -101,6 +101,9 @@ pub struct EntryColumns {
 /// the forward tripwire once a small field (goldilocks) needs more than one challenge.
 pub const DEFAULT_LOGUP_SOUNDNESS_BITS: u32 = 128;
 
+/// Recorded in every artifact: the release version of the Mavros workspace.
+pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub struct Driver {
     /// The Noir package being compiled, or `None` for a driver seeded with a hand-built
     /// [`HLSSA`] (see [`Driver::from_ssa`]). Only the frontend stage and the source-path
@@ -1040,19 +1043,21 @@ impl Driver {
         Ok(manifest)
     }
 
+    /// Packs `r1cs` and `bytecode` with this driver's witness manifest and ABI; requires what
+    /// [`Self::witness_manifest`] does.
     pub fn artifact<F: MavrosField>(
         &self,
         r1cs: SealedR1CS<F>,
         bytecode: Vec<u64>,
-        abi: Vec<u8>,
     ) -> Result<Artifact<F>, Error> {
         let manifest = self.witness_manifest(&r1cs)?;
+        let abi = serde_json::to_vec(self.abi()).expect("a Noir ABI always serializes to JSON");
         Ok(Artifact::new(
             manifest,
             r1cs,
             bytecode,
             abi,
-            env!("CARGO_PKG_VERSION").to_string(),
+            COMPILER_VERSION.to_string(),
         ))
     }
 
