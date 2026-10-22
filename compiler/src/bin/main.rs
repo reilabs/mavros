@@ -10,7 +10,9 @@ use mavros_artifacts::Field as RawField;
 use mavros_compiler::compiler::codegen::r1cs_compact;
 use mavros_compiler::{
     Project, api,
-    compiler::codegen::{CodeGenOptions, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts},
+    compiler::codegen::{
+        CodeGenOptions, hlssa_to_r1cs::SealedR1CS, llssa_to_llvm::WasmCompileOpts,
+    },
     driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
     panic_handler, plotting,
 };
@@ -96,7 +98,7 @@ pub enum Command {
         #[arg(default_value = DEFAULT_NOIR_PROJECT_PATH, value_parser = parse_path)]
         path: PathBuf,
 
-        /// Output path for R1CS constraints (bincode).
+        /// Output path for the versioned R1CS artifact.
         #[arg(long, default_value = "target/r1cs.bin")]
         r1cs_output: PathBuf,
 
@@ -172,7 +174,7 @@ pub fn compile_to_r1cs(
     draw_graphs: bool,
     logup_soundness: u32,
     profile: bool,
-) -> Result<(Driver, R1CS), Error> {
+) -> Result<(Driver, SealedR1CS), Error> {
     let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
     driver.set_logup_soundness(logup_soundness);
@@ -299,9 +301,10 @@ fn run_compile_package(
         }
     }
 
-    // Save R1CS as bincode
-    let r1cs_bytes = bincode::serialize(&r1cs)?;
-    fs::write(r1cs_output, r1cs_bytes)?;
+    let r1cs_artifact = driver.r1cs_artifact(r1cs)?;
+    let r1cs_constraints = r1cs_artifact.r1cs().constraints.len();
+    let r1cs_bytes = r1cs_artifact.to_bytes()?;
+    fs::write(r1cs_output, &r1cs_bytes)?;
 
     let basic = serde_json::json!({
         "binary": binary,
@@ -327,8 +330,8 @@ fn run_compile_package(
             output,
             serde_json::to_string_pretty(&serde_json::json!({
                 "binary": verifier.binary,
-                "witness_layout": r1cs.witness_layout,
-                "constraints_layout": r1cs.constraints_layout,
+                "witness_layout": r1cs_artifact.r1cs().witness_layout,
+                "constraints_layout": r1cs_artifact.r1cs().constraints_layout,
             }))?,
         )?;
         write_vm_debug_info(output, verifier.debug_info, &driver, absolute_paths)?;
@@ -338,7 +341,8 @@ fn run_compile_package(
         message = %"Artifacts saved successfully",
         r1cs_output = ?r1cs_output,
         binary_output = ?binary_output,
-        r1cs_constraints = r1cs.constraints.len(),
+        r1cs_constraints,
+        r1cs_bytes = r1cs_bytes.len(),
         binary_size = binary.len() * 8,
     );
 
@@ -569,7 +573,7 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let params = api::read_prover_inputs(driver.package_root(), driver.abi())?;
+    let (params, declared_return) = api::read_prover_inputs(driver.package_root(), driver.abi())?;
 
     let witgen_execution = if args.profile {
         api::run_witgen_profiled_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone())
@@ -595,14 +599,22 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         info!(message = %"Witgen output is correct");
     }
 
-    if let Err(reason) = mavros_compiler::abi_helpers::check_return_guard(
-        driver.abi(),
-        &r1cs.witness_layout,
-        &params,
-        &witgen_result.out_wit_pre_comm,
-    ) {
-        error!(message = %"Return-guard public input is inconsistent", reason = %reason);
-        checks_passed = false;
+    match driver.witness_manifest(&r1cs) {
+        Err(error) => {
+            error!(message = %"Could not build the witness manifest", reason = %error);
+            checks_passed = false;
+        }
+        Ok(manifest) => {
+            if let Err(reason) = mavros_compiler::abi_helpers::check_witness_manifest(
+                &manifest,
+                &params,
+                declared_return.as_ref(),
+                &witgen_result.out_wit_pre_comm,
+            ) {
+                error!(message = %"Witness manifest disagrees with the generated witness", reason = %reason);
+                checks_passed = false;
+            }
+        }
     }
 
     let leftover_memory = plotting::plot_memory_chart(
@@ -1137,6 +1149,74 @@ mod tests {
                 assert!(dir.path().join(member).join("target").join(file).is_file());
             }
         }
+    }
+
+    /// Covers LogUp slots, unused private inputs and partially read compound parameters.
+    #[test]
+    fn compile_writes_versioned_witness_manifest() {
+        use mavros_artifacts::{ParamVisibility, R1CSArtifact};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Nargo.toml"),
+            "[package]\nname = \"manifest\"\ntype = \"bin\"\nauthors = []\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/main.nr"),
+            "fn main(unused: Field, unused_u8: u8, x: [Field; 3], y: pub [u32; 3]) -> pub [Field; 2] {
+                let arr = [1, x[1], 100, x[1] + 1];
+                [arr[y[0]], x[1]]
+            }",
+        )
+        .unwrap();
+        let r1cs = root.join("target/r1cs.bin");
+        let binary = root.join("target/basic.json");
+        assert_eq!(
+            run_compile(&root, &r1cs, &binary, None, false, false, false, 128).unwrap(),
+            ExitCode::SUCCESS
+        );
+        let bytes = fs::read(&r1cs).unwrap();
+        let artifact: R1CSArtifact = R1CSArtifact::from_bytes(&bytes).unwrap();
+        let manifest = artifact.manifest();
+        assert_eq!(manifest.entry_blob_field_count(), 8);
+        let columns: Vec<_> = manifest
+            .parameters
+            .iter()
+            .map(|p| (p.name.as_str(), p.visibility, p.column_start, p.width))
+            .collect();
+        // The unused Field disappears; the u8 range check and partial array read retain columns.
+        assert_eq!(
+            columns,
+            vec![
+                ("unused", ParamVisibility::Private, None, 1),
+                ("unused_u8", ParamVisibility::Private, Some(4), 1),
+                ("x", ParamVisibility::Private, Some(5), 3),
+                ("y", ParamVisibility::Public, Some(1), 3)
+            ]
+        );
+        let ret = manifest.returns.unwrap();
+        let layout = artifact.r1cs().witness_layout;
+        let start = ret.column_start.unwrap();
+        assert_eq!(ret.len, 2);
+        assert!(
+            start >= 8 && start + ret.len <= layout.algebraic_size,
+            "the computed return sits after the parameters: {ret:?} in {layout:?}"
+        );
+        assert_eq!(ret.visibility, ParamVisibility::Public);
+        assert!(
+            layout.challenges_size > 0,
+            "a witness-indexed array read should need LogUp challenges"
+        );
+
+        // Compiling again yields the same bytes: the digest is a stable identity.
+        let again = root.join("target/again.bin");
+        assert_eq!(
+            run_compile(&root, &again, &binary, None, false, false, false, 128).unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(fs::read(&again).unwrap(), bytes);
     }
 
     #[test]

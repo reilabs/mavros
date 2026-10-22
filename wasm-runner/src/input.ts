@@ -19,6 +19,8 @@ export interface ProgramMetadata {
   hasReturn: boolean;
   returnElementCount: number;
   entryBlobFieldCount: number;
+  // Where the computed return sits in the witness, when the program has one.
+  returnColumns?: { columnStart: number | null; len: number };
 }
 
 /**
@@ -54,20 +56,18 @@ function flattenValue(value: unknown): string[] {
   throw new Error(`Unsupported value type in Prover.toml: ${typeof value}`);
 }
 
-/**
- * Parse Prover.toml and return field elements in parameter order
- */
-export function parseProverToml(
+function readProverToml(tomlPath: string): Record<string, unknown> {
+  const content = fs.readFileSync(tomlPath, 'utf-8');
+  return TOML.parse(content) as Record<string, unknown>;
+}
+
+function entryBlobFromParsed(
+  parsed: Record<string, unknown>,
   tomlPath: string,
   metadata: ProgramMetadata
 ): FieldElement[] {
-  // Read and parse TOML file
-  const content = fs.readFileSync(tomlPath, 'utf-8');
-  const parsed = TOML.parse(content) as Record<string, unknown>;
-
   const allElements: FieldElement[] = [];
 
-  // Process parameters in the order specified by metadata
   for (const param of metadata.parameters) {
     const value = parsed[param.name];
 
@@ -78,7 +78,6 @@ export function parseProverToml(
       );
     }
 
-    // Flatten the value to strings and convert to field elements
     const strings = flattenValue(value);
 
     if (strings.length !== param.elementCount) {
@@ -88,35 +87,8 @@ export function parseProverToml(
       );
     }
 
-    // Convert strings to field elements
     for (const str of strings) {
       allElements.push(parseFieldElement(str));
-    }
-  }
-
-  if (metadata.hasReturn) {
-    const returnValue = parsed['return'];
-    if (returnValue === undefined) {
-      console.warn(
-        'Warning: the program declares a return value but Prover.toml does not ' +
-          "supply `return`; the return-value check is disabled (guard = 0)"
-      );
-      allElements.push(parseFieldElement('0'));
-      for (let i = 0; i < metadata.returnElementCount; i++) {
-        allElements.push(parseFieldElement('0'));
-      }
-    } else {
-      const strings = flattenValue(returnValue);
-      if (strings.length !== metadata.returnElementCount) {
-        throw new Error(
-          `Return value has ${strings.length} elements, ` +
-            `but expected ${metadata.returnElementCount}`
-        );
-      }
-      allElements.push(parseFieldElement('1'));
-      for (const str of strings) {
-        allElements.push(parseFieldElement(str));
-      }
     }
   }
 
@@ -128,6 +100,31 @@ export function parseProverToml(
   }
 
   return allElements;
+}
+
+function declaredReturnFromParsed(
+  parsed: Record<string, unknown>,
+  metadata: ProgramMetadata
+): FieldElement[] | null {
+  if (!metadata.hasReturn) {
+    return null;
+  }
+  const returnValue = parsed['return'];
+  if (returnValue === undefined) {
+    console.warn(
+      'Warning: the program declares a return value but Prover.toml does not ' +
+        'supply `return`; the computed return is not checked'
+    );
+    return null;
+  }
+  const strings = flattenValue(returnValue);
+  if (strings.length !== metadata.returnElementCount) {
+    throw new Error(
+      `Return value has ${strings.length} elements, ` +
+        `but expected ${metadata.returnElementCount}`
+    );
+  }
+  return strings.map(parseFieldElement);
 }
 
 /**
@@ -142,6 +139,7 @@ export function loadMetadata(metadataPath: string): ProgramMetadata {
     hasReturn: boolean;
     returnElementCount: number;
     entryBlobFieldCount: number;
+    witnessManifest?: { returns?: { columnStart: number | null; len: number } | null };
   };
 
   return {
@@ -151,6 +149,7 @@ export function loadMetadata(metadataPath: string): ProgramMetadata {
     hasReturn: data.hasReturn,
     returnElementCount: data.returnElementCount,
     entryBlobFieldCount: data.entryBlobFieldCount,
+    returnColumns: data.witnessManifest?.returns ?? undefined,
   };
 }
 
@@ -168,9 +167,15 @@ export function getMetadataPath(wasmPath: string): string {
 export function parseInputs(
   wasmPath: string,
   proverTomlPath: string
-): { inputs: FieldElement[]; metadata: ProgramMetadata } {
+): {
+  inputs: FieldElement[];
+  declaredReturn: FieldElement[] | null;
+  metadata: ProgramMetadata;
+} {
   const metadataPath = getMetadataPath(wasmPath);
   const metadata = loadMetadata(metadataPath);
-  const inputs = parseProverToml(proverTomlPath, metadata);
-  return { inputs, metadata };
+  const parsed = readProverToml(proverTomlPath);
+  const inputs = entryBlobFromParsed(parsed, proverTomlPath, metadata);
+  const declaredReturn = declaredReturnFromParsed(parsed, metadata);
+  return { inputs, declaredReturn, metadata };
 }

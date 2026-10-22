@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 
 use ark_ff::BigInteger;
 use num_bigint::BigUint;
@@ -13,8 +13,10 @@ use crate::compiler::{
         symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
         types::TypeInfo,
     },
+    located::synthetic_file_prefix,
+    passes::prepare_entry_point::ENTRY_ORIGIN_PREFIX,
     ssa::{
-        BlockId, FunctionId,
+        BlockId, FunctionId, SourceLocation,
         hlssa::{
             self, ArithGroup, BinaryArithOpKind, CmpKind, HLSSA, Radix, RefCountOp, SliceOpDir,
             Type, TypeExpr,
@@ -24,7 +26,8 @@ use crate::compiler::{
 };
 
 pub use mavros_artifacts::{
-    ConstraintsLayout, FlamegraphProfile, FlamegraphStackId, LC, R1C, R1CS, WitnessLayout,
+    ConstraintsLayout, FlamegraphProfile, FlamegraphStackId, LC, R1C, R1CS, SealedR1CS,
+    WitnessLayout,
 };
 
 /// Per-function circuit-size profiles produced alongside the R1CS.
@@ -463,6 +466,9 @@ pub struct R1CGen<F: MavrosField = RawField> {
     tables: Vec<Table<F>>,
     lookups: Vec<LookupConstraint<F>>,
     next_witness: usize,
+    current_entry_origin: Option<Arc<str>>,
+    entry_columns: BTreeMap<Arc<str>, Vec<usize>>,
+    entry_origin_file_prefix: String,
     function_names: BTreeMap<FunctionId, String>,
     call_stack: Vec<String>,
     call_stack_ids: Vec<(FlamegraphStackId, FlamegraphStackId)>,
@@ -494,7 +500,15 @@ impl<F: MavrosField> symbolic_executor::Context<Value<F>> for R1CGen<F> {
         None
     }
 
+    fn on_location(&mut self, location: &SourceLocation) {
+        self.current_entry_origin = location
+            .file
+            .starts_with(self.entry_origin_file_prefix.as_str())
+            .then(|| Arc::clone(&location.file));
+    }
+
     fn on_return(&mut self, _returns: &mut [Value<F>], _return_types: &[Type]) {
+        self.current_entry_origin = None;
         if self.profile.is_some() {
             self.pop_profile_frame();
         }
@@ -991,6 +1005,7 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
 
     fn fresh_witness(_result_type: &Type, ctx: &mut R1CGen<F>) -> Self {
         let witness_var = ctx.next_witness();
+        ctx.record_entry_column(witness_var);
         ctx.record_witnesses(1);
         Value::LC(vec![(witness_var, F::from_element(ctx.field().one()))])
     }
@@ -1078,6 +1093,9 @@ impl<F: MavrosField> R1CGen<F> {
             field,
             constraints: vec![],
             next_witness: 0,
+            current_entry_origin: None,
+            entry_columns: BTreeMap::new(),
+            entry_origin_file_prefix: synthetic_file_prefix(ENTRY_ORIGIN_PREFIX),
             tables: vec![],
             lookups: vec![],
             function_names: BTreeMap::new(),
@@ -1222,15 +1240,25 @@ impl<F: MavrosField> R1CGen<F> {
         result
     }
 
-    pub fn seal(self, guard: Option<(usize, usize)>) -> R1CS<F> {
-        self.seal_impl(guard).0
+    fn record_entry_column(&mut self, column: usize) {
+        if let Some(origin) = &self.current_entry_origin {
+            self.entry_columns
+                .entry(Arc::clone(origin))
+                .or_default()
+                .push(column);
+        }
     }
 
-    pub fn seal_with_profile(
-        self,
-        guard: Option<(usize, usize)>,
-    ) -> Result<(R1CS<F>, R1CSProfile), R1CSProfileDisabled<F>> {
-        let (r1cs, profile) = self.seal_impl(guard);
+    pub fn entry_columns(&self) -> &BTreeMap<Arc<str>, Vec<usize>> {
+        &self.entry_columns
+    }
+
+    pub fn seal(self) -> R1CS<F> {
+        self.seal_impl().0
+    }
+
+    pub fn seal_with_profile(self) -> Result<(R1CS<F>, R1CSProfile), R1CSProfileDisabled<F>> {
+        let (r1cs, profile) = self.seal_impl();
         match profile {
             Some(profile) => Ok((r1cs, profile)),
             None => Err(R1CSProfileDisabled {
@@ -1239,7 +1267,7 @@ impl<F: MavrosField> R1CGen<F> {
         }
     }
 
-    fn seal_impl(mut self, guard: Option<(usize, usize)>) -> (R1CS<F>, Option<R1CSProfile>) {
+    fn seal_impl(mut self) -> (R1CS<F>, Option<R1CSProfile>) {
         // The rows below are `LC`s, which hold raw coefficients.
         let field = self.field;
         let one = F::from_element(field.one());
@@ -1247,8 +1275,6 @@ impl<F: MavrosField> R1CGen<F> {
 
         // Algebraic section
         let mut witness_layout = WitnessLayout {
-            guard_index: guard.map(|(index, _)| index),
-            return_len: guard.map_or(0, |(_, len)| len),
             algebraic_size: self.next_witness,
             multiplicities_size: 0,
             challenges_size: 0,
@@ -1602,7 +1628,7 @@ mod r1cs_profile_tests {
         }
         generator.pop_profile_frame();
 
-        let (r1cs, profile) = generator.seal_with_profile(None).unwrap();
+        let (r1cs, profile) = generator.seal_with_profile().unwrap();
         assert_eq!(
             profile.constraints.total_weight(),
             r1cs.constraints_layout.size() as u64
@@ -2217,7 +2243,7 @@ mod tests {
         // (table offset, entry hit): each table has 4 rows except the array's 3, in lookup order.
         let hits = [(0, 2), (4, 3), (8, 3), (12, 1)];
 
-        let r1cs = generator.seal(None);
+        let r1cs = generator.seal();
         let layout = &r1cs.witness_layout;
         let mut w: Vec<Option<RawField>> = vec![None; layout.size()];
         for (column, value) in known {

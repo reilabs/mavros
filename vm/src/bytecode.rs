@@ -3876,13 +3876,11 @@ pub const NO_ENTRY_POINT: usize = usize::MAX;
 
 /// Buffer layouts bound to the compiled constraint traversal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConstraintLayouts([u64; 10]);
+pub struct ConstraintLayouts([u64; 8]);
 
 impl ConstraintLayouts {
     pub fn new(witness: WitnessLayout, constraints: ConstraintsLayout) -> Self {
         Self([
-            witness.guard_index.map_or(u64::MAX, |index| index as u64),
-            witness.return_len as u64,
             witness.algebraic_size as u64,
             witness.multiplicities_size as u64,
             witness.challenges_size as u64,
@@ -3943,7 +3941,7 @@ pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 /// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
 /// Appending opcodes without changing existing production encodings does not require a bump.
 /// The third word names the program's field ([`FieldId::code`]).
-pub const PROGRAM_FORMAT_VERSION: u64 = 3;
+pub const PROGRAM_FORMAT_VERSION: u64 = 4;
 
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
@@ -4106,8 +4104,8 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     let (constraint_layouts, off) = match program[3] {
         0 => (None, 4),
         1 => (
-            Some(ConstraintLayouts(program[4..14].try_into().unwrap())),
-            14,
+            Some(ConstraintLayouts(program[4..12].try_into().unwrap())),
+            12,
         ),
         _ => panic!("invalid constraint layout tag"),
     };
@@ -5207,7 +5205,7 @@ mod tests {
     #[test]
     fn opcode_numbers_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 3,
+            PROGRAM_FORMAT_VERSION, 4,
             "the format version these numbers belong to"
         );
         let pinned: &[(usize, &str)] = &[
@@ -5799,8 +5797,6 @@ mod tests {
             if value < 0 { -magnitude } else { magnitude }
         };
         let witness_layout = WitnessLayout {
-            guard_index: None,
-            return_len: 0,
             algebraic_size: 8,
             multiplicities_size: 16,
             challenges_size: 2,
@@ -6124,7 +6120,7 @@ mod tests {
     #[test]
     fn boxed_layout_encodings_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 3,
+            PROGRAM_FORMAT_VERSION, 4,
             "the format version these encodings belong to"
         );
         let codes = [
@@ -6224,7 +6220,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported VM program format version Some(1); expected 3")]
+    #[should_panic(expected = "unsupported VM program format version Some(1); expected 4")]
     fn a_binary_of_another_format_version_is_refused() {
         // A version-1 binary, which has no field word.
         parse_program_header(&[PROGRAM_MAGIC, 1, 0, 0, 0, 0, u64::MAX, 0]);
@@ -6251,7 +6247,7 @@ mod tests {
     #[test]
     fn the_program_header_names_its_field() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 3,
+            PROGRAM_FORMAT_VERSION, 4,
             "the format version these codes belong to"
         );
         assert_eq!([FieldId::Bn254.code(), FieldId::Goldilocks.code()], [1, 2]);

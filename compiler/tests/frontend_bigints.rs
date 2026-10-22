@@ -26,13 +26,13 @@ fn check(source: &str, inputs: &str) {
     )
     .unwrap();
     std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
-    let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
     let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
     assert!(api::check_witgen(&r1cs, &result));
-    abi_helpers::check_return_guard(
-        driver.abi(),
-        &r1cs.witness_layout,
+    abi_helpers::check_witness_manifest(
+        &driver.witness_manifest(&r1cs).unwrap(),
         &params,
+        Some(&declared_return.expect("the inputs declare a return")),
         &result.out_wit_pre_comm,
     )
     .unwrap();
@@ -223,9 +223,11 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
             },
         )
         .unwrap();
+        let manifest = driver.witness_manifest(&r1cs).unwrap();
         for (input, accepted) in [(valid, true), (invalid, false)] {
             std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
-            let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+            let (params, declared_return) =
+                api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
             // Require witness generation to finish with honest-prover checks disabled:
             // a VM trap would not demonstrate that the constraints reject the witness.
             let result = api::run_witgen_from_binary(&mut binary.clone(), &r1cs, &params, None)
@@ -242,6 +244,13 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
             );
             if accepted {
                 assert!(api::check_witgen(&r1cs, &result));
+                abi_helpers::check_witness_manifest(
+                    &manifest,
+                    &params,
+                    Some(&declared_return.expect("valid inputs declare a return")),
+                    &result.out_wit_pre_comm,
+                )
+                .unwrap_or_else(|error| panic!("{body}: {input}: {error}"));
             }
         }
     }
@@ -259,7 +268,9 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         },
     )
     .unwrap();
-    // A wrong return differing only above bit 128 must fail the return constraint.
+    // A wrong return differing only above bit 128 is refused twice: the host's declared-return
+    // check names the high limb's column, and a witness forged with that limb breaks a
+    // constraint. The circuit computes the true return, so the honest witness itself holds.
     let correct_high = 1u128 << 52;
     let wrong_high = 2u128 << 52;
     std::fs::write(
@@ -267,16 +278,31 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         format!("a = [16, '{correct_high}']\nb = [0, 0]\nreturn = [16, '{wrong_high}']"),
     )
     .unwrap();
-    let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
     let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None)
         .expect("unchecked witness generation must complete");
-    let witness = [
+    assert!(api::check_witgen(&r1cs, &result));
+    let manifest = driver.witness_manifest(&r1cs).unwrap();
+    let high_column = manifest.returns.unwrap().column_start.unwrap() + 1;
+    let error = abi_helpers::check_witness_manifest(
+        &manifest,
+        &params,
+        declared_return.as_ref(),
+        &result.out_wit_pre_comm,
+    )
+    .expect_err("wrong high return limb must fail the declared-return check");
+    assert!(
+        error.contains("declared return") && error.contains(&format!("witness[{high_column}]")),
+        "{error}"
+    );
+    let mut forged = [
         result.out_wit_pre_comm.as_slice(),
         result.out_wit_post_comm.as_slice(),
     ]
     .concat();
+    forged[high_column] = mavros_artifacts::Field::from(wrong_high);
     assert!(
-        r1cs.unsatisfied_constraint(&witness).is_some(),
+        r1cs.unsatisfied_constraint(&forged).is_some(),
         "wrong high return limb must violate R1CS"
     );
 

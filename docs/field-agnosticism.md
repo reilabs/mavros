@@ -246,8 +246,8 @@ stays raw by design until P5. By file (count):
 - [ ] `wasm-runtime/src/lib.rs` (1) — the `field_runtime!` invocation's `ark_bn254::Fr` (see
       L3-llstruct).
 - [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
-- [ ] `compiler/src/abi_helpers.rs` (5) — `Fr::from(..)` ABI decode and return-guard synthesis. Raw,
-      feeds the VM.
+- [ ] `compiler/src/abi_helpers.rs` (7) — `Fr::from(..)` ABI string decode and its tests. Raw, feeds
+      the VM.
 
 ### `L1-serde` — artifact/ABI serialization pinned to `[u64;4]` (representation, P5 — done)
 
@@ -639,7 +639,7 @@ non-native fields; neither is the Noir `Field` used to constrain their arithmeti
       later, benchmarked swap behind the façade impls only; Goldilocks is hand-written (Phase 5).
 - [x] **Program header** — `vm/src/bytecode.rs` (`to_binary`/`to_binary_impl` write it,
       `ProgramHeader`/`parse_program_header` read it) opens with `PROGRAM_MAGIC`,
-      `PROGRAM_FORMAT_VERSION` (3) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
+      `PROGRAM_FORMAT_VERSION` (4) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
       0 names none). Dispatch needs no field selection, since the opcodes name the field
       (`bn254_add_field`, …); the word lets `interpreter::run*::<F>` refuse, in every build, a
       program over another field, whose handlers would read and write the wrong element width.

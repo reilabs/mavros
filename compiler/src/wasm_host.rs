@@ -625,8 +625,6 @@ mod tests {
         let module = wasmtime::Module::new(&engine, b"\0asm\x01\0\0\0").unwrap();
         let r1cs = R1CS {
             witness_layout: WitnessLayout {
-                guard_index: None,
-                return_len: 0,
                 algebraic_size: 0,
                 multiplicities_size: 0,
                 challenges_size: 0,

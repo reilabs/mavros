@@ -1,5 +1,5 @@
 [package]
-name = "return_guard_zero_compound"
+name = "return_undeclared_compound"
 type = "bin"
 authors = [""]
 

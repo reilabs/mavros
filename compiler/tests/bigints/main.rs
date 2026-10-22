@@ -72,14 +72,17 @@ fn sweep_over(kind: BinaryArithOpKind, bits: usize, pairs: Vec<(IntBits, IntBits
         .iter()
         .find(|(lhs, rhs)| mavros_int_semantics::eval(op, lhs, rhs).value().is_some())
         .unwrap_or_else(|| panic!("{kind:?} at {bits} bits: the model accepts no corner pair"));
-    if let Err(unconstrained) = oracle.check_a_wrong_answer_is_refused(&accepted.0, &accepted.1) {
-        panic!("{unconstrained}");
+    if let Err(error) = oracle.check_a_wrong_answer_is_refused(&accepted.0, &accepted.1) {
+        panic!("{error}");
     }
 }
 
 /// Adds one to each column of an accepted witness in turn, and takes one from each column the
 /// program computes, requiring each change to break a constraint: a column no constraint mentions
 /// survives it.
+///
+/// Column 0, the constant one, is skipped: the proof system binds it as the first public value, so
+/// no constraint has to, and a program whose answer is zero multiplies it away entirely.
 ///
 /// `inputs` is the honest input block: the program's parameters followed by its declared returns.
 ///
@@ -98,10 +101,9 @@ fn assert_every_column_is_pinned<F: HarnessField>(
         .to_vec();
     let input_columns: Vec<usize> = (0..inputs.len())
         .map(|index| compiled.input_column(index))
-        .chain(compiled.guard_column())
         .collect();
 
-    for column in 0..witness.len() {
+    for column in 1..witness.len() {
         let steps: &[(F, &str)] = if input_columns.contains(&column) {
             &[(F::ONE, "adding one to")]
         } else {
@@ -197,20 +199,6 @@ fn assert_no_two_columns_trade_a_limb<F: HarnessField>(
     }
 }
 
-/// Whether a run was refused by the program's constraints rather than by the entry point's return
-/// check.
-///
-/// A trap at the return check says only that the declared answer differs from the VM's, which an
-/// under-constrained circuit also produces. So a test of what the constraints reject declares the
-/// answer the VM computes and asks for this.
-///
-/// Meaningful for a [`Compiled::run`] verdict only: a WASM trap carries no mavros stack, so on that
-/// lane a return-check failure reads as any other refusal, and a WASM half asks for
-/// [`Verdict::rejects`] instead.
-fn refused_by_the_constraints(verdict: &Verdict) -> bool {
-    verdict.is_refusal() || matches!(verdict, Verdict::Unsatisfied { .. })
-}
-
 // FUNCTIONAL TESTS
 // ================================================================================================
 
@@ -278,7 +266,7 @@ fn a_division_agrees_between_the_host_word_and_the_widest_single_cell_product() 
 /// The ablation: the tests above can go red. One program is driven to each case:
 ///
 /// - The model's value is accepted.
-/// - A value the model did not produce is refused at the return check.
+/// - A value the model did not produce is reported as a return mismatch.
 /// - Operands the model rejects are refused elsewhere.
 #[test]
 fn the_oracle_distinguishes_a_wrong_answer_from_a_refusal() {
@@ -297,13 +285,7 @@ fn the_oracle_distinguishes_a_wrong_answer_from_a_refusal() {
         .compiled()
         .run(&input_block(&[&byte(1), &byte(2), &byte(4)]));
     assert!(
-        matches!(
-            wrong,
-            Verdict::Trapped {
-                in_return_check: true,
-                ..
-            }
-        ),
+        matches!(wrong, Verdict::ReturnMismatch { .. }),
         "1 + 2 == 4 should fail the return check: {wrong:?}"
     );
 
@@ -704,15 +686,8 @@ fn a_sum_or_difference_agrees_with_the_model_at_the_limb_corners() {
     }
 }
 
-/// The unsigned ordering agrees with the model over the same widths, and its declared return is
-/// bound to it.
-///
-/// The second half tests the entry point's return check: witness generation is honest, so a run
-/// declaring the other answer computes the right one and fails where the two are compared. It says
-/// nothing about the ordering's constraints, which
-/// [`every_witness_column_of_an_unsigned_ordering_is_pinned`] probes.
-///
-/// The byte is the single-cell baseline the rest are measured against.
+/// Checks unsigned ordering against the model and detects wrong expected returns in the host.
+/// Constraint soundness is tested by [`every_witness_column_of_an_unsigned_ordering_is_pinned`].
 #[test]
 fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
     for bits in [8usize, 200, 252, 253] {
@@ -4730,18 +4705,11 @@ fn a_bare_narrowing_cast_truncates_at_every_width() {
             "int{bits} did not truncate to 7: {verdict:?}"
         );
 
-        // The answer is constrained, not just computed: declaring a different one is refused by
-        // the wrapper's return check.
+        // The host must report a wrong expected return separately from a VM trap.
         let wrong = IntBits::from_u128(32, 8);
         let refused = compiled.run(&input_block(&[&source, &wrong]));
         assert!(
-            matches!(
-                refused,
-                Verdict::Trapped {
-                    in_return_check: true,
-                    ..
-                }
-            ),
+            matches!(refused, Verdict::ReturnMismatch { .. }),
             "int{bits} accepted a wrong truncation: {refused:?}"
         );
     }
@@ -5242,17 +5210,10 @@ fn a_witnessed_spread_rejects_the_bits_above_its_read() {
     // the whole container.
     for value in [0x100u128, 0x1FF, 0xFFFF] {
         let value = IntBits::from_u128(16, value);
-        for (declared, computed) in [(value.spread(8), true), (value.spread(16), false)] {
+        for declared in [value.spread(8), value.spread(16)] {
             let inputs = input_block(&[&value, &declared]);
-            let refused = |verdict: &Verdict| {
-                if computed {
-                    refused_by_the_constraints(verdict)
-                } else {
-                    verdict.rejects()
-                }
-            };
             let verdict = compiled.run(&inputs);
-            assert!(refused(&verdict), "{value:?} as {declared:?}: {verdict:?}");
+            assert!(verdict.rejects(), "{value:?} as {declared:?}: {verdict:?}");
             let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
             assert!(
                 verdict.rejects(),
@@ -5300,18 +5261,11 @@ fn a_witnessed_unspread_rejects_the_bits_above_its_read() {
     // container's has a witness.
     for value in [0x80u128, 0xAA, 0x100, 0xFFFF] {
         let value = IntBits::from_u128(16, value);
-        for ((odd, even), computed) in [(value.unspread(7), true), (value.unspread(16), false)] {
+        for (odd, even) in [value.unspread(7), value.unspread(16)] {
             let inputs = input_block(&[&value, &odd, &even]);
-            let refused = |verdict: &Verdict| {
-                if computed {
-                    refused_by_the_constraints(verdict)
-                } else {
-                    verdict.rejects()
-                }
-            };
             let verdict = compiled.run(&inputs);
             assert!(
-                refused(&verdict),
+                verdict.rejects(),
                 "{value:?} as {odd:?}, {even:?}: {verdict:?}"
             );
             let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5503,18 +5457,11 @@ fn a_witnessed_spread_or_unspread_past_the_field_rejects_the_bits_above_its_read
         // have to refuse them; the whole container's answers have no witness either.
         let computed = spreading_inputs(&value, spread_read, unspread_read);
         let whole = spreading_inputs(&value, bits, bits);
-        for (block, by_constraints) in [(computed, true), (whole, false)] {
-            let refused = |verdict: &Verdict| {
-                if by_constraints {
-                    refused_by_the_constraints(verdict)
-                } else {
-                    verdict.rejects()
-                }
-            };
+        for block in [computed, whole] {
             let inputs = input_block(&block.iter().collect::<Vec<_>>());
             let verdict = compiled.run(&inputs);
             assert!(
-                refused(&verdict),
+                verdict.rejects(),
                 "int{bits} with bit {bit} set: {verdict:?}"
             );
             let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5546,7 +5493,7 @@ fn a_limb_an_unspread_reads_one_bit_of_is_held_to_that_bit() {
         .collect();
     let inputs = input_block(&block.iter().collect::<Vec<_>>());
     let verdict = compiled.run(&inputs);
-    assert!(refused_by_the_constraints(&verdict), "{verdict:?}");
+    assert!(verdict.rejects(), "{verdict:?}");
     let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
     assert!(verdict.rejects(), "on WASM: {verdict:?}");
 }
@@ -5662,8 +5609,6 @@ fn a_guarded_witnessed_spread_rejects_the_bits_above_its_read_only_where_taken()
             for (lane, verdict) in [("VM", vm), ("WASM", wasm)] {
                 let holds = if accepted {
                     verdict.is_accepted()
-                } else if lane == "VM" {
-                    refused_by_the_constraints(&verdict)
                 } else {
                     verdict.rejects()
                 };
@@ -6665,7 +6610,7 @@ fn a_dead_spread_still_rejects_the_bits_above_its_read() {
             );
             let verdict = compiled.run(&input(256));
             assert!(
-                refused_by_the_constraints(&verdict),
+                verdict.rejects(),
                 "int{width}, in a callee: {in_callee}, accepted a bit above the read: {verdict:?}"
             );
         }
@@ -7047,7 +6992,7 @@ fn a_witness_indexed_wide_read_in_a_witness_branch_binds_only_where_taken() {
     }
     let verdict = run(5, 9, 0);
     assert!(
-        refused_by_the_constraints(&verdict),
+        verdict.rejects(),
         "an index past the end where taken: {verdict:?}"
     );
     assert!(!run(5, 1, 1).is_accepted(), "a wrong element was accepted");
@@ -7154,7 +7099,7 @@ fn a_pure_wide_ordering_asserted_in_a_witness_branch_binds_only_where_taken() {
     let not_taken = compiled.run(&input_block(&[&IntBits::zero(64)]));
     assert!(not_taken.is_accepted(), "{not_taken:?}");
     let taken = compiled.run(&input_block(&[&IntBits::from_u128(64, 1)]));
-    assert!(refused_by_the_constraints(&taken), "{taken:?}");
+    assert!(taken.rejects(), "{taken:?}");
 }
 
 /// A witnessed field element reads back as a wide integer: its canonical value, zero-filled.
@@ -7313,7 +7258,7 @@ fn an_integer_decomposes_into_bits_and_bytes_at_every_width() {
         &IntBits::from_u128(64, 5),
         &IntBits::one(1),
     ]));
-    assert!(refused_by_the_constraints(&verdict), "{verdict:?}");
+    assert!(verdict.rejects(), "{verdict:?}");
 }
 
 /// A bit window of an integer too wide for one field element, witnessed or pure, on both lanes:

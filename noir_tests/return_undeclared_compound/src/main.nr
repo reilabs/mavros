@@ -1,5 +1,5 @@
-// Guard=0 with a compound return: zero-fills every declared-return leaf
-// (struct, array, string, tuple), covering each `zero_param` arm.
+// No `return` key with a compound return (struct, array, string, tuple): every
+// leaf is written to the witness and nothing is checked against it.
 struct Out {
     tag: str<3>,
     vals: [u8; 2],

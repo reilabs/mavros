@@ -7,8 +7,8 @@
 //! [`BinaryOpOracle::check`]:
 //!
 //! 1. asks the model what the operation means (a value or a rejection);
-//! 2. compiles `main(a, b) -> c { a op b }`, declaring the model's answer as the return value, so
-//!    the entry point's return assertion is the equality test;
+//! 2. compiles `main(a, b) -> c { a op b }` and declares the model's answer as the expected
+//!    return value, which the harness compares with the return columns the program wrote;
 //! 3. runs witness generation on the VM and checks every constraint against the witness.
 //!
 //! An accepted run means the VM produced a witness that satisfies the R1CS and carries the model's
@@ -40,10 +40,12 @@ use mavros_compiler::{
     compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
         codegen::{
-            CodeGenOptions, bytecode::CodeGen, hlssa_to_r1cs::R1CS, llssa_to_llvm::WasmCompileOpts,
+            CodeGenOptions,
+            bytecode::CodeGen,
+            hlssa_to_r1cs::{R1CS, SealedR1CS},
+            llssa_to_llvm::WasmCompileOpts,
         },
-        located::synthetic_file,
-        passes::prepare_entry_point::{self, PrepareEntryPoint},
+        passes::prepare_entry_point::PrepareEntryPoint,
         ssa::{
             SourceLocation, ValueId,
             hlssa::{
@@ -52,7 +54,7 @@ use mavros_compiler::{
             },
         },
     },
-    driver::{Driver, Error as DriverError},
+    driver::{Driver, EntryColumns, Error as DriverError},
     vm::bytecode::{DebugInfo, parse_program_header},
     wasm_host::{self, LoadedModule},
     wasm_runtime,
@@ -213,7 +215,12 @@ pub enum Verdict<F: MavrosField = Field> {
 
     /// The VM refused to produce a witness at all — an assertion in the guard IR, a division check,
     /// a range check. This is what the model's `Rejected` predicts.
-    Trapped { message: String, in_return_check: bool },
+    Trapped { message: String },
+
+    /// A witness was produced and satisfies every constraint, but the return columns the program
+    /// wrote hold `actual` where the test declared `expected`: the program computed a different
+    /// answer.
+    ReturnMismatch { expected: Vec<F>, actual: Vec<F> },
 
     /// A witness was produced but does not satisfy constraint `index`. An under-constrained circuit
     /// never lands here on an honest witness; a _wrongly_-constrained one does.
@@ -231,16 +238,12 @@ impl<F: MavrosField> std::fmt::Debug for Verdict<F> {
             Verdict::Accepted { witness } => {
                 write!(f, "Accepted({} witness columns)", witness.len())
             }
-            Verdict::Trapped {
-                message,
-                in_return_check,
-            } => {
-                let site = if *in_return_check {
-                    "at the return check"
-                } else {
-                    "in the program"
-                };
-                write!(f, "Trapped {site}: {message}")
+            Verdict::Trapped { message } => write!(f, "Trapped: {message}"),
+            Verdict::ReturnMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "ReturnMismatch: expected {expected:?}, computed {actual:?}"
+                )
             }
             Verdict::Unsatisfied { index } => write!(f, "Unsatisfied at constraint {index}"),
             Verdict::AbcMismatch => write!(f, "AbcMismatch"),
@@ -258,13 +261,7 @@ impl<F: MavrosField> Verdict<F> {
     /// return disagreed with. This is the verdict a model rejection predicts.
     #[must_use]
     pub fn is_refusal(&self) -> bool {
-        matches!(
-            self,
-            Verdict::Trapped {
-                in_return_check: false,
-                ..
-            }
-        )
+        matches!(self, Verdict::Trapped { .. })
     }
 
     /// Whether the run refused its operands: by trapping, or by producing a witness that a
@@ -290,7 +287,7 @@ impl<F: MavrosField> Verdict<F> {
 pub struct Compiled<F: HarnessField = Field> {
     /// The compiled constraint system: the two layouts witness generation runs against, and the
     /// constraints a witness is judged by.
-    r1cs: R1CS<F>,
+    r1cs: SealedR1CS<F>,
 
     /// The VM bytecode, holding both the witgen and the AD entry point, cloned per run.
     binary: Vec<u64>,
@@ -306,10 +303,17 @@ pub struct Compiled<F: HarnessField = Field> {
     /// [`None`] when they were directed at a caller-named directory instead.
     scratch: Option<TempDir>,
 
-    /// Where the entry blob's return guard sits, when `main` returns anything.
-    ///
-    /// [`Self::with_guard`] splices it in, so a caller states only parameters and declared returns.
-    guard_slot: Option<usize>,
+    /// Flattened width of each parameter, in signature order.
+    param_widths: Vec<usize>,
+
+    /// Flattened width of the parameters: the entry blob, and the prefix of a test's input block.
+    param_width: usize,
+
+    /// Flattened width of the return, which follows the parameters in a test's input block.
+    return_width: usize,
+
+    /// Where the parameters and the return landed in the witness.
+    entry_columns: EntryColumns,
 
     /// The same program compiled to WASM, when the field has a WASM runtime and the linker produced
     /// a module.
@@ -378,20 +382,17 @@ impl Compiled {
     /// would pass a test that expects a rejection.
     pub fn run_wasm(&self, inputs: &[InputValueOrdered]) -> Option<Verdict> {
         let wasm = self.wasm.as_ref()?;
-        let inputs = self.with_guard(inputs);
+        let (params, declared) = self.split_inputs(inputs);
         let loaded = wasm
             .loaded()
             .unwrap_or_else(|error| panic!("the WASM module did not load: {error}"));
         let entry_blob_field_count = parse_program_header(&self.binary).entry_blob_field_count;
-        let run = wasm_host::run_witgen_loaded(loaded, &self.r1cs, &inputs, entry_blob_field_count);
+        let run = wasm_host::run_witgen_loaded(loaded, &self.r1cs, params, entry_blob_field_count);
         let result = match run {
             Ok(result) => result,
             Err(error) => {
                 return Some(Verdict::Trapped {
                     message: with_causes(error.as_ref()),
-                    // A WASM trap carries no mavros stack, so the return check cannot be told from
-                    // any other refusal here. Callers that need the distinction use `run`.
-                    in_return_check: false,
                 });
             }
         };
@@ -413,7 +414,7 @@ impl Compiled {
         ) {
             return Some(Verdict::AbcMismatch);
         }
-        Some(Verdict::Accepted { witness })
+        Some(self.judge_return(witness, declared))
     }
 }
 
@@ -444,17 +445,20 @@ impl<F: HarnessField> Compiled<F> {
             }
         };
 
-        // `wrap_main` lays the entry blob out as the parameters, a one-field return guard when
-        // `main` returns anything, and the declared returns. The guard is set, so the declared
-        // return is checked against the computed one.
+        // The entry blob is the parameters; the return is computed and written after them. A
+        // test's input block states both, so it is split at the parameter width.
         let entry = ssa.get_unique_entrypoint();
-        let guard_slot = (!entry.get_returns().is_empty()).then(|| {
-            entry
-                .get_param_types()
-                .iter()
-                .map(PrepareEntryPoint::flattened_field_count)
-                .sum::<usize>()
-        });
+        let param_widths: Vec<usize> = entry
+            .get_param_types()
+            .iter()
+            .map(PrepareEntryPoint::flattened_field_count)
+            .collect();
+        let param_width = param_widths.iter().sum::<usize>();
+        let return_width = entry
+            .get_returns()
+            .iter()
+            .map(PrepareEntryPoint::flattened_field_count)
+            .sum::<usize>();
 
         let mut driver = Driver::from_ssa(ssa, debug_output_dir.clone(), false);
         if let Some(bits) = F::LOGUP_SOUNDNESS_BITS {
@@ -465,6 +469,10 @@ impl<F: HarnessField> Compiled<F> {
         driver.spill_witness()?;
 
         let r1cs = driver.generate_r1cs::<F>()?;
+        let entry_columns = driver
+            .entry_columns()
+            .cloned()
+            .expect("generate_r1cs records the entry columns");
         let artifact = driver.compile_bytecode_artifact(CodeGenOptions {
             // The VM checks constraints as it runs, so a disagreement shows up first as a trap
             // rather than later as a wrong witness.
@@ -472,7 +480,7 @@ impl<F: HarnessField> Compiled<F> {
             include_debug_info: true,
         })?;
 
-        let wasm = (&r1cs as &dyn Any)
+        let wasm = (r1cs.system() as &dyn Any)
             .downcast_ref::<R1CS>()
             .and_then(|r1cs| compile_wasm(&mut driver, r1cs));
 
@@ -483,7 +491,10 @@ impl<F: HarnessField> Compiled<F> {
             debug_output_dir,
             scratch,
             wasm,
-            guard_slot,
+            param_widths,
+            param_width,
+            return_width,
+            entry_columns,
         };
         compiled.assert_the_ad_lane_agrees();
         Ok(compiled)
@@ -520,7 +531,7 @@ impl<F: HarnessField> Compiled<F> {
         );
 
         if let Some(wasm) = &self.wasm {
-            let (r1cs, coeffs) = (&self.r1cs as &dyn Any)
+            let (r1cs, coeffs) = (self.r1cs.system() as &dyn Any)
                 .downcast_ref::<R1CS>()
                 .zip((&coeffs as &dyn Any).downcast_ref::<Vec<Field>>())
                 .expect("only a bn254 program has a WASM lane");
@@ -548,62 +559,101 @@ impl<F: HarnessField> Compiled<F> {
             .then_some(self.debug_output_dir.as_path())
     }
 
-    /// The witness column the return guard is written to, where the entry blob has one.
-    ///
-    /// The witness opens with the constant one and then the input blob in order, so this is one
-    /// past the guard's place in the blob.
-    #[must_use]
-    pub fn guard_column(&self) -> Option<usize> {
-        self.guard_slot.map(|slot| slot + 1)
-    }
-
-    /// The witness column input `index` of a test's input block is written to: its place in the
-    /// blob [`Self::run`] builds, past the constant one and the return guard where that sits
-    /// before it.
+    /// The witness column input `index` of a test's input block is written to. Every parameter
+    /// of a hand-built program is treated as public, so each has columns; the declared returns
+    /// past the parameters name the columns the program's computed return was written to.
     #[must_use]
     pub fn input_column(&self, index: usize) -> usize {
-        match self.guard_slot {
-            Some(slot) if slot <= index => index + 2,
-            _ => index + 1,
+        if index < self.param_width {
+            self.param_columns()[index]
+        } else {
+            self.entry_columns
+                .returns
+                .expect("a program with a return writes its return columns")
+                + (index - self.param_width)
         }
     }
 
-    /// `inputs` with the entry blob's return guard spliced in, set to check the declared return.
-    ///
-    /// The guard is a slot of the wrapper, not a value of the program, so a test gives only the
-    /// parameters and the declared return, and this assembles the blob.
-    fn with_guard(&self, inputs: &[InputValueOrdered<F>]) -> Vec<InputValueOrdered<F>> {
-        let Some(slot) = self.guard_slot else {
-            return inputs.to_vec();
-        };
-        let mut blob = inputs.to_vec();
-        blob.insert(slot, InputValueOrdered::Field(F::ONE));
-        blob
+    /// The witness columns the program's computed return was written to; empty for a program
+    /// without one.
+    #[must_use]
+    pub fn return_columns(&self) -> std::ops::Range<usize> {
+        if self.return_width == 0 {
+            return 0..0;
+        }
+        let start = self
+            .entry_columns
+            .returns
+            .expect("a program with a return writes its return columns");
+        start..start + self.return_width
+    }
+
+    /// The witness column of each parameter field, in blob order.
+    fn param_columns(&self) -> Vec<usize> {
+        self.entry_columns
+            .params
+            .iter()
+            .zip(&self.param_widths)
+            .flat_map(|(start, width)| {
+                // A zero-width parameter has no columns and no `column_start`.
+                if *width == 0 {
+                    return 0..0;
+                }
+                let start = start.expect("every parameter of a hand-built program is pinned");
+                start..start + width
+            })
+            .collect()
+    }
+
+    /// A test's input block split into the entry blob and the declared return.
+    fn split_inputs<'a>(
+        &self,
+        inputs: &'a [InputValueOrdered<F>],
+    ) -> (&'a [InputValueOrdered<F>], &'a [InputValueOrdered<F>]) {
+        assert_eq!(
+            inputs.len(),
+            self.param_width + self.return_width,
+            "an input block states every parameter and every declared return field"
+        );
+        inputs.split_at(self.param_width)
+    }
+
+    /// Accepts `witness` unless the return columns disagree with `declared`.
+    fn judge_return(&self, witness: Vec<F>, declared: &[InputValueOrdered<F>]) -> Verdict<F> {
+        if self.return_width == 0 {
+            return Verdict::Accepted { witness };
+        }
+        let actual = witness[self.return_columns()].to_vec();
+        let expected: Vec<F> = declared
+            .iter()
+            .map(|value| match value {
+                InputValueOrdered::Field(field) => *field,
+                other => panic!("a declared return field is a field element: {other:?}"),
+            })
+            .collect();
+        if actual == expected {
+            Verdict::Accepted { witness }
+        } else {
+            Verdict::ReturnMismatch { expected, actual }
+        }
     }
 
     /// Generates a witness for `inputs` by running the VM, and judges it.
     ///
     /// The counterpart of [`Self::run_wasm`], against the same R1CS.
     pub fn run(&self, inputs: &[InputValueOrdered<F>]) -> Verdict<F> {
-        let inputs = self.with_guard(inputs);
-        let inputs = inputs.as_slice();
+        let (params, declared) = self.split_inputs(inputs);
         let mut binary = self.binary.clone();
         let result = match api::run_witgen_from_binary(
             &mut binary,
             &self.r1cs,
-            inputs,
+            params,
             self.debug_info.clone(),
         ) {
             Ok(result) => result,
             Err(error) => {
-                let return_check = synthetic_file(prepare_entry_point::RETURN_CHECK_ORIGIN);
-                let in_return_check = error
-                    .stack_trace()
-                    .iter()
-                    .any(|frame| frame.location.file == return_check);
                 return Verdict::Trapped {
                     message: error.to_string(),
-                    in_return_check,
                 };
             }
         };
@@ -619,7 +669,7 @@ impl<F: HarnessField> Compiled<F> {
         if !api::check_witgen(&self.r1cs, &result) {
             return Verdict::AbcMismatch;
         }
-        Verdict::Accepted { witness }
+        self.judge_return(witness, declared)
     }
 
     /// The index of the first constraint `witness` fails, or [`None`] if it satisfies them all.
@@ -685,10 +735,10 @@ impl<F: HarnessField> BinaryOpOracle<F> {
 
     /// Runs one operand pair and reports whether the pipeline agreed with [`mavros_int_semantics`].
     ///
-    /// The model's answer is the declared return, which the entry point checks against the
-    /// computed one. For a pair the model rejects, the residue is declared instead, so a missing
-    /// guard shows as an acceptance, and [`Verdict::is_refusal`] keeps a trap at the return check
-    /// from counting as the guard firing.
+    /// The model's answer is the declared return, which the harness checks against the computed
+    /// one. For a pair the model rejects, the residue is declared instead: a program that fails
+    /// to refuse the pair computes exactly that residue, so a missing check shows as an
+    /// acceptance rather than as a return mismatch.
     ///
     /// # Errors
     ///
@@ -743,13 +793,13 @@ impl<F: HarnessField> BinaryOpOracle<F> {
         }
     }
 
-    /// Confirms that this program's declared return really is constrained, by running the same
-    /// operands with an answer the model did not give and requiring the return check to refuse it.
+    /// Confirms that this program's return columns are constrained, by forging an answer the
+    /// model did not give into an honest witness and requiring a constraint to refuse it.
     ///
     /// # Errors
     ///
-    /// Returns a description if the wrong answer was accepted, or refused somewhere other than the
-    /// return check, which means the operands were refused and says nothing about the return.
+    /// Returns a description if the forged witness satisfies every constraint, or if the honest
+    /// run was not accepted, which leaves nothing to forge and says nothing about the return.
     ///
     /// # Panics
     ///
@@ -762,23 +812,37 @@ impl<F: HarnessField> BinaryOpOracle<F> {
         let expected = mavros_int_semantics::eval(self.op, lhs, rhs)
             .value()
             .expect("operands the model rejects have no right answer to perturb");
-
-        // Flipping the low bit keeps the value in range, so only the return check can refuse it.
-        let wrong = expected.xor(&IntBits::from_u128(expected.bits(), 1));
-
-        let verdict = self.compiled.run(&input_block_in(&[lhs, rhs, &wrong]));
-        match verdict {
-            Verdict::Trapped {
-                in_return_check: true,
-                ..
-            } => Ok(()),
-            other => Err(format!(
-                "{:?}({lhs:?}, {rhs:?}): the return is not constrained — declaring {wrong:?} \
-                 instead of {expected:?} gave {other:?}{}",
+        let honest = self.compiled.run(&input_block_in(&[lhs, rhs, &expected]));
+        let Some(witness) = honest.witness() else {
+            return Err(format!(
+                "{:?}({lhs:?}, {rhs:?}): the honest run was not accepted, so there is no witness \
+                 to forge: {honest:?}{}",
                 self.kind,
                 self.where_to_look()
-            )),
+            ));
+        };
+
+        // Flipping the low bit keeps the forged return a valid `bits`-wide integer, so only the
+        // binding of the return can refuse it.
+        let wrong = expected.xor(&IntBits::from_u128(expected.bits(), 1));
+        let columns = self.compiled.return_columns();
+        assert_eq!(columns.len(), 1, "a binary operation returns one field");
+        let mut forged = witness.to_vec();
+        forged[columns.start] = input_element(&wrong);
+
+        if self
+            .compiled
+            .first_unsatisfied_constraint(&forged)
+            .is_some()
+        {
+            return Ok(());
         }
+        Err(format!(
+            "{:?}({lhs:?}, {rhs:?}): the return is not constrained: a witness claiming {wrong:?} \
+             instead of {expected:?} satisfies every constraint{}",
+            self.kind,
+            self.where_to_look()
+        ))
     }
 }
 

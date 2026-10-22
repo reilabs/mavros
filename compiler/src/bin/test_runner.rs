@@ -13,13 +13,12 @@ use std::{
 use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
-use mavros_artifacts::Field as RawField;
+use mavros_artifacts::{Field as RawField, WitnessManifest};
 use mavros_compiler::{
     Project, abi_helpers, api,
     collections::HashMap,
     compiler::codegen::{
         CodeGenOptions,
-        hlssa_to_r1cs::R1CS,
         llssa_to_llvm::{WasmCompileOpts, wasm_debug_info_path},
         r1cs_compact,
     },
@@ -231,7 +230,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             if artifact_hashes_enabled() {
                 emit_artifact_hash(
                     "r1cs",
-                    &bincode::serialize(&r).expect("R1CS must serialize"),
+                    &bincode::serialize(r.system()).expect("R1CS must serialize"),
                 );
             }
             // Opt-in, report-only: how many rows/cols a post-seal compaction could remove. The
@@ -311,8 +310,15 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let ordered_params =
+    let inputs =
         api::read_prover_inputs(driver.package_root(), driver.abi()).map_err(|e| e.to_string());
+    let ordered_params = inputs.as_ref().map(|(params, _)| params.clone());
+
+    let manifest = r1cs.as_ref().map(|r1cs| {
+        driver
+            .witness_manifest(r1cs)
+            .map_err(|error| error.to_string())
+    });
 
     // 4. Run witgen  (depends on COMPILE)
     let witgen_result = program_artifact.as_ref().and_then(|artifact| {
@@ -334,6 +340,15 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             artifact.debug_info.clone(),
         ) {
             Ok(result) => {
+                // The parent scores an expected failure by its run steps, so a wrong `return`
+                // fails here rather than at the correctness check.
+                if let Some(reason) =
+                    declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
+                {
+                    eprintln!("witgen run error: {reason}");
+                    emit("END:WITGEN_RUN:fail");
+                    return None;
+                }
                 emit("END:WITGEN_RUN:ok");
                 if artifact_hashes_enabled() {
                     emit_artifact_hash("witness_pre", &witness_bytes(&result.out_wit_pre_comm));
@@ -353,14 +368,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     // 5. Check witgen correctness  (depends on WITGEN_RUN)
     if let (Some(result), Some(r1cs)) = (&witgen_result, &r1cs) {
         emit("START:WITGEN_CORRECT");
-        let correct =
-            r1cs.check_witgen_output(
-                &result.out_wit_pre_comm,
-                &result.out_wit_post_comm,
-                &result.out_a,
-                &result.out_b,
-                &result.out_c,
-            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
+        let correct = r1cs.check_witgen_output(
+            &result.out_wit_pre_comm,
+            &result.out_wit_post_comm,
+            &result.out_a,
+            &result.out_b,
+            &result.out_c,
+        ) && check_parameter_columns(&manifest, &inputs, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_CORRECT:ok"
         } else {
@@ -507,7 +521,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             }
         };
 
-        let entry_blob_field_count = driver.entry_point_flattened_io_count();
+        let entry_blob_field_count = driver.entry_blob_field_count();
         if interpreter::flattened_param_count(params) != entry_blob_field_count {
             eprintln!("WASM run error: Unexpected number of inputs supplied");
             emit("END:WITGEN_WASM_RUN:fail");
@@ -518,6 +532,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             wasm_host::run_witgen_loaded(loaded, r1cs, params, entry_blob_field_count)
         }) {
             Ok(result) => {
+                if let Some(reason) =
+                    declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
+                {
+                    eprintln!("WASM run error: {reason}");
+                    emit("END:WITGEN_WASM_RUN:fail");
+                    return None;
+                }
                 emit("END:WITGEN_WASM_RUN:ok");
                 if artifact_hashes_enabled() {
                     emit_artifact_hash(
@@ -543,14 +564,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
         emit("START:WITGEN_WASM_CORRECT");
 
-        let correct =
-            r1cs.check_witgen_output(
-                &result.out_wit_pre_comm,
-                &result.out_wit_post_comm,
-                &result.out_a,
-                &result.out_b,
-                &result.out_c,
-            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
+        let correct = r1cs.check_witgen_output(
+            &result.out_wit_pre_comm,
+            &result.out_wit_post_comm,
+            &result.out_a,
+            &result.out_b,
+            &result.out_c,
+        ) && check_parameter_columns(&manifest, &inputs, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -612,19 +632,47 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     }
 }
 
-/// True when the generated witness's return-guard column matches the parsed inputs.
-fn check_return_guard(
-    driver: &Driver,
-    r1cs: &R1CS,
-    ordered_params: &Result<Vec<interpreter::InputValueOrdered>, String>,
+type ProverInputs = (
+    Vec<interpreter::InputValueOrdered>,
+    Option<interpreter::InputValueOrdered>,
+);
+
+type Manifest = Option<Result<WitnessManifest, String>>;
+
+/// The parameter columns only: the declared return was already scored at the run step.
+fn check_parameter_columns(
+    manifest: &Manifest,
+    inputs: &Result<ProverInputs, String>,
     wit_pre_comm: &[RawField],
 ) -> bool {
-    let Ok(params) = ordered_params else {
+    let (Some(manifest), Ok((params, _))) = (manifest, inputs) else {
         return false;
     };
-    abi_helpers::check_return_guard(driver.abi(), &r1cs.witness_layout, params, wit_pre_comm)
-        .inspect_err(|reason| eprintln!("return-guard check failed: {reason}"))
+    manifest
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|manifest| {
+            abi_helpers::check_witness_manifest(manifest, params, None, wit_pre_comm)
+        })
+        .inspect_err(|reason| eprintln!("witness manifest check failed: {reason}"))
         .is_ok()
+}
+
+fn declared_return_mismatch(
+    manifest: &Manifest,
+    inputs: &Result<ProverInputs, String>,
+    wit_pre_comm: &[RawField],
+) -> Option<String> {
+    let Ok((_, Some(declared_return))) = inputs else {
+        return None;
+    };
+    match manifest {
+        Some(Ok(manifest)) => {
+            abi_helpers::check_declared_return(manifest, declared_return, wit_pre_comm).err()
+        }
+        Some(Err(reason)) => Some(reason.clone()),
+        None => Some("no witness manifest: R1CS generation did not succeed".to_string()),
+    }
 }
 
 // ── Parent: discover & run all tests ──────────────────────────────────

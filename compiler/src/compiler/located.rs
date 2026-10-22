@@ -182,6 +182,10 @@ pub fn synthetic_file(origin: impl AsRef<str>) -> String {
     format!("<{}>", origin.as_ref())
 }
 
+pub fn synthetic_file_prefix(origin_prefix: impl AsRef<str>) -> String {
+    format!("<{}", origin_prefix.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Located, SourceLocation, SourcePosition};

@@ -11,8 +11,8 @@
 //! supplies the matching unit type. Tuple elision later removes empty tuples from parameters,
 //! results, and storage. Sequence lowering must preserve bounds checks and slice lengths
 //! before that erasure; materializing unit alone is not sufficient. The entry-point wrapper
-//! uses the Noir ABI to decide whether a public return guard exists: an internal unit result
-//! does not add an ABI return slot.
+//! uses the Noir ABI to decide whether `main` has a return to bind to the witness: an internal
+//! unit result does not add one.
 
 mod expression_converter;
 mod type_converter;

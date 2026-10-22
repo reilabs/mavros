@@ -899,6 +899,32 @@ impl UntaintControlFlow {
                     location,
                 );
             }
+            // -- Hint stripping for WriteWitness: a hint is a value, never a witness --
+            OpCode::WriteWitness {
+                result: r,
+                value,
+                pinned,
+            } if type_info.is_some() => {
+                let ti = type_info.unwrap();
+                let value_type = ti.get_value_type(value);
+                let mut cast_instrs = Vec::new();
+                let hint = {
+                    let mut builder =
+                        HLInstrBuilder::new(function, ssa, &mut cast_instrs, location.clone());
+                    emit_strip_witness(value, value_type, &value_type.strip_witness(), &mut builder)
+                };
+                flush_conversion_instrs_located(new_instructions, block_taint, cast_instrs);
+                maybe_guard(
+                    new_instructions,
+                    block_taint,
+                    OpCode::WriteWitness {
+                        result: r,
+                        value: hint,
+                        pinned,
+                    },
+                    location,
+                );
+            }
             // -- Cast insertion for Store --
             OpCode::Store { ptr, value } if type_info.is_some() => {
                 let ti = type_info.unwrap();
@@ -994,7 +1020,7 @@ fn emit_value_conversion(
     }
 }
 
-/// Recursively strip WitnessOf from a value (for unconstrained call args).
+/// Recursively strip WitnessOf from a value (for unconstrained call args and witness hints).
 fn emit_strip_witness(
     value: ValueId,
     source_type: &Type,
