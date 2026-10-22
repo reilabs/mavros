@@ -6,7 +6,9 @@ use std::{
 
 use crate::{
     Project,
-    abi_helpers::{declared_return_from_btreemap, ordered_params_from_btreemap},
+    abi_helpers::{
+        declared_return_from_btreemap_for_field, ordered_params_from_btreemap_for_field,
+    },
     compiler::codegen::hlssa_to_r1cs::{R1CS, SealedR1CS},
     driver::Driver,
     vm::{bytecode::DebugInfo, interpreter},
@@ -35,14 +37,22 @@ pub fn read_prover_inputs(
     root: &Path,
     abi: &noirc_abi::Abi,
 ) -> Result<(Vec<InputValueOrdered>, Option<InputValueOrdered>), Error> {
+    read_prover_inputs_for_field::<RawField>(root, abi)
+}
+
+/// Decode inputs under the same field used by the frontend and VM.
+pub fn read_prover_inputs_for_field<F: MavrosField>(
+    root: &Path,
+    abi: &noirc_abi::Abi,
+) -> Result<(Vec<InputValueOrdered<F>>, Option<InputValueOrdered<F>>), Error> {
     let file_path = root.join("Prover.toml");
 
     if !file_path.exists() {
         if abi.parameters.is_empty() {
             let inputs = BTreeMap::new();
             return Ok((
-                ordered_params_from_btreemap(abi, &inputs)?,
-                declared_return_from_btreemap(abi, &inputs)?,
+                ordered_params_from_btreemap_for_field(abi, &inputs)?,
+                declared_return_from_btreemap_for_field(abi, &inputs)?,
             ));
         }
         return Err(format!(
@@ -67,13 +77,11 @@ pub fn read_prover_inputs(
         .parse(
             &inputs_src,
             abi,
-            // FIELD-ASSUMPTION: L1-direct-ref
-            // ABI input decoding is pinned to BN254, matching Mavros' current runtime field.
-            acvm::FieldConfig::new(acvm::FieldId::Bn254),
+            acvm::FieldConfig::new(crate::abi_helpers::noir_field_id(F::ID)),
         )
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
-    let ordered_params = ordered_params_from_btreemap(abi, &inputs)?;
-    let declared_return = declared_return_from_btreemap(abi, &inputs)?;
+    let ordered_params = ordered_params_from_btreemap_for_field(abi, &inputs)?;
+    let declared_return = declared_return_from_btreemap_for_field(abi, &inputs)?;
 
     Ok((ordered_params, declared_return))
 }
