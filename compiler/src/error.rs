@@ -1,5 +1,16 @@
 use thiserror::Error;
 
+/// A failure to locate or build the WASM runtime library, from misconfiguration or a failed tool.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct ToolchainError(String);
+
+impl ToolchainError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("No binary packages selected in {}", .0.display())]

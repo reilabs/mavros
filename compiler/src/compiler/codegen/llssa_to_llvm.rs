@@ -2725,7 +2725,7 @@ mod tests {
         let wasm_path = dir.path().join("subject.wasm");
         codegen.compile_to_wasm(
             &wasm_path,
-            WasmCompileOpts::fast(crate::wasm_runtime::locate_or_build()),
+            WasmCompileOpts::fast(crate::wasm_runtime::locate_or_build().unwrap()),
         );
 
         let engine = wasmtime::Engine::default();
@@ -3264,7 +3264,10 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("a temporary directory");
         let wasm_path = dir.path().join("subject.wasm");
-        codegen.compile_to_wasm(&wasm_path, opts_for(crate::wasm_runtime::locate_or_build()));
+        codegen.compile_to_wasm(
+            &wasm_path,
+            opts_for(crate::wasm_runtime::locate_or_build().unwrap()),
+        );
 
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, &wasm_path)
