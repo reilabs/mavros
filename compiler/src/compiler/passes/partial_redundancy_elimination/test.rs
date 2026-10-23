@@ -1578,10 +1578,9 @@ fn pre_untaint_config_dedups_without_structural_change() {
     assert_eq!(f.get_block(m).get_parameters().count(), 0);
 }
 
-/// The pre-untaint configuration's motion contract: a down-safe invariant behind a `Jmp`-terminated
-/// entry predecessor is hoisted (the site is not elimination-only), and the block/parameter
-/// geometry still survives untouched — composed exactly as `PRE::run` composes transform and the
-/// integrated DCE.
+/// Pre-untaint PRE moves code: a down-safe invariant behind a `Jmp`-terminated entry predecessor is
+/// hoisted (the site is not elimination-only), and blocks and block parameters stay untouched. The
+/// test composes the transform and the integrated DCE exactly as `PRE::run` does.
 #[test]
 fn pre_untaint_config_hoists_without_structural_change() {
     let (mut ssa, entry, header, body, exit) = invariant_loop(true);

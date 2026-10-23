@@ -11,8 +11,8 @@
 //! supplies the matching unit type. Tuple elision later removes empty tuples from parameters,
 //! results, and storage. Sequence lowering must preserve bounds checks and slice lengths
 //! before that erasure; materializing unit alone is not sufficient. The entry-point wrapper
-//! uses the Noir ABI to decide whether a public return guard exists: an internal unit result
-//! does not add an ABI return slot.
+//! uses the Noir ABI to decide whether `main` has a return to bind to the witness: an internal
+//! unit result does not add one.
 
 mod expression_converter;
 mod type_converter;
@@ -38,6 +38,7 @@ use crate::{
 
 use expression_converter::ExpressionConverter;
 use fm::FileManager;
+use mavros_artifacts::FieldConfig;
 use type_converter::TypeConverter;
 
 /// Converts a monomorphized Program to SSA.
@@ -82,8 +83,9 @@ impl SSAConverter {
         &mut self,
         program: &Program,
         file_manager: Option<&FileManager>,
+        field: FieldConfig,
     ) -> (HLSSA, bool) {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
 
         // Phase 1: Register all functions to handle mutual recursion.
         // For each constrained function, also register an unconstrained variant
@@ -380,8 +382,8 @@ impl SSAConverter {
             file_manager,
         );
 
-        // Folding requires separate circuits and recursive circuit calls. Refuse it before
-        // lowering the body can feed recursive calls into cost analysis.
+        // The frontend rejects folding from source. Retain this defense for hand-built
+        // monomorphic programs: lowering recursive circuit calls would feed them into cost analysis.
         if matches!(ast_func.inline_type, InlineType::Fold) {
             expr_converter.reject_unsupported(
                 format!(
@@ -418,18 +420,19 @@ impl SSAConverter {
 }
 
 impl HLSSA {
-    /// Create SSA directly from a monomorphized program.
+    /// Create SSA over bn254 directly from a monomorphized program.
     pub fn from_program(program: &Program) -> (HLSSA, bool) {
-        Self::from_program_with_file_manager(program, None)
+        Self::from_program_with_file_manager(program, None, FieldConfig::bn254())
     }
 
-    /// Create SSA directly from a monomorphized program, preserving source locations when
-    /// a Noir file manager is available.
+    /// Create SSA over `field` directly from a monomorphized program, preserving source locations
+    /// when a Noir file manager is available.
     pub fn from_program_with_file_manager(
         program: &Program,
         file_manager: Option<&FileManager>,
+        field: FieldConfig,
     ) -> (HLSSA, bool) {
         let mut converter = SSAConverter::new();
-        converter.convert_program(program, file_manager)
+        converter.convert_program(program, file_manager, field)
     }
 }

@@ -1,8 +1,6 @@
 //! Performs both peephole optimization and algebraic simplification on the SSA IR, running until it
 //! reaches an iteration limit or a fixed point.
 
-use num_traits::{One, Zero};
-
 use crate::{
     collections::HashMap,
     compiler::{
@@ -176,9 +174,8 @@ impl Simplifier {
                 lhs,
                 rhs,
             } => {
-                // These are algebraic identities on the value, and each holds in both readings —
-                // `x + 0 = x` whatever the sign — so the rules are keyed on the sign-erased group.
-                // The one place the sign genuinely matters is the `Shr` rewrite below.
+                // Identities on the value, keyed on the sign-erased group. The sign matters only
+                // for a constant one ([`is_one_under`]) and the `Shr` rewrite below.
                 match kind.group() {
                     ArithGroup::Add => {
                         if is_zero(fb.ssa, *lhs) {
@@ -218,13 +215,13 @@ impl Simplifier {
                                 target: *rhs,
                             });
                         }
-                        if is_one(fb.ssa, *lhs) {
+                        if is_one_under(fb.ssa, *lhs, kind.is_signed()) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *rhs,
                             });
                         }
-                        if is_one(fb.ssa, *rhs) {
+                        if is_one_under(fb.ssa, *rhs, kind.is_signed()) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -232,7 +229,7 @@ impl Simplifier {
                         }
                     }
                     ArithGroup::Div => {
-                        if is_one(fb.ssa, *rhs) {
+                        if is_one_under(fb.ssa, *rhs, kind.is_signed()) {
                             return Some(Rewrite::Alias {
                                 result: *result,
                                 target: *lhs,
@@ -341,13 +338,9 @@ impl Simplifier {
                             && let Some(offset) = const_as_usize(fb.ssa, *rhs)
                         {
                             let lhs_type = types.get_value_type(*lhs);
-                            // Only a _logical_ right shift is a bit-range extract: an arithmetic
-                            // one fills the vacated top bits with the sign, not with zeros. The
-                            // opcode is what says which this is.
-                            //
-                            // And only one the field carries: a bit window is cut out of one
-                            // element, so past that a shift stays a shift, which every lane has at
-                            // every width.
+                            // Only a logical right shift is a bit-range extract (an arithmetic
+                            // one sign-fills), and only at a width the field carries, since a
+                            // window is cut from one element.
                             let signed = kind.is_signed();
                             let lhs_inner = lhs_type.strip_witness();
                             if !signed
@@ -416,8 +409,7 @@ impl Simplifier {
                         });
                     }
                 }
-                // ValueOf(x) → x for a pure x, which a fold earlier in this pass can make of an
-                // operand that was a witness when the strip was emitted.
+                // ValueOf(x) → x for a pure x, which an earlier fold here can produce.
                 if matches!(target, CastTarget::ValueOf)
                     && !types.get_value_type(*value).is_witness_of()
                 {
@@ -595,6 +587,15 @@ fn is_one(ssa: &HLSSA, v: ValueId) -> bool {
     }
 }
 
+/// Whether `v` is the constant one under the operation's reading: in a signed `int1` the pattern
+/// `1` is `-1`.
+fn is_one_under(ssa: &HLSSA, v: ValueId, signed: bool) -> bool {
+    match ssa.get_const(v).as_deref() {
+        Some(Constant::Int(pattern)) if signed && pattern.bits() == 1 => false,
+        _ => is_one(ssa, v),
+    }
+}
+
 fn is_all_ones(ssa: &HLSSA, v: ValueId) -> bool {
     match ssa.get_const(v).as_deref() {
         Some(Constant::Int(pattern)) => pattern.is_all_ones(),
@@ -614,11 +615,8 @@ mod tests {
     use super::*;
     use crate::compiler::ssa::{Terminator, hlssa::builder::HLEmitter};
 
-    /// A strip of a value a fold has made pure is that value, not an ICE.
-    ///
-    /// `w * 0` is the constant zero whatever `w` is, and the fold says so by aliasing the constant,
-    /// so a `ValueOf` emitted while the product was a witness is left stripping a pure value. It
-    /// types as that value, and is then folded away with it.
+    /// A strip of a value a fold has made pure folds away, not an ICE: `w * 0` folds to the
+    /// constant zero, leaving a `ValueOf` of a pure value.
     #[test]
     fn a_strip_of_a_value_folded_pure_is_that_value() {
         let mut ssa = HLSSA::with_main("main".to_string());

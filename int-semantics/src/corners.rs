@@ -1,9 +1,6 @@
-//! The corner values every conformance sweep runs over.
-//!
-//! These are deliberately the _known_ corners: sign boundaries, `INT_MIN`, `-1`, the width and
-//! the width ± 1 as shift amounts. Random operand generation essentially never produces them, which
-//! is why this list is the backbone and `proptest` is the layer on top rather than the other way
-//! round.
+//! The corner values every conformance sweep runs over: sign boundaries, `INT_MIN`, `-1`, and the
+//! width and the width ± 1 as shift amounts. Random generation almost never produces them, so this
+//! list is the backbone and `proptest` a layer on top.
 
 use std::sync::LazyLock;
 
@@ -17,14 +14,11 @@ use crate::{
 
 /// The widest pattern the generators below can express.
 ///
-/// They are host-typed by design — `Vec<u128>`, sorted and deduplicated, per [`values`]'s doc —
-/// so this is a property of the return type and deliberately **not** [`MAX_BITS`](crate::MAX_BITS),
-/// which is far above it. Written as the cap, raising it would loosen the asserts below
-/// without widening anything they guard, and a `values(16384)` would sweep a 128-bit corner set
-/// at a 16384-bit width: passing, while checking almost nothing.
+/// They return host words (`Vec<u128>`), so this is a limit of the return type and deliberately
+/// **not** [`MAX_BITS`](crate::MAX_BITS): `values(16384)` would sweep a 128-bit corner set at a
+/// 16384-bit width and pass while checking almost nothing.
 ///
-/// The wide half of the corner set is a separate generator returning [`IntBits`](crate::IntBits),
-/// which each evaluator's sweep opts into as its own lane learns the width.
+/// Wide corners come from separate generators returning [`IntBits`].
 const HOST_CORNER_BITS: usize = HOST_WORD_BITS;
 
 /// The widths every sweep covers.
@@ -39,24 +33,15 @@ pub const WIDTHS: [usize; 6] = [1, 8, 16, 32, 64, 128];
 /// wider has to fall back to the corner set.
 pub const EXHAUSTIVE_WIDTHS: [usize; 3] = [1, 4, 8];
 
-/// Widths that are not powers of two.
-///
-/// Kept as a named set because they are the ones that catch a width assumption, and every
-/// evaluator sweep now chains them in: a mask by `bits - 1` passes at every width in [`WIDTHS`]
-/// and fails here.
+/// Widths that are not powers of two. A mask by `bits - 1` passes at every width in [`WIDTHS`] and
+/// fails here, so every evaluator sweep chains them in.
 pub const ODD_WIDTHS: [usize; 3] = [3, 5, 7];
 
 /// Corner raw patterns for a `bits`-wide operand, deduplicated and masked to the width.
 ///
-/// Deliberately host words rather than [`IntBits`](crate::IntBits) as these are a _corpus_, sorted
-/// and deduplicated, and a pattern has no ordering to sort by. The sweeps that use them are
-/// host-level evaluators too, so they build a pattern at the point they call the model and nowhere
-/// else.
-///
-/// Covers, in both readings: zero and the small values, the unsigned top, the signed boundary pair
-/// and its neighbours, `-1` and `-2`, the powers of two that sit at the width's edges and middle,
-/// the two alternating patterns, and the two operands the existing corpus tests use for the case
-/// where the readings disagree.
+/// Host words rather than [`IntBits`], because the list is sorted to deduplicate and a pattern has
+/// no ordering. The sweeps using them are host-level evaluators, which build a pattern only where
+/// they call the model.
 #[must_use]
 pub fn values(bits: usize) -> Vec<u128> {
     assert!((1..=HOST_CORNER_BITS).contains(&bits));
@@ -93,16 +78,11 @@ pub fn values(bits: usize) -> Vec<u128> {
     out
 }
 
-/// Shift amounts to try against a `bits`-wide value, as raw patterns at `rhs_bits`.
-///
-/// The amounts around `bits` are the point: `bits - 1` is the largest legal one, `bits` is the
-/// smallest rejected one, and an evaluator that gets the boundary off by one is wrong on exactly
-/// those two. The host widths (63, 64, 65, 127, 128) are here because several evaluators reach for
-/// a `u64` or `u128` shift internally and inherit _its_ masking rather than the operand's.
+/// Shift amounts to try against a `bits`-wide value, as raw `bits`-wide patterns.
 #[must_use]
-pub fn shift_amounts(bits: usize, rhs_bits: usize) -> Vec<u128> {
-    assert!((1..=HOST_CORNER_BITS).contains(&bits) && (1..=HOST_CORNER_BITS).contains(&rhs_bits));
-    let m = mask(rhs_bits);
+pub fn shift_amounts(bits: usize) -> Vec<u128> {
+    assert!((1..=HOST_CORNER_BITS).contains(&bits));
+    let m = mask(bits);
     let mut out = vec![0, 1, 63, 64, 65, 127, 128, m];
 
     for around in [bits, bits / 2] {
@@ -113,8 +93,8 @@ pub fn shift_amounts(bits: usize, rhs_bits: usize) -> Vec<u128> {
     }
 
     // A negative amount, which reads as a huge magnitude and must be rejected for that reason.
-    if rhs_bits >= 2 {
-        out.push(1u128 << (rhs_bits - 1));
+    if bits >= 2 {
+        out.push(1u128 << (bits - 1));
     }
 
     out.iter_mut().for_each(|v| *v &= m);
@@ -123,47 +103,27 @@ pub fn shift_amounts(bits: usize, rhs_bits: usize) -> Vec<u128> {
     out
 }
 
-/// Every `(bits, rhs_bits)` pair worth sweeping for a shift.
-///
-/// The equal-width pair is what Noir itself produces (its elaborator unifies a shift's amount with
-/// its value) so it is the case that must be right. The mixed pairs are here because the amount's
-/// own width is a real degree of freedom in the model, and two evaluators pass one through at
-/// runtime: `instrumenter::binary_arith_op` reads each operand at the width its own `Value::Int`
-/// carries, and `hlssa_to_r1cs::arith` reads a narrower amount at the value's width and documents
-/// why that is safe. The constant folders do not: `lattice::fold_width` declines a mixed pair
-/// outright, because `assert_int_arith_widths` would panic on the IR one would have to come from.
-#[must_use]
-pub fn shift_width_pairs() -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    for &bits in widths() {
-        for &rhs_bits in &[bits, 8, 32, 64, HOST_CORNER_BITS] {
-            out.push((bits, rhs_bits));
-        }
-    }
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
 /// The reads worth taking of a `bits`-wide container by a spread or an unspread, the narrowest of
-/// which is `least`: all of it, one bit short, half, and `least` itself.
-///
-/// Every read short of the container leaves the bits above it for the evaluator to discard. A
-/// spread reads at least one bit and an unspread at least two, so `least` is `1` or `2`, and no
-/// read below it is returned.
+/// which is `least`: all of it, one bit short, half, `least` itself, and either side of the first
+/// limb boundary, where a limb-wise lowering splits a read across two limbs.
 #[must_use]
 pub fn spread_reads(bits: usize, least: usize) -> Vec<usize> {
-    let mut reads = vec![bits, bits.saturating_sub(1), bits / 2, least];
+    let mut reads = vec![
+        bits,
+        bits.saturating_sub(1),
+        bits / 2,
+        least,
+        HOST_LIMB_BITS,
+        HOST_LIMB_BITS + 1,
+    ];
     reads.retain(|&read| (least..=bits).contains(&read));
     reads.sort_unstable();
     reads.dedup();
     reads
 }
 
-/// The widths every narrow sweep covers, under either reading.
-///
-/// This is [`WIDTHS`] **plus [`ODD_WIDTHS`]**. The union lives here rather than in each sweep on
-/// purpose to avoid width assumptions.
+/// The widths every narrow sweep covers, under either reading: [`WIDTHS`] **plus
+/// [`ODD_WIDTHS`]**, joined here so no sweep can leave out the odd widths.
 #[must_use]
 pub fn widths() -> &'static [usize] {
     static WIDTHS_WITH_ODD: LazyLock<Vec<usize>> = LazyLock::new(|| {
@@ -179,50 +139,37 @@ pub fn widths() -> &'static [usize] {
 // THE WIDE CORNER SET
 // ================================================================================================
 //
-// Everything above is host-typed and stops at [`HOST_CORNER_BITS`]. Everything below carries
-// [`IntBits`] end to end, which is the only way to name a corner of a 16384-bit type at all.
+// Everything below carries [`IntBits`] end to end, the only way to name a corner of a 16384-bit
+// type.
 //
-// It is a **separate** set rather than wider entries in [`WIDTHS`], and that is the load-bearing
-// decision here. All nine registered evaluators drive their sweeps off [`widths`] and most
-// take it unfiltered, so a wide entry there would ask every evaluator to answer at 16384 bits
-// whether or not its lane has a wide body. Opting in per evaluator keeps "this lane answers at the
-// wide widths" a claim each sweep makes for itself, by naming [`WIDE_WIDTHS`].
+// It is a **separate** set rather than wider entries in [`WIDTHS`]: all nine registered evaluators
+// drive their sweeps off [`widths`], so a wide entry would ask each to answer at 16384 bits whether
+// or not its lane has a wide body. A sweep opts in by naming [`WIDE_WIDTHS`].
 //
-// One registered evaluator cannot opt in at all: the interval domain's relation quantifies over the
-// _concretisation_ of its ranges rather than over corners, and the concretisation of a 16384-bit
-// interval is not enumerable.
+// The interval domain cannot opt in: its relation quantifies over the concretization of its
+// ranges, which is not enumerable at 16384 bits.
 
 /// The widths a wide sweep covers.
 ///
-/// Small on purpose: a corner sweep is quadratic in the corner count and each operand is a
-/// `BigUint` of the full width, so this is the set of widths that ask a _different question_
-/// rather than a sample of the range.
+/// Few on purpose, as a corner sweep is quadratic in full-width operands, so each width asks a
+/// different question:
 ///
-/// - `129` is one bit past the narrow/wide threshold, the narrowest width that must go limb-wise.
-/// - `192` is exactly three limbs, where the top limb is full and every `bits % 64` special case
-///   vanishes.
-/// - `256` is the width the two-limb product lane would reach for, and the first that is not also
-///   a power-of-two multiple of the limb.
-/// - `1000` is not a multiple of the limb width and not a power of two, which is where a lowering
-///   that assumed either is wrong.
-/// - **`16383` and `16384` are both here and neither may be dropped.** They are the partial and
-///   the full top limb at the cap: `16384` is exactly 256 limbs, so every `bits % HOST_LIMB_BITS`
-///   special case disappears, and `16383` is the one that exercises all of them. Testing either
-///   alone is the single easiest way to ship a top-limb bug.
+/// - `129`: one past the narrow/wide threshold, the narrowest width that goes limb-wise.
+/// - `192`: exactly three full limbs, with no `bits % 64` special case.
+/// - `256`: the width the two-limb product lane would reach for.
+/// - `1000`: neither a multiple of the limb width nor a power of two.
+/// - **`16383` and `16384` must both stay**: the partial and the full top limb at the cap. `16384`
+///   has no `bits % HOST_LIMB_BITS` special case and `16383` exercises all of them.
 pub const WIDE_WIDTHS: [usize; 6] = [129, 192, 256, 1000, 16383, 16384];
 
 /// Corner patterns for a `bits`-wide operand, deduplicated.
 ///
-/// The wide counterpart of [`values`], and deliberately not sorted: two patterns have two
-/// orderings and this type refuses to pick one, which is the same reason [`values`] is host-typed
-/// and this is not. Dedup is therefore linear scan over a list this short rather than
-/// `sort`+`dedup`.
+/// The wide counterpart of [`values`], unsorted: a pattern has two orderings (signed and unsigned)
+/// and this does not pick one, so deduplication scans the short list.
 ///
-/// Covers what [`values`] covers — zero and the small values, the unsigned top, the signed
-/// boundary pair and its neighbours, `-1` and `-2`, the alternating patterns — **plus the limb
-/// boundaries**, which are the corners that do not exist at a narrow width: the top of the low
-/// limb, the bottom of the second, and the same pair at the top limb. A carry chain, a mask or a
-/// sign extension that is off by one limb is wrong on exactly those and right everywhere else.
+/// Covers what [`values`] covers, less its three fixed constants (`40`, `100`, `200`), **plus the
+/// limb boundaries**: the top of the low limb, the bottom of the second, and the same pair at the
+/// top limb. A carry chain, mask or sign extension off by one limb is wrong exactly there.
 #[must_use]
 pub fn wide_values(bits: usize) -> Vec<IntBits> {
     assert!(
@@ -255,6 +202,9 @@ pub fn wide_values(bits: usize) -> Vec<IntBits> {
         out.push(sign_bit.or(&one));
         out.push(below_pow2(bits - 1));
         out.push(below_pow2(bits - 1).xor(&one));
+
+        // `2^(bits/2)`, whose square is `2^bits` at an even width: the product one past the top.
+        out.push(pow2(bits / 2));
     }
 
     // The limb boundaries, which is what makes this set wide rather than merely large. `k` is the
@@ -285,30 +235,29 @@ pub fn wide_values(bits: usize) -> Vec<IntBits> {
     dedup_patterns(out)
 }
 
-/// Shift amounts to try against a `bits`-wide value, as patterns at `rhs_bits`.
+/// Shift amounts to try against a `bits`-wide value, as `bits`-wide patterns.
 ///
-/// The wide counterpart of [`shift_amounts`]. The amounts around `bits` are the point for the same
-/// reason they are there, and the **limb** boundaries join them: a wide shift decomposes into
-/// `q` whole limbs plus `r` bits, so `HOST_LIMB_BITS` and its neighbours are where `r` is zero and
-/// an intra-limb split has nothing to split.
+/// The wide counterpart of [`shift_amounts`]: amounts around `bits`, as there, plus amounts around
+/// the **limb** size. A wide shift moves `q` whole limbs plus `r` bits, so `HOST_LIMB_BITS` and its
+/// neighbors are where `r` is zero and there is no split within a limb.
 #[must_use]
-pub fn wide_shift_amounts(bits: usize, rhs_bits: usize) -> Vec<IntBits> {
+pub fn wide_shift_amounts(bits: usize) -> Vec<IntBits> {
     assert!(
-        (1..=crate::MAX_BITS).contains(&bits) && (1..=crate::MAX_BITS).contains(&rhs_bits),
-        "widths {bits}/{rhs_bits} are outside 1..={}",
+        (1..=crate::MAX_BITS).contains(&bits),
+        "width {bits} is outside 1..={}",
         crate::MAX_BITS
     );
 
-    let mut out = vec![IntBits::zero(rhs_bits), IntBits::from_u128(rhs_bits, 1)];
+    let mut out = vec![IntBits::zero(bits), IntBits::from_u128(bits, 1)];
 
     for around in [HOST_LIMB_BITS, bits / 2, bits] {
         for delta in [0usize, 1, 2] {
             out.push(IntBits::from_biguint(
-                rhs_bits,
+                bits,
                 &BigUint::from(around.saturating_add(delta)),
             ));
             out.push(IntBits::from_biguint(
-                rhs_bits,
+                bits,
                 &BigUint::from(around.saturating_sub(delta)),
             ));
         }
@@ -316,36 +265,30 @@ pub fn wide_shift_amounts(bits: usize, rhs_bits: usize) -> Vec<IntBits> {
 
     // The whole amount range as a magnitude, and a negative one, which reads as a huge magnitude
     // and must be rejected for that reason.
-    out.push(IntBits::all_ones(rhs_bits));
-    if rhs_bits >= 2 {
-        out.push(IntBits::from_u128(rhs_bits, 1).shifted_left(rhs_bits - 1));
+    out.push(IntBits::all_ones(bits));
+    if bits >= 2 {
+        out.push(IntBits::from_u128(bits, 1).shifted_left(bits - 1));
     }
 
     dedup_patterns(out)
 }
 
-/// The `(lhs, rhs)` corner lists a wide sweep should run over for one operation.
-///
-/// Every wide sweep wants the same thing and wants it for the same reason: [`wide_values`] on the
-/// left, and on the right either [`wide_values`] again or [`wide_shift_amounts`] for a shift,
-/// because a corner _value_ at a wide width is a magnitude so far past the width that every one of
-/// them is rejected alike, and a sweep built from those would check the rejection path a few
-/// hundred times and the shifting path never.
+/// The `(lhs, rhs)` corner lists a wide sweep runs over for one operation: [`wide_values`] on both
+/// sides, or [`wide_shift_amounts`] on the right of a shift. As a shift amount every corner value
+/// is far past the width, so it would test only the rejection.
 #[must_use]
 pub fn wide_operands(op: IntOp, bits: usize) -> (Vec<IntBits>, Vec<IntBits>) {
     let values = wide_values(bits);
     let rhs = if op.is_shift() {
-        wide_shift_amounts(bits, bits)
+        wide_shift_amounts(bits)
     } else {
         values.clone()
     };
     (values, rhs)
 }
 
-/// Remove duplicates from a corner list, preserving order.
-///
-/// Quadratic, and deliberately: the lists above are a few dozen entries and a pattern has no
-/// ordering to sort by, so the alternative would be inventing one here purely to deduplicate.
+/// Remove duplicates from a corner list, preserving order. Quadratic, as the lists are a few dozen
+/// entries and a pattern has no ordering to sort by.
 fn dedup_patterns(patterns: Vec<IntBits>) -> Vec<IntBits> {
     let mut out: Vec<IntBits> = Vec::with_capacity(patterns.len());
     for p in patterns {
@@ -360,12 +303,8 @@ fn dedup_patterns(patterns: Vec<IntBits>) -> Vec<IntBits> {
 mod tests {
     use super::*;
 
-    /// The one property the whole wide set exists for.
-    ///
-    /// `16384` is exactly 256 limbs, so every `bits % HOST_LIMB_BITS` special case in every
-    /// lowering disappears at it; `16383` is the width that exercises all of them. A sweep run at
-    /// either alone is the easiest way to ship a top-limb bug, so this pins that both are present
-    /// and that they really do differ in the way that matters.
+    /// Both `16383` and `16384` are present: `16384` has no `bits % HOST_LIMB_BITS` special case
+    /// and `16383` exercises all of them, so either alone can hide a top-limb bug.
     #[test]
     fn the_cap_appears_as_both_a_full_and_a_partial_top_limb() {
         assert!(WIDE_WIDTHS.contains(&16384) && WIDE_WIDTHS.contains(&16383));
@@ -382,11 +321,8 @@ mod tests {
         );
     }
 
-    /// Every corner is at the width it was asked for, and none carries a bit above it.
-    ///
-    /// The failure this catches is the one the host-typed generators cannot have: a corner built
-    /// by shifting or complementing that lands outside the width and is silently normalised, or
-    /// worse, is not.
+    /// Every corner is at its requested width with no bit above it. A corner built by shifting or
+    /// complementing can land outside the width, which the host-typed generators cannot.
     #[test]
     fn every_wide_corner_is_at_its_declared_width() {
         for &bits in &WIDE_WIDTHS {
@@ -394,7 +330,7 @@ mod tests {
                 assert_eq!(p.bits(), bits);
                 assert_eq!(p.limb_count(), IntBits::limbs_for_bits(bits));
             }
-            for a in wide_shift_amounts(bits, bits) {
+            for a in wide_shift_amounts(bits) {
                 assert_eq!(a.bits(), bits);
             }
         }
@@ -419,7 +355,7 @@ mod tests {
             );
         }
 
-        // And the value's own top, which is `-1` under the other reading.
+        // And the value's top, which is `-1` under the other reading.
         assert!(corners.contains(&IntBits::all_ones(bits)));
         assert!(corners.contains(&IntBits::zero(bits)));
     }
@@ -436,19 +372,16 @@ mod tests {
     fn the_narrow_generators_still_refuse_a_wide_width() {
         assert!(WIDTHS.iter().all(|&b| b <= HOST_CORNER_BITS));
         assert!(std::panic::catch_unwind(|| values(129)).is_err());
-        assert!(std::panic::catch_unwind(|| shift_amounts(129, 129)).is_err());
+        assert!(std::panic::catch_unwind(|| shift_amounts(129)).is_err());
     }
 
-    /// The model answers at every wide width, which is the precondition for any sweep using these.
-    ///
-    /// Cheap on purpose — one operand pair per width, not the corner matrix — because what is
-    /// being checked is that the widths are admissible at all, not that the arithmetic is right.
+    /// The model answers at every wide width, the precondition for any sweep using them. One pair
+    /// per width: this checks admissibility, not arithmetic.
     #[test]
     fn the_model_accepts_every_wide_width() {
         for &bits in &WIDE_WIDTHS {
-            // Built here rather than indexed out of `wide_values`, whose order is an implementation
-            // detail of the generator: what this asks is whether the model answers at the width,
-            // not what the corner list happens to hold at a position.
+            // Built here, not indexed out of `wide_values`, whose order is an implementation
+            // detail.
             let (a, b) = (IntBits::from_u128(bits, 1), IntBits::from_u128(bits, 2));
             assert_eq!(
                 crate::eval(crate::IntOp::UAdd, &a, &b).value(),

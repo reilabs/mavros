@@ -6,13 +6,12 @@ use crate::compiler::ssa::SSAType;
 
 // FIELD-ASSUMPTION: L6-int-representation
 //
-// This bounds the integer _type system_ (the widest int a program may name); it is independent of
-// the underlying field. Integers wider than fit in the field natively are carried by limb-based
-// encodings rather than refused by the type system.
+// This bounds the widest int a program may name, independently of the field: an integer too wide
+// for one element is carried as limbs, not refused.
 pub const MAX_SUPPORTED_INT_BITS: usize = 1 << 14;
 
-// The reference model bounds its own operations by the same number, though neither constant is
-// derived from the other as they mean different things, so we just assert that they agree.
+// The reference model bounds its operations by the same number. The two constants mean different
+// things, so neither is derived from the other; this asserts that they agree.
 const _: () = assert!(
     MAX_SUPPORTED_INT_BITS == mavros_int_semantics::MAX_BITS,
     "the integer type cap and `mavros-int-semantics`'s width bound have drifted apart"
@@ -593,7 +592,7 @@ mod tests {
 
     // --- the type cap ---
 
-    /// The widest width is an ordinary type carrying its own bit size.
+    /// The widest width is an ordinary type carrying its bit size.
     #[test]
     fn the_widest_width_is_an_ordinary_type() {
         assert_eq!(

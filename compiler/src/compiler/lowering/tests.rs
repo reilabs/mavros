@@ -12,7 +12,7 @@ use crate::compiler::{
     passes::{defunctionalize::Defunctionalize, elide_tuples::ElideTuples},
     ssa::{
         Terminator,
-        hlssa::{CallTarget, OpCode, Type},
+        hlssa::{CallTarget, Constant, OpCode, Type},
     },
 };
 
@@ -391,5 +391,90 @@ fn unit_sequence_elements_are_typed_values_and_calls_are_not_duplicated() {
             unit_type.clone().slice_of(),
             unit_type.array_of(3),
         ])
+    );
+}
+
+/// The Noir `Field` literal `value`, which the frontend hands over as the signed integer written.
+fn field_literal(value: i128) -> Expression {
+    Expression::Literal(Literal::Integer(
+        noir_bigint::BigInt::from(value),
+        AstType::Field,
+        Location::dummy(),
+    ))
+}
+
+/// The constant `main` returns, lowered over `field`.
+fn returned_field_constant(field: FieldConfig, body: Expression) -> crate::compiler::Field {
+    let program = Program {
+        functions: vec![function(0, body, AstType::Field)],
+        ..Default::default()
+    };
+    let (ssa, _) = HLSSA::from_program_with_file_manager(&program, None, field);
+    assert_eq!(ssa.field(), field);
+    let main = ssa.get_unique_entrypoint();
+    let returned = main
+        .get_blocks()
+        .find_map(|(_, block)| match block.get_terminator() {
+            Some(Terminator::Return(values)) => Some(values[0]),
+            _ => None,
+        })
+        .expect("main returns");
+    match ssa.get_const(returned).as_deref() {
+        Some(Constant::Field(value)) => *value,
+        other => panic!("main returns {other:?}, not a field constant"),
+    }
+}
+
+#[test]
+fn a_field_literal_below_the_goldilocks_modulus_keeps_its_integer() {
+    let goldilocks = FieldConfig::goldilocks();
+    let top = i128::from(mavros_artifacts::field::goldilocks::MODULUS - 1);
+    for value in [0, 7, top] {
+        assert_eq!(
+            returned_field_constant(goldilocks, field_literal(value)),
+            goldilocks.constant(value)
+        );
+    }
+}
+
+/// A negative literal is the negation of its magnitude in the configured field.
+#[test]
+fn a_negative_field_literal_negates_in_goldilocks() {
+    let goldilocks = FieldConfig::goldilocks();
+    assert_eq!(
+        returned_field_constant(goldilocks, field_literal(-1)),
+        -goldilocks.one()
+    );
+    let top = i128::from(mavros_artifacts::field::goldilocks::MODULUS - 1);
+    assert_eq!(
+        returned_field_constant(goldilocks, field_literal(-top)),
+        goldilocks.one()
+    );
+}
+
+#[test]
+#[should_panic(expected = "does not fit the field")]
+fn a_field_literal_at_the_goldilocks_modulus_is_refused() {
+    let modulus = i128::from(mavros_artifacts::field::goldilocks::MODULUS);
+    returned_field_constant(FieldConfig::goldilocks(), field_literal(modulus));
+}
+
+#[test]
+#[should_panic(expected = "does not fit the field")]
+fn a_negative_field_literal_of_the_goldilocks_modulus_is_refused() {
+    let modulus = i128::from(mavros_artifacts::field::goldilocks::MODULUS);
+    returned_field_constant(FieldConfig::goldilocks(), field_literal(-modulus));
+}
+
+#[test]
+fn a_field_literal_keeps_its_bn254_value() {
+    let bn254 = FieldConfig::bn254();
+    assert_eq!(
+        returned_field_constant(bn254, field_literal(-1)),
+        -bn254.one()
+    );
+    assert_eq!(
+        returned_field_constant(bn254, field_literal(i128::MAX)),
+        bn254.constant(i128::MAX)
     );
 }

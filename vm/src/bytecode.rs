@@ -1,21 +1,18 @@
 #![allow(unused_variables)]
 
-use ark_ff::{AdditiveGroup as _, BigInteger as _};
 use mavros_opcode_gen::interpreter;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use std::{collections::BTreeMap, fmt::Display, ptr};
+use std::{any::TypeId, collections::BTreeMap, fmt::Display, ptr};
+
+use mavros_artifacts::FieldId;
 
 use crate::{
     ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, TableKind, WitnessLayout,
-    array::{BoxedLayout, BoxedValue, DataType, StructDescriptor},
+    array::{BoxedLayout, BoxedValue, DataType},
     int_limbs,
     interpreter::{Frame, Handler},
 };
-
-/// The number of u64 limbs making up a field element.
-// FIELD-ASSUMPTION: L3-felt-limbs
-pub const FELT_LIMBS: usize = 4;
 
 /// A user-facing source position attached to generated VM code.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -264,57 +261,54 @@ impl VM {
 /// opcode proc macro.
 pub const ELEM_WORD: usize = 0;
 pub const ELEM_FIELD: usize = 1;
+/// A witness linear combination evaluated at w, stored as an inline field value.
+/// Unlike a pure field table element, it already includes the constant-column contribution.
+pub const ELEM_VERIFIER: usize = 5;
 pub const ELEM_WITNESS: usize = 2;
 pub const ELEM_U128: usize = 3;
 
-/// An integer spanning the opcode's own `stride` cells, read as one little-endian element.
+/// An integer spanning the opcode's `stride` cells, read as one little-endian element.
 pub const ELEM_CELLS: usize = 4;
 
-/// One element of `cells` consecutive cells, little-endian, as a field element.
-///
-/// The bound is a real assertion rather than a `debug_assert!` to avoid a silent state corruption:
-/// `take` below would read the low [`FELT_LIMBS`] cells of a wider element and answer as if that
-/// were the entire value. `lookup_elem_kind` in the compiler ensures the same bound from the other
-/// end.
+/// One element of `cells` consecutive cells, little-endian, as an element of `F`.
 #[inline(always)]
-unsafe fn read_cells_as_field(ptr: *mut u64, cells: usize) -> Field {
+unsafe fn read_cells_as_field<F: mavros_artifacts::MavrosField>(ptr: *mut u64, cells: usize) -> F {
     assert!(
-        cells <= FELT_LIMBS,
-        "an element is carried through {FELT_LIMBS} limbs, so {cells} cells have nowhere to go"
+        cells <= F::CANONICAL_LIMBS,
+        "an element is carried through {} limbs, so {cells} cells have nowhere to go",
+        F::CANONICAL_LIMBS
     );
-    let mut limbs = [0u64; FELT_LIMBS];
-    for (index, limb) in limbs.iter_mut().enumerate().take(cells) {
-        *limb = unsafe { *ptr.add(index) };
-    }
-    <Field as ark_ff::PrimeField>::from_bigint(ark_ff::BigInt(limbs))
+    let limbs = unsafe { std::slice::from_raw_parts(ptr, cells) };
+    F::from_canonical_limbs(limbs)
         .expect("a width the modulus carries injectively has an element for every value")
 }
 
 /// Read an array element as a Field and bump out_db accordingly.
 #[inline(always)]
-unsafe fn lookup_elem_bump_db(
+unsafe fn lookup_elem_bump_db<F: mavros_artifacts::MavrosField>(
     ptr: *mut u64,
     elem_kind: usize,
     cells: usize,
-    coeff: Field,
+    coeff: F,
     vm: &mut VM,
 ) {
+    let out_db = unsafe { vm.data.as_ad.out_db.slot::<F>() };
     match elem_kind {
         ELEM_WORD => unsafe {
-            let v = Field::from(*(ptr as *const u64));
-            *vm.data.as_ad.out_db += coeff * v;
+            let v = F::from(*(ptr as *const u64));
+            *out_db += coeff * v;
         },
         ELEM_FIELD => unsafe {
-            let v = *(ptr as *const Field);
-            *vm.data.as_ad.out_db += coeff * v;
+            let v = *(ptr as *const F);
+            *out_db += coeff * v;
         },
         ELEM_U128 => unsafe {
-            let v = Field::from((*(ptr as *const Int128)).to_u128());
-            *vm.data.as_ad.out_db += coeff * v;
+            let v = F::from((*(ptr as *const Int128)).to_u128());
+            *out_db += coeff * v;
         },
         ELEM_CELLS => unsafe {
-            let v = read_cells_as_field(ptr, cells);
-            *vm.data.as_ad.out_db += coeff * v;
+            let v = read_cells_as_field::<F>(ptr, cells);
+            *out_db += coeff * v;
         },
         ELEM_WITNESS => {
             let elem = BoxedValue(unsafe { *(ptr as *const *mut u64) });
@@ -324,14 +318,18 @@ unsafe fn lookup_elem_bump_db(
     }
 }
 
-/// Read a pure (non-WitnessOf) array element as a Field value.
+/// Read a pure (non-WitnessOf) array element as an element of `F`.
 #[inline(always)]
-unsafe fn read_pure_elem_as_field(ptr: *mut u64, elem_kind: usize, cells: usize) -> Field {
+unsafe fn read_pure_elem_as_field<F: mavros_artifacts::MavrosField>(
+    ptr: *mut u64,
+    elem_kind: usize,
+    cells: usize,
+) -> F {
     match elem_kind {
-        ELEM_WORD => Field::from(unsafe { *(ptr as *const u64) }),
-        ELEM_FIELD => unsafe { *(ptr as *const Field) },
-        ELEM_U128 => Field::from(unsafe { (*(ptr as *const Int128)).to_u128() }),
-        ELEM_CELLS => unsafe { read_cells_as_field(ptr, cells) },
+        ELEM_WORD => F::from(unsafe { *(ptr as *const u64) }),
+        ELEM_FIELD => unsafe { *(ptr as *const F) },
+        ELEM_U128 => F::from(unsafe { (*(ptr as *const Int128)).to_u128() }),
+        ELEM_CELLS => unsafe { read_cells_as_field::<F>(ptr, cells) },
         _ => unreachable!(),
     }
 }
@@ -367,30 +365,26 @@ fn cell_mask(bits: u64) -> u64 {
 
 /// The amount a `bits`-wide shift actually applies, given a requested amount of `b`.
 ///
-/// Reduced modulo `bits`. It matches the LLVM backend, which reduces by the LLVM type's own width
-/// (`llssa_to_llvm.rs::reduce_shift_count`) because LLVM treats a shift at or past the width as
-/// poison. It also keeps the count in range for Rust's shift operators, which panic on an
-/// over-shift in a debug build and mask to the _host_ width (`b & 63`) in release, a divergence
-/// that is wrong for any `bits < 64`.
+/// Reduced modulo `bits`, matching the LLVM backend (`llssa_to_llvm.rs::reduce_shift_count`), which
+/// reduces because LLVM makes a shift at or past the width poison. It also keeps the count in range
+/// for Rust's shift operators, which panic on an over-shift in debug builds and mask to the _host_
+/// width (`b & 63`) in release, which is wrong for any `bits < 64`.
 ///
-/// It is a **modulo, not a mask**. At a power-of-two width the two coincide, so at every width Noir
-/// can name this answers exactly what `b & (bits - 1)` does. At a width that is not a power of two
-/// they differ, and the mask is the wrong one of the pair: it stays below `bits`, which is all a
-/// backstop needs, but it corrupts amounts that were already _in range_ — at `bits == 7` a mask
-/// turns an amount of `1` into `0`, while `hlssa_to_r1cs` applies that same `1` literally. The
-/// modulo is what makes the three evaluators agree at every width.
+/// It is a **modulo, not a mask**. The two agree at a power-of-two width, so at every width Noir
+/// can name this equals `b & (bits - 1)`. At other widths a mask would corrupt amounts already in
+/// range: at `bits == 7` it turns `1` into `0`, while `hlssa_to_r1cs` shifts by `1`. The modulo
+/// makes all three evaluators agree at every width.
 ///
-/// The power-of-two arm is a fast path, not a second semantics: `bits` arrives as an opcode
-/// immediate, so the branch is decided by the instruction rather than by data.
+/// The power-of-two arm is only a fast path: `bits` is an opcode immediate, so the instruction, not
+/// the data, decides the branch.
 ///
-/// A well-formed program never reaches the reduction. Both routes to a shift reject an
-/// out-of-range amount before the opcode runs: `pure_guards`' shift-amount check for a pure
-/// amount, and `witness_bitwise::emit_shift_amount_check` for a witness one. This is the backstop
-/// for when they do not.
+/// A well-formed program never needs the reduction: an out-of-range amount is rejected before the
+/// opcode runs, by `pure_guards`' shift-amount check for a pure amount and by
+/// `witness_bitwise::emit_shift_amount_check` for a witness one. This is the backstop.
 ///
-/// `bits == 0` answers `0` rather than dividing by zero. A zero-width cell holds nothing —
-/// `cell_mask(0)` is `0` — so every shift of one answers `0` whatever the amount, and this stops
-/// the amount reaching the host shift and panicking.
+/// `bits == 0` answers `0` rather than dividing by zero. A zero-width cell holds nothing
+/// (`cell_mask(0)` is `0`), so any shift of one is `0`, and the amount never reaches the host shift
+/// to panic there.
 #[inline(always)]
 fn shift_amount(b: u64, bits: u64) -> u32 {
     if bits == 0 {
@@ -403,16 +397,11 @@ fn shift_amount(b: u64, bits: u64) -> u32 {
     }
 }
 
-/// The amount a double-lane shift actually applies, given a requested amount of `b`.
+/// The amount a double-lane shift applies: `b` modulo the operand width, as in the other lanes and
+/// `reduce_shift_count` on the LLVM side.
 ///
-/// The reduction is modulo the operand width, as it is in the other two lanes and as
-/// `reduce_shift_count` is on the LLVM side.
-///
-/// At a power-of-two width the mask reaches only the low limb, and reading `b.lo` alone is then
-/// exact rather than a discarded check: LLVM masks the whole amount with `bit_width - 1`, and the
-/// low bits of a two-limb pattern are the low bits of its low limb. At any other width the whole
-/// pattern is needed — the high limb of a 96-bit amount carries bits 64 to 95, and dropping them
-/// would answer a different modulus.
+/// At a power-of-two width the modulo is a mask within the low limb, so `b.lo` alone is exact. At
+/// any other width the high limb counts: a 96-bit amount carries bits 64 to 95.
 #[inline(always)]
 fn shift_amount_128(b: Int128, bits: u64) -> u32 {
     if bits == 0 {
@@ -424,10 +413,8 @@ fn shift_amount_128(b: Int128, bits: u64) -> u32 {
     (b.to_u128() % u128::from(bits)) as u32
 }
 
-/// `a + b`, wrapping at the operand width, the body of `add_int128`.
-///
-/// Wrapping for the reason [`cell_add`] gives: the opcode is total because the rejection Noir owes
-/// an overflowing addition is emitted ahead of it.
+/// `a + b`, wrapping at the operand width, the body of `add_int128`. Total, as [`cell_add`] is: the
+/// overflow rejection is emitted ahead of it.
 #[inline(always)]
 fn double_add(a: Int128, b: Int128, bits: u64) -> Int128 {
     a.wrapping_add(b).truncate(bits)
@@ -451,11 +438,8 @@ fn double_shl(a: Int128, b: Int128, bits: u64) -> Int128 {
     a.wrapping_shl(shift_amount_128(b, bits)).truncate(bits)
 }
 
-/// `a >> b`, zero-filling, with the amount reduced against the operand width.
-///
-/// Takes `bits` only to reduce the amount: a zero-filling shift of an operand already held to the
-/// width cannot leave it, so there is nothing to re-mask. [`double_complement`] below needs its
-/// width for the other reason.
+/// `a >> b`, zero-filling, with the amount reduced against the operand width. `bits` only reduces
+/// the amount: a zero-filling shift needs no re-mask.
 #[inline(always)]
 fn double_ushr(a: Int128, b: Int128, bits: u64) -> Int128 {
     a.wrapping_shr(shift_amount_128(b, bits))
@@ -691,10 +675,8 @@ impl Int128 {
 
     /// Order the pattern as an unsigned 128-bit integer.
     ///
-    /// This and the methods below are deliberately inherent methods rather than `Ord`/`Div`/`Rem`:
-    /// they are the operations whose answer depends on how the bits are read, so each caller has to
-    /// name the reading. An operator would let `a < b` mean "unsigned" by default, which is
-    /// mistake-prone.
+    /// This and the methods below are inherent, not `Ord`/`Div`/`Rem`, so each caller names the
+    /// reading; an operator would let `a < b` silently mean "unsigned".
     #[inline(always)]
     pub fn unsigned_lt(self, rhs: Self) -> bool {
         self.to_u128() < rhs.to_u128()
@@ -922,10 +904,87 @@ impl AllocationInstrumenter {
     }
 }
 
+/// A cursor into a tape of field elements, held as the tape's `u64` storage cells so that the VM's
+/// state doesn't name a field.
+///
+/// Every typed access uses the type the cells were allocated as, at its alignment: a run's tapes
+/// are allocated as `Vec<F>`, and the program runs only `F`'s opcodes, because codegen emits one
+/// field's opcodes per program (debug builds check this in every per-field handler, against
+/// [`FieldVmOps`]). Bounds rest on the compiler's layout, which sizes each tape for
+/// every write the program makes. A `u64` written into a slot through [`Tape::cell0`] lands in the
+/// slot's first storage cell, which `MavrosField`'s safety contract makes sound to hold and later
+/// read as `F`.
+#[derive(Copy, Clone)]
+pub struct Tape(*mut u64);
+
+impl Tape {
+    /// A tape that is never accessed.
+    pub const NONE: Tape = Tape(ptr::null_mut());
+
+    /// The tape starting at `ptr`. A `*const` tape (such as the AD coefficients) is passed cast to
+    /// `*mut`, and writing through it is undefined behavior.
+    #[inline(always)]
+    pub fn of<F: mavros_artifacts::MavrosField>(ptr: *mut F) -> Tape {
+        Tape(ptr as *mut u64)
+    }
+
+    /// The element under the cursor.
+    #[inline(always)]
+    pub fn slot<F: mavros_artifacts::MavrosField>(self) -> *mut F {
+        self.0 as *mut F
+    }
+
+    /// The element `index` elements past the cursor.
+    ///
+    /// # Safety
+    ///
+    /// The element must lie within the tape's allocation.
+    #[inline(always)]
+    pub unsafe fn at<F: mavros_artifacts::MavrosField>(self, index: usize) -> *mut F {
+        unsafe { self.0.add(index * F::STORAGE_CELLS) as *mut F }
+    }
+
+    /// Moves the cursor `count` elements on.
+    ///
+    /// # Safety
+    ///
+    /// The cursor must stay within, or one past the end of, the tape's allocation.
+    #[inline(always)]
+    pub unsafe fn advance<F: mavros_artifacts::MavrosField>(&mut self, count: usize) {
+        self.0 = unsafe { self.0.add(count * F::STORAGE_CELLS) };
+    }
+
+    /// The first storage cell of the element under the cursor, where the VM keeps a `u64` (a
+    /// table index, a flag, a multiplicity count) in a field slot.
+    #[inline(always)]
+    pub fn cell0(self) -> *mut u64 {
+        self.0
+    }
+}
+
+/// The run's field, as the VM's constructor installs it, for opcodes that every field shares but
+/// that reach field arithmetic.
+#[derive(Copy, Clone)]
+pub struct FieldVmOps {
+    field: TypeId,
+
+    /// [`BoxedValue::dec_rc`] for a value's last reference, which back-propagates the derivatives
+    /// of dying AD nodes in the field.
+    pub free_last_ref: fn(BoxedValue, &mut VM),
+}
+
+impl FieldVmOps {
+    pub fn of<F: mavros_artifacts::MavrosField>() -> FieldVmOps {
+        FieldVmOps {
+            field: TypeId::of::<F>(),
+            free_last_ref: BoxedValue::free_last_ref::<F>,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TableInfo {
-    pub multiplicities_wit: *mut Field,
-    pub num_indices: usize,
+    pub multiplicities_wit: Tape,
     pub kind: TableKind,
     pub length: usize,
     pub elem_inverses_witness_section_offset: usize,
@@ -934,25 +993,25 @@ pub struct TableInfo {
 
 #[derive(Copy, Clone)]
 pub struct FwdArrays {
-    pub out_a: *mut Field,
-    pub out_b: *mut Field,
-    pub out_c: *mut Field,
-    pub out_a_base: *mut Field,
-    pub algebraic_witness: *mut Field,
-    pub multiplicities_witness: *mut Field,
-    pub lookups_a: *mut Field,
-    pub lookups_b: *mut Field,
-    pub lookups_c: *mut Field,
+    pub out_a: Tape,
+    pub out_b: Tape,
+    pub out_c: Tape,
+    pub out_a_base: Tape,
+    pub algebraic_witness: Tape,
+    pub multiplicities_witness: Tape,
+    pub lookups_a: Tape,
+    pub lookups_b: Tape,
+    pub lookups_c: Tape,
     pub elem_inverses_constraint_section_offset: usize,
     pub elem_inverses_witness_section_offset: usize,
 }
 
 #[derive(Copy, Clone)]
 pub struct AdArrays {
-    pub out_da: *mut Field,
-    pub out_db: *mut Field,
-    pub out_dc: *mut Field,
-    pub ad_coeffs: *const Field,
+    pub out_da: Tape,
+    pub out_db: Tape,
+    pub out_dc: Tape,
+    pub ad_coeffs: Tape,
     pub current_wit_off: usize,
     pub logup_wit_challenge_off: usize,
     pub current_wit_multiplicities_off: usize,
@@ -966,6 +1025,7 @@ pub struct AdArrays {
 pub union Arrays {
     pub as_forward: FwdArrays,
     pub as_ad: AdArrays,
+    pub(crate) as_verifier: crate::verifier::VerifierArrays,
 }
 
 /// Number of slots in the fixed-size table caches ([`VM::rgchk_tables`]/[`VM::spread_tables`]).
@@ -997,15 +1057,19 @@ pub struct VM {
     pub data: Arrays,
     pub allocation_instrumenter: AllocationInstrumenter,
     pub tables: Vec<TableInfo>,
+
     /// Lazily-allocated rangecheck tables, indexed by table size in bits (a `2^bits`-row table).
     pub rgchk_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
     pub spread_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
+
     /// Indexed by `log2` of the shifted width, so only slots 0..=7 are ever used.
     pub pow2_tables: [Option<usize>; NUM_TABLE_SIZE_SLOTS],
     pub globals: *mut u64,
-    pub struct_layouts: Vec<StructDescriptor>,
+    pub field_ops: FieldVmOps,
+
     /// Interned constant pool (flat words), read by the `mov_const_pool` opcode.
     pub constants: Vec<u64>,
+
     /// Set when the program executes a trap (e.g. a failed assertion). The
     /// interpreter checks this after dispatch returns to distinguish a clean
     /// halt from a trapped one.
@@ -1016,6 +1080,7 @@ pub struct VM {
     debug_info: DebugInfo,
     pub(crate) stack_trace: Vec<StackFrame>,
     instruction_profile: Option<InstructionProfile>,
+
     /// Per-opcode `(invocation_count, accumulated_cycles)`, indexed by opcode
     /// discriminant. Written by generated handlers when `vm-profile` is enabled.
     #[cfg(feature = "vm-profile")]
@@ -1023,33 +1088,33 @@ pub struct VM {
 }
 
 impl VM {
-    pub fn new_witgen(
-        out_a: *mut Field,
-        out_b: *mut Field,
-        out_c: *mut Field,
-        algebraic_witness: *mut Field,
-        multiplicities_witness: *mut Field,
-        lookups_a: *mut Field,
-        lookups_b: *mut Field,
-        lookups_c: *mut Field,
+    /// A VM for a witgen run over the field `F` the tapes hold.
+    pub fn new_witgen<F: mavros_artifacts::MavrosField>(
+        out_a: *mut F,
+        out_b: *mut F,
+        out_c: *mut F,
+        algebraic_witness: *mut F,
+        multiplicities_witness: *mut F,
+        lookups_a: *mut F,
+        lookups_b: *mut F,
+        lookups_c: *mut F,
         elem_inverses_constraint_section_offset: usize,
         elem_inverses_witness_section_offset: usize,
         globals: *mut u64,
-        struct_layouts: Vec<StructDescriptor>,
         constants: Vec<u64>,
     ) -> Self {
         Self {
             data: Arrays {
                 as_forward: FwdArrays {
-                    out_a,
-                    out_b,
-                    out_c,
-                    out_a_base: out_a,
-                    algebraic_witness,
-                    multiplicities_witness,
-                    lookups_b,
-                    lookups_a,
-                    lookups_c,
+                    out_a: Tape::of(out_a),
+                    out_b: Tape::of(out_b),
+                    out_c: Tape::of(out_c),
+                    out_a_base: Tape::of(out_a),
+                    algebraic_witness: Tape::of(algebraic_witness),
+                    multiplicities_witness: Tape::of(multiplicities_witness),
+                    lookups_b: Tape::of(lookups_b),
+                    lookups_a: Tape::of(lookups_a),
+                    lookups_c: Tape::of(lookups_c),
                     elem_inverses_constraint_section_offset,
                     elem_inverses_witness_section_offset,
                 },
@@ -1060,7 +1125,7 @@ impl VM {
             spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
             pow2_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
-            struct_layouts,
+            field_ops: FieldVmOps::of::<F>(),
             constants,
             trapped: false,
             trap_message: None,
@@ -1074,27 +1139,27 @@ impl VM {
         }
     }
 
-    pub fn new_ad(
-        out_da: *mut Field,
-        out_db: *mut Field,
-        out_dc: *mut Field,
-        ad_coeffs: *const Field,
+    /// A VM for an AD run over the field `F` the tapes hold.
+    pub fn new_ad<F: mavros_artifacts::MavrosField>(
+        out_da: *mut F,
+        out_db: *mut F,
+        out_dc: *mut F,
+        ad_coeffs: *const F,
 
         witness_layout: WitnessLayout,
         constraints_layout: ConstraintsLayout,
         globals: *mut u64,
-        struct_layouts: Vec<StructDescriptor>,
         constants: Vec<u64>,
     ) -> Self {
-        Self {
-            data: Arrays {
+        Self::new_constraint::<F>(
+            Arrays {
                 as_ad: AdArrays {
-                    out_da,
-                    out_db,
-                    out_dc,
-                    ad_coeffs,
+                    out_da: Tape::of(out_da),
+                    out_db: Tape::of(out_db),
+                    out_dc: Tape::of(out_dc),
+                    ad_coeffs: Tape::of(ad_coeffs as *mut F),
                     current_wit_off: 0,
-                    // FIELD-ASSUMPTION: L4-logup-challenges (~9 sites)
+                    // FIELD-ASSUMPTION: L4-logup-challenges (10 sites)
                     // The AD pass reads the single challenge at `logup_wit_challenge_off`
                     // (alpha) and `+1` (beta). For K challenges these become
                     // `off + 2k`/`off + 2k + 1`, looped over the K inverse-witness copies.
@@ -1107,13 +1172,25 @@ impl VM {
                     current_cnst_lookups_off: constraints_layout.lookups_data_start(),
                 },
             },
+            globals,
+            constants,
+        )
+    }
+
+    pub(crate) fn new_constraint<F: mavros_artifacts::MavrosField>(
+        data: Arrays,
+        globals: *mut u64,
+        constants: Vec<u64>,
+    ) -> Self {
+        Self {
+            data,
             allocation_instrumenter: AllocationInstrumenter::new(),
             tables: vec![],
             rgchk_tables: [None; NUM_TABLE_SIZE_SLOTS],
             spread_tables: [None; NUM_TABLE_SIZE_SLOTS],
             pow2_tables: [None; NUM_TABLE_SIZE_SLOTS],
             globals,
-            struct_layouts,
+            field_ops: FieldVmOps::of::<F>(),
             constants,
             trapped: false,
             trap_message: None,
@@ -1136,6 +1213,16 @@ impl VM {
         self.program_base = program_base;
         self.program_len = program_len;
         self.debug_info = debug_info;
+    }
+
+    /// Checks, in debug builds, that a handler for `F`'s opcodes runs on a VM built for `F`.
+    #[inline(always)]
+    pub fn check_field<F: mavros_artifacts::MavrosField>(&self) {
+        debug_assert!(
+            self.field_ops.field == TypeId::of::<F>(),
+            "an opcode over {} ran on a VM built for another field",
+            std::any::type_name::<F>()
+        );
     }
 
     fn program_offset(&self, pc: *const u64) -> Option<usize> {
@@ -1269,13 +1356,12 @@ fn program_offset(program_base: *const u64, program_len: usize, pc: *const u64) 
 
 /// The value column of a powers-of-two table: `2^n` as a field element, for `n` in `0..len`.
 ///
-/// Shared by both VM fills — `run_phase2`'s and `dpow2_lookup_field`'s — so they cannot diverge.
-/// Two more fills build the same column independently and must agree at every row or the backends
-/// disagree about the table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same
-/// accumulator through the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates
-/// instead.
-pub(crate) fn pow2_rows(len: usize) -> impl Iterator<Item = Field> {
-    let mut acc = Field::from(1u64);
+/// Shared by the VM's witness generation, AD, and verifier table fills. Two more fills build the
+/// same column independently and must agree at every row or the backends disagree about the
+/// table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same accumulator through
+/// the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates instead.
+pub(crate) fn pow2_rows<F: mavros_artifacts::MavrosField>(len: usize) -> impl Iterator<Item = F> {
+    let mut acc = F::ONE;
     (0..len).map(move |_| {
         let row = acc;
         acc += acc;
@@ -1283,19 +1369,33 @@ pub(crate) fn pow2_rows(len: usize) -> impl Iterator<Item = Field> {
     })
 }
 
+/// Whether the little-endian integer `limbs` is below `2^max_bits`.
+fn limbs_fit_bits(limbs: &[u64], max_bits: usize) -> bool {
+    limbs.iter().enumerate().all(|(index, &limb)| {
+        let low = index * 64;
+        if max_bits >= low + 64 {
+            true
+        } else if max_bits <= low {
+            limb == 0
+        } else {
+            limb >> (max_bits - low) == 0
+        }
+    })
+}
+
 /// The row `key` addresses in a table of `length` entries, or `None` when it
 /// addresses no row at all.
 ///
-/// A lookup argument proves membership by bumping the multiplicity of the row it
-/// landed on, so a key outside `0..length` is not a wider index — it is a
-/// witness that cannot satisfy the lookup, and the caller must trap. Rejecting
-/// on the high limbs matters as much as the bound: the bump is addressed by the
-/// low limb alone, so a key just under the modulus would otherwise truncate to
-/// an arbitrary `u64` and land outside the multiplicities buffer entirely.
+/// A lookup argument proves membership by bumping the multiplicity of the row
+/// it landed on, so a key outside `0..length` is not a wider index must have
+/// the caller trap. Rejecting on the high limbs matters as much as the bound as
+/// the bump is addressed by the low limb alone, so a key just under the modulus
+/// would otherwise truncate to an arbitrary `u64` and land outside the
+/// multiplicities buffer entirely.
 #[inline(always)]
-fn table_row_index(key: Field, length: usize) -> Option<u64> {
-    let limbs = ark_ff::PrimeField::into_bigint(key).0;
-    let (low, high) = limbs.split_first().expect("field bigint has no limbs");
+fn table_row_index<F: mavros_artifacts::MavrosField>(key: F, length: usize) -> Option<u64> {
+    let limbs = key.to_canonical_limbs();
+    let (low, high) = limbs.as_ref().split_first().expect("a field has limbs");
     (high.iter().all(|limb| *limb == 0) && *low < length as u64).then_some(*low)
 }
 
@@ -1306,10 +1406,10 @@ fn table_row_index(key: Field, length: usize) -> Option<u64> {
 /// bumps no multiplicity and so is always emittable — a guarded-off lookup must
 /// not be able to fail.
 #[must_use]
-unsafe fn forward_kv_lookup_emit(
+unsafe fn forward_kv_lookup_emit<F: mavros_artifacts::MavrosField>(
     table_idx: usize,
-    key: Field,
-    result: Field,
+    key: F,
+    result: F,
     flag_u64: u64,
     vm: &mut VM,
 ) -> bool {
@@ -1324,37 +1424,41 @@ unsafe fn forward_kv_lookup_emit(
         None
     };
 
+    let tapes = unsafe { &mut vm.data.as_forward };
+
     // Entry 1 (x-constraint): table_id, result_value, 0
     unsafe {
-        *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-        *vm.data.as_forward.lookups_b = result;
-        *(vm.data.as_forward.lookups_c as *mut u64) = 0;
-        vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-        vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-        vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+        *tapes.lookups_a.cell0() = table_idx as u64;
+        *tapes.lookups_b.slot::<F>() = result;
+        *tapes.lookups_c.cell0() = 0;
+        tapes.lookups_a.advance::<F>(1);
+        tapes.lookups_b.advance::<F>(1);
+        tapes.lookups_c.advance::<F>(1);
     }
 
     // Entry 2 (y-constraint): table_id, key, flag
     unsafe {
-        *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
+        *tapes.lookups_a.cell0() = table_idx as u64;
         if let Some(key_u64) = key_row {
-            let ptr = table_info.multiplicities_wit.offset(key_u64 as isize);
-            *(ptr as *mut u64) += flag_u64;
-            *(vm.data.as_forward.lookups_b as *mut u64) = key_u64;
+            *table_info
+                .multiplicities_wit
+                .at::<F>(key_u64 as usize)
+                .cast::<u64>() += flag_u64;
+            *tapes.lookups_b.cell0() = key_u64;
         } else {
-            *(vm.data.as_forward.lookups_b as *mut Field) = key;
+            *tapes.lookups_b.slot::<F>() = key;
         }
-        *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
-        vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-        vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
-        vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+        *tapes.lookups_c.cell0() = flag_u64;
+        tapes.lookups_a.advance::<F>(1);
+        tapes.lookups_b.advance::<F>(1);
+        tapes.lookups_c.advance::<F>(1);
     }
 
     true
 }
 
 /// Emit AD bumps for a key-value lookup (x-constraint + y-constraint + sum).
-unsafe fn ad_kv_lookup_emit(
+unsafe fn ad_kv_lookup_emit<F: mavros_artifacts::MavrosField>(
     table_idx: usize,
     key: BoxedValue,
     result: BoxedValue,
@@ -1378,7 +1482,7 @@ unsafe fn ad_kv_lookup_emit(
             .data
             .as_ad
             .ad_coeffs
-            .add(vm.data.as_ad.current_cnst_lookups_off);
+            .at::<F>(vm.data.as_ad.current_cnst_lookups_off);
         vm.data.as_ad.current_cnst_lookups_off += 1;
         r
     };
@@ -1392,7 +1496,7 @@ unsafe fn ad_kv_lookup_emit(
             .data
             .as_ad
             .ad_coeffs
-            .add(vm.data.as_ad.current_cnst_lookups_off);
+            .at::<F>(vm.data.as_ad.current_cnst_lookups_off);
         vm.data.as_ad.current_cnst_lookups_off += 1;
         r
     };
@@ -1401,64 +1505,62 @@ unsafe fn ad_kv_lookup_emit(
         vm.data.as_ad.current_wit_lookups_off += 1;
         r
     };
-    let inv_sum_coeff = unsafe { *vm.data.as_ad.ad_coeffs.add(sum_off) };
+    let inv_sum_coeff = unsafe { *vm.data.as_ad.ad_coeffs.at::<F>(sum_off) };
 
     // x-constraint: beta * result - x_lookup = 0
     unsafe {
         *vm.data
             .as_ad
             .out_da
-            .add(vm.data.as_ad.logup_wit_challenge_off + 1) += x_coeff;
+            .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) += x_coeff;
     }
     result.bump_db(x_coeff, vm);
     unsafe {
-        *vm.data.as_ad.out_dc.add(x_wit_off) -= x_coeff;
+        *vm.data.as_ad.out_dc.at::<F>(x_wit_off) -= x_coeff;
     }
 
     // y-constraint: y * (alpha - x_lookup - key) = flag
     unsafe {
-        *vm.data.as_ad.out_da.add(y_wit_off) += y_coeff;
+        *vm.data.as_ad.out_da.at::<F>(y_wit_off) += y_coeff;
         *vm.data
             .as_ad
             .out_db
-            .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
-        *vm.data.as_ad.out_db.add(x_wit_off) -= y_coeff;
+            .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
+        *vm.data.as_ad.out_db.at::<F>(x_wit_off) -= y_coeff;
     }
     key.bump_db(-y_coeff, vm);
     flag.bump_dc(y_coeff, vm);
 
     // Sum constraint
     unsafe {
-        *vm.data.as_ad.out_dc.add(y_wit_off) += inv_sum_coeff;
+        *vm.data.as_ad.out_dc.at::<F>(y_wit_off) += inv_sum_coeff;
     }
 }
 
 /// The VM's opcode set.
 ///
-/// An integer frame cell holds a value **masked to its declared width**: an `i8 -1` and a `u8 255`
-/// are the same cell, `0x00000000000000FF`. Nothing about that pattern says how to read it, which
-/// is the same position HLSSA's `TypeExpr::Int(bits)` and LLSSA's `Type::Int` take. So:
+/// An integer frame cell holds a value **masked to its declared width**, with no reading: an
+/// `i8 -1` and a `u8 255` are the same cell, `0xFF`. So:
 ///
-/// - **Reading from Opcode Name:** Where signed and unsigned disagree on the answer, there are two
-///   opcodes and each names its reading: `udiv_int`/`sdiv_int`, `urem_int`/`srem_int`,
-///   `ult_int`/`slt_int`, and `ushr_int`/`ashr_int`. Where they agree there is a single opcode and
-///   no prefix. The pairs HLSSA keeps distinct for `Add`/`Sub`/`Mul`/`Shl` differ only in _when
-///   they trap_, and the VM does not trap: overflow rejection is guard IR emitted before codegen.
-///   See `BinaryArithOpKind`'s doc.
-/// - **Suffix is the Lane**: `_int` is one 64-bit cell (widths 1..=64), `_int128` is two (widths
-///   65..=128), `_intn` is `ceil(bits/64)` (every wider width), and `_field` is four.
-/// - **`bits` is the Width:** It is never a signedness marker. There are two reasons an opcode
-///   takes one:
-///   - _Semantic_, where the answer depends on it: to re-mask an output that can exceed the width
-///     (`add_int`, `sub_int`, `mul_int`, `shl_int`, `not_int`), to reduce a shift amount, or to
-///     locate the sign bit at `bits - 1` (`sdiv_int`, `srem_int`, `slt_int`, `ashr_int`).
-///     Operations correct on any two already-masked operands (`and_int`, `or_int`, `xor_int`,
-///     `eq_int`, `ult_int`, `udiv_int`, `urem_int`, and their `_int128` counterparts) take no
-///     width.
-///   - _Structural_, where the operand's extent is not otherwise known. A cell-lane operand is one
-///     cell and an `_int128` operand is two, so neither lane needs this; a wide operand is as many
-///     cells as its width says, which is why `and_intn` carries a width it never reads.
-#[interpreter]
+/// - **The opcode name gives the reading.** Where signed and unsigned answers differ there are two
+///   opcodes (`udiv_int`/`sdiv_int`, `urem_int`/`srem_int`, `ult_int`/`slt_int`,
+///   `ushr_int`/`ashr_int`); elsewhere one. HLSSA's signed and unsigned `Add`/`Sub`/`Mul`/`Shl`
+///   differ only in when they trap, and trapping is guard IR emitted before codegen.
+/// - **The suffix is the lane.** `_int` is one 64-bit cell (widths 1..=64), `_int128` two
+///   (65..=128), `_intn` `ceil(bits/64)` (wider), and `_field` the field's storage cells. A field
+///   opcode has one copy per field, named with the field as a prefix (e.g. `bn254_add_field`).
+/// - **`bits` is the width**, never a signedness marker, taken for one of two reasons:
+///   - _Semantic_: to re-mask an output that can exceed the width (`add_int`, `sub_int`, `mul_int`,
+///     `shl_int`, `not_int`), to reduce a shift amount, or to find the sign bit (`sdiv_int`,
+///     `srem_int`, `slt_int`, `ashr_int`). Operations correct on masked operands (`and_int`,
+///     `or_int`, `xor_int`, `eq_int`, `ult_int`, `udiv_int`, `urem_int` and their `_int128`
+///     forms) take none.
+///   - _Structural_: a wide operand spans as many cells as its width says, which is why `and_intn`
+///     carries a width it never reads.
+///
+///   The spread opcodes are the exception: their `bits` is the number of bits read, which can be
+///   fewer than the container holds, and the operand's width is a separate immediate or the cell.
+#[interpreter(fields(bn254 = Field, goldilocks = mavros_artifacts::Goldilocks))]
 mod def {
     #[raw_opcode]
     fn jmp(pc: *const u64, frame: Frame, vm: &mut VM, target: JumpTarget) -> (*const u64, Frame) {
@@ -1543,39 +1645,40 @@ mod def {
     }
 
     #[raw_opcode]
-    fn r1c(
+    #[field_opcode]
+    fn r1c<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] a: Field,
-        #[frame] b: Field,
-        #[frame] c: Field,
+        #[frame] a: F,
+        #[frame] b: F,
+        #[frame] c: F,
     ) -> (*const u64, Frame) {
+        let tapes = unsafe { &mut vm.data.as_forward };
         unsafe {
-            *vm.data.as_forward.out_a = a;
-            *vm.data.as_forward.out_b = b;
-            *vm.data.as_forward.out_c = c;
+            *tapes.out_a.slot::<F>() = a;
+            *tapes.out_b.slot::<F>() = b;
+            *tapes.out_c.slot::<F>() = c;
+            tapes.out_a.advance::<F>(1);
+            tapes.out_b.advance::<F>(1);
+            tapes.out_c.advance::<F>(1);
         }
-
-        unsafe {
-            vm.data.as_forward.out_a = vm.data.as_forward.out_a.offset(1);
-            vm.data.as_forward.out_b = vm.data.as_forward.out_b.offset(1);
-            vm.data.as_forward.out_c = vm.data.as_forward.out_c.offset(1);
-        };
         let pc = unsafe { pc.offset(4) };
         (pc, frame)
     }
 
     #[raw_opcode]
-    fn write_witness(
+    #[field_opcode]
+    fn write_witness<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] val: Field,
+        #[frame] val: F,
     ) -> (*const u64, Frame) {
+        let tapes = unsafe { &mut vm.data.as_forward };
         unsafe {
-            *vm.data.as_forward.algebraic_witness = val;
-            vm.data.as_forward.algebraic_witness = vm.data.as_forward.algebraic_witness.offset(1);
+            *tapes.algebraic_witness.slot::<F>() = val;
+            tapes.algebraic_witness.advance::<F>(1);
         };
         let pc = unsafe { pc.offset(2) };
         (pc, frame)
@@ -1740,9 +1843,8 @@ mod def {
 
     /// Left shift, wrapping at the operand width.
     ///
-    /// A left shift is one map on the bit pattern, so there is no signed form: what the signed
-    /// HLSSA `SShl` additionally rejects is a _negative amount_, and that rejection is guard IR
-    /// (`pure_guards::emit_invalid_shift_cond`), not something this opcode can see.
+    /// Both readings shift the pattern alike, so there is no signed form; `SShl`'s extra rejection
+    /// of a negative amount is guard IR (`shift_guard::emit_invalid_shift_cond`).
     #[opcode]
     fn shl_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
@@ -1764,13 +1866,9 @@ mod def {
 
     /// Arithmetic right shift: the lowering for a signed `>>`.
     ///
-    /// A signed value is held masked to `bits` inside a `u64`, so the sign has to be recovered
-    /// before shifting — sign-extend to `i64`, shift there, then re-mask. That is the same
-    /// `signed_cell` preamble `sdiv_int`/`srem_int`/`slt_int` use.
-    ///
-    /// The shift count is reduced modulo `bits` to match what the LLVM backend does for this op
-    /// (`llssa_to_llvm::reduce_shift_count`), so an over-shift cannot make the two backends disagree
-    /// — and cannot panic on the `i64` shift.
+    /// The masked cell is sign-extended to `i64` (`signed_cell`), shifted and re-masked. The count
+    /// is reduced modulo `bits`, as `llssa_to_llvm::reduce_shift_count` does, so an over-shift
+    /// neither splits the backends nor panics.
     #[opcode]
     fn ashr_int(#[out] res: *mut u64, #[frame] a: u64, #[frame] b: u64, bits: u64) {
         unsafe {
@@ -1801,15 +1899,9 @@ mod def {
 
     /// Bitwise complement, re-masked to the operand width.
     ///
-    /// Takes `bits` because `!a` sets every bit of the host `u64`, including the ones above the
-    /// declared width — which would break the masked-cell invariant for every later reader.
-    /// `lattice::eval_not` folds this as `!x & bit_mask(bits)` and LLVM's `not` is on an
-    /// exact-width `iN`, so the mask is also what keeps the three implementations in agreement.
-    ///
-    /// Reached by every complement outside the witness domain. `LowerWitnessBitwiseOps::lower_not`
-    /// takes the _witnessed_ ones and rewrites those into `(2^bits - 1) - value`, exactly as the
-    /// `And`/`Or`/`Xor` arm beside it does, so a pure `Not` arrives here and costs one instruction
-    /// rather than a field subtraction.
+    /// `!a` sets the host bits above the width, which would break the masked-cell invariant; the
+    /// mask also matches `lattice::eval_not` and LLVM's exact-width `not`. Only pure complements
+    /// reach this: `LowerWitnessBitwiseOps::lower_not` rewrites witnessed ones.
     #[opcode]
     fn not_int(#[out] res: *mut u64, #[frame] a: u64, bits: u64) {
         unsafe {
@@ -1817,14 +1909,9 @@ mod def {
         }
     }
 
-    /// Bitwise complement of a double-lane cell pair, re-masked to the operand width.
-    ///
-    /// Takes `bits` for the reason `not_int` does: the lane holds `65..=128`, so `!a` sets every
-    /// bit of the pair including the ones above the declared width, and leaving them set would
-    /// break the masked-cell invariant for every later reader. At the lane's widest width the mask
-    /// is a no-op, which is why an unmasked complement passes a sweep that stops at 128;
-    /// `the_complement_opcode_agrees_with_the_model` covers both lanes at four narrower widths for
-    /// that reason.
+    /// Bitwise complement of a double-lane cell pair, re-masked to the operand width, as `not_int`
+    /// is. At 128 bits the mask is a no-op, so `the_complement_opcode_agrees_with_the_model` sweeps
+    /// narrower widths too.
     #[opcode]
     fn not_int128(#[out] res: *mut Int128, #[frame] a: Int128, bits: u64) {
         unsafe { *res = double_complement(a, bits) };
@@ -1852,7 +1939,12 @@ mod def {
     }
 
     #[opcode]
-    fn eq_field(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
+    #[field_opcode]
+    fn eq_field<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut u64,
+        #[frame] a: F,
+        #[frame] b: F,
+    ) {
         unsafe {
             *res = (a == b) as u64;
         }
@@ -1864,9 +1956,14 @@ mod def {
     /// there is no second ordering for this one to be distinguished from. `hlssa_to_llssa` says
     /// the same thing by making an `SLt` over a `Field` an ICE rather than a lowering.
     #[opcode]
-    fn lt_field(#[out] res: *mut u64, #[frame] a: Field, #[frame] b: Field) {
+    #[field_opcode]
+    fn lt_field<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut u64,
+        #[frame] a: F,
+        #[frame] b: F,
+    ) {
         unsafe {
-            *res = (ark_ff::PrimeField::into_bigint(a) < ark_ff::PrimeField::into_bigint(b)) as u64;
+            *res = (a.canonical_cmp(b) == std::cmp::Ordering::Less) as u64;
         }
     }
 
@@ -1907,13 +2004,13 @@ mod def {
     // THE WIDE LANE
     // --------------------------------------------------------------------------------------
     //
-    // One opcode per operation over a value of `ceil(bits/64)` frame cells, each body a call into
-    // [`int_limbs`]. Every operand is one encoded word, a frame position, as in the narrow lanes,
-    // while the width immediate is what says how many cells that position covers.
+    // One opcode per operation on a value of `ceil(bits/64)` frame cells, each body a call into
+    // [`int_limbs`]. As in the narrow lanes, every operand is one frame position; the width
+    // immediate says how many cells it covers.
     //
-    // That is also why nearly every opcode here carries a width where its narrower cousins do
-    // not: this is the lane where the _structural_ reason in the opcode set's own doc applies, and
-    // it is why `and_intn` takes a width its body never reads.
+    // That is why nearly every opcode here takes a width that the narrow lanes' opcodes do not
+    // (the _structural_ reason in the opcode set's doc), and why `and_intn` takes a width its body
+    // never reads.
 
     #[opcode]
     fn add_intn(
@@ -1947,9 +2044,7 @@ mod def {
 
     /// Divide, reading both operands as unsigned. Total, as the narrow lane's `cell_udiv` is.
     ///
-    /// The scratch buffer is the remainder, which one long division produces alongside the
-    /// quotient whether or not the opcode wants it. Allocating per division is a cost the narrow
-    /// lanes do not pay; it is small beside the division itself, which is quadratic in limbs.
+    /// The scratch buffer takes the remainder the long division produces anyway.
     #[opcode]
     fn udiv_intn(
         bits: u64,
@@ -2032,10 +2127,8 @@ mod def {
         int_limbs::not(res, a, bits);
     }
 
-    /// Left shift, wrapping at the operand width, with the amount reduced modulo that width.
-    ///
-    /// The amount is a value of the same width as the operand, as it is in the narrow lanes: the
-    /// elaborator unifies the two operands of an infix operator.
+    /// Left shift, wrapping at the operand width, with the amount reduced modulo that width. The
+    /// amount has the operand's width, as in the narrow lanes.
     #[opcode]
     fn shl_intn(
         bits: u64,
@@ -2120,97 +2213,135 @@ mod def {
     }
 
     #[opcode]
-    fn add_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
+    #[field_opcode]
+    fn add_field<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut F,
+        #[frame] a: F,
+        #[frame] b: F,
+    ) {
         unsafe {
             *res = a + b;
         }
     }
 
     #[opcode]
-    fn sub_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
+    #[field_opcode]
+    fn sub_field<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut F,
+        #[frame] a: F,
+        #[frame] b: F,
+    ) {
         unsafe {
             *res = a - b;
         }
     }
 
+    /// `a / b`, and `0` for `b = 0`.
     #[opcode]
+    #[field_opcode]
     #[inline(never)]
-    // FIELD-ASSUMPTION: L4-inverse
-    fn div_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
+    fn div_field<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut F,
+        #[frame] a: F,
+        #[frame] b: F,
+    ) {
         unsafe {
-            *res = if b == Field::ZERO { Field::ZERO } else { a / b };
+            *res = b.inverse().map_or(F::ZERO, |inverse| a * inverse);
         }
     }
 
     #[opcode]
-    fn mul_field(#[out] res: *mut Field, #[frame] a: Field, #[frame] b: Field) {
+    #[field_opcode]
+    fn mul_field<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut F,
+        #[frame] a: F,
+        #[frame] b: F,
+    ) {
         unsafe {
             *res = a * b;
         }
     }
 
     #[opcode]
-    fn cast_field_to_int(#[out] res: *mut u64, #[frame] a: Field) {
+    #[field_opcode]
+    fn cast_field_to_int<F: mavros_artifacts::MavrosField>(#[out] res: *mut u64, #[frame] a: F) {
         unsafe {
-            *res = ark_ff::PrimeField::into_bigint(a).0[0];
+            *res = a.to_canonical_limbs().as_ref()[0];
         }
     }
 
+    /// The low 128 bits of `a`'s integer; a one-limb field's high half is 0.
     #[opcode]
-    fn cast_field_to_int128(#[out] res: *mut Int128, #[frame] a: Field) {
-        let limbs = ark_ff::PrimeField::into_bigint(a).0;
+    #[field_opcode]
+    fn cast_field_to_int128<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut Int128,
+        #[frame] a: F,
+    ) {
+        let limbs = a.to_canonical_limbs();
+        let limbs = limbs.as_ref();
         unsafe {
             *res = Int128 {
                 lo: limbs[0],
-                hi: limbs[1],
+                hi: limbs.get(1).copied().unwrap_or(0),
             }
         };
     }
 
     #[opcode]
-    fn cast_int_to_field(#[out] res: *mut Field, #[frame] a: u64) {
+    #[field_opcode]
+    fn cast_int_to_field<F: mavros_artifacts::MavrosField>(#[out] res: *mut F, #[frame] a: u64) {
         unsafe {
-            *res = From::from(a);
+            *res = F::from(a);
         }
     }
 
     #[opcode]
-    fn cast_int128_to_field(#[out] res: *mut Field, #[frame] a: Int128) {
+    #[field_opcode]
+    fn cast_int128_to_field<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut F,
+        #[frame] a: Int128,
+    ) {
         unsafe {
-            *res = Field::from(a.to_u128());
+            *res = F::from(a.to_u128());
         }
     }
 
     /// The element's canonical limbs, read as a `bits`-wide integer.
     ///
-    /// Total at every width: an element has no bits above the ones [`FELT_LIMBS`] carries, so a
-    /// wider target is zero-filled and a narrower one keeps its low `bits`, which is the
-    /// truncating reading `docs/int-semantics.md` gives the `Field -> uN` cast. It masks its own
-    /// top cell, unlike its cell-lane sibling, because it has the width to mask to.
+    /// Total at every width: a wider target is zero-filled and a narrower one keeps the low `bits`,
+    /// the truncating reading `docs/int-semantics.md` gives the `Field -> uN` cast. Unlike the
+    /// cell-lane version it masks the result's top cell, because it is given the width.
     #[opcode]
-    fn cast_field_to_intn(bits: u64, #[frame_slice(bits)] res: &mut [u64], #[frame] a: Field) {
-        let limbs = ark_ff::PrimeField::into_bigint(a).0;
-        int_limbs::zero_extend(res, &limbs, (FELT_LIMBS * 64) as u64, bits);
+    #[field_opcode]
+    fn cast_field_to_intn<F: mavros_artifacts::MavrosField>(
+        bits: u64,
+        #[frame_slice(bits)] res: &mut [u64],
+        #[frame] a: F,
+    ) {
+        let limbs = a.to_canonical_limbs();
+        int_limbs::zero_extend(res, limbs.as_ref(), (F::CANONICAL_LIMBS * 64) as u64, bits);
     }
 
     /// A `bits`-wide integer moved into a field element.
     ///
-    /// The limbs are the element's, so this needs every one of them to be a limb the element has:
-    /// past that there is nowhere for the value to go. The compiler never asks for one, because
-    /// width validation refuses a cast to `Field` above the widest width the modulus carries
-    /// injectively, which is narrower still — so both the assertion and the `expect` below are
-    /// backstops on that rule rather than reachable refusals.
+    /// The value must fit the element's limbs. The type analysis rejects a cast to `Field` past the
+    /// widest injective width in the program as written, and `WideWitnessInts` expands each such
+    /// cast it emits limb by limb, so the assertion and the `expect` below are backstops.
     #[opcode]
-    fn cast_intn_to_field(bits: u64, #[out] res: *mut Field, #[frame_slice(bits)] a: &[u64]) {
+    #[field_opcode]
+    fn cast_intn_to_field<F: mavros_artifacts::MavrosField>(
+        bits: u64,
+        #[out] res: *mut F,
+        #[frame_slice(bits)] a: &[u64],
+    ) {
         assert!(
-            a.len() <= FELT_LIMBS,
-            "an integer crosses the field boundary through {FELT_LIMBS} limbs, \
-             so an int{bits} has no element"
+            a.len() <= F::CANONICAL_LIMBS,
+            "an integer crosses the field boundary through {} limbs, so an int{bits} has no \
+             element",
+            F::CANONICAL_LIMBS
         );
-        let mut limbs = [0u64; FELT_LIMBS];
-        limbs[..a.len()].copy_from_slice(a);
         unsafe {
-            *res = <Field as ark_ff::PrimeField>::from_bigint(ark_ff::BigInt(limbs))
+            *res = F::from_canonical_limbs(a)
                 .expect("a width the modulus carries injectively has an element for every value");
         }
     }
@@ -2286,31 +2417,6 @@ mod def {
         }
         unsafe {
             *res = array;
-        }
-    }
-
-    #[opcode]
-    #[inline(never)]
-    fn tuple_alloc(
-        #[out] res: *mut BoxedValue,
-        meta: BoxedLayout,
-        fields: &[FramePosition],
-        frame: Frame,
-        vm: &mut VM,
-    ) {
-        let tuple = BoxedValue::alloc(meta, vm);
-        let view = meta.as_struct(&vm.struct_layouts);
-        let mut field_offset = 0;
-        for (i, field) in fields.iter().enumerate() {
-            let size = view.field_size(i);
-            let tgt = unsafe { tuple.data().add(field_offset) };
-            unsafe {
-                frame.write_to(tgt, field.0 as isize, size);
-            }
-            field_offset += size;
-        }
-        unsafe {
-            *res = tuple;
         }
     }
 
@@ -2406,20 +2512,6 @@ mod def {
             frame.write_to(res, (source.0 + (index as usize) * stride) as isize, stride);
         }
         (unsafe { pc.offset(6) }, frame)
-    }
-
-    #[opcode]
-    fn tuple_proj(
-        #[out] res: *mut u64,
-        #[frame] tuple: BoxedValue,
-        field_offset: usize,
-        field_size: usize,
-        vm: &mut VM,
-    ) {
-        let src = unsafe { tuple.data().add(field_offset) };
-        unsafe {
-            ptr::copy_nonoverlapping(src, res, field_size);
-        }
     }
 
     /// Raw so an invalid index can halt dispatch before copying or mutating the array.
@@ -2521,34 +2613,44 @@ mod def {
     }
 
     #[opcode]
-    fn witness_ref_alloc(#[out] res: *mut BoxedValue, data: Field, vm: &mut VM) {
-        let val = BoxedValue::alloc(BoxedLayout::ad_const(), vm);
-        let d = val.as_ad_const();
-        unsafe {
-            (*d).value = data;
-            *res = val;
-        };
-    }
-
-    #[opcode]
-    fn bump_da(#[frame] v: BoxedValue, #[frame] coeff: Field, vm: &mut VM) {
+    #[field_opcode]
+    fn bump_da<F: mavros_artifacts::MavrosField>(
+        #[frame] v: BoxedValue,
+        #[frame] coeff: F,
+        vm: &mut VM,
+    ) {
         v.bump_da(coeff, vm);
     }
 
     #[opcode]
-    fn bump_db(#[frame] v: BoxedValue, #[frame] coeff: Field, vm: &mut VM) {
+    #[field_opcode]
+    fn bump_db<F: mavros_artifacts::MavrosField>(
+        #[frame] v: BoxedValue,
+        #[frame] coeff: F,
+        vm: &mut VM,
+    ) {
         v.bump_db(coeff, vm);
     }
 
     #[opcode]
-    fn bump_dc(#[frame] v: BoxedValue, #[frame] coeff: Field, vm: &mut VM) {
+    #[field_opcode]
+    fn bump_dc<F: mavros_artifacts::MavrosField>(
+        #[frame] v: BoxedValue,
+        #[frame] coeff: F,
+        vm: &mut VM,
+    ) {
         v.bump_dc(coeff, vm);
     }
 
     #[opcode]
-    fn next_d_coeff(#[out] v: *mut Field, vm: &mut VM) {
+    #[field_opcode]
+    fn next_d_coeff<F: mavros_artifacts::MavrosField>(#[out] v: *mut F, vm: &mut VM) {
         unsafe {
-            *v = *vm.data.as_ad.ad_coeffs.add(vm.data.as_ad.current_cnst_off);
+            *v = *vm
+                .data
+                .as_ad
+                .ad_coeffs
+                .at::<F>(vm.data.as_ad.current_cnst_off);
             vm.data.as_ad.current_cnst_off += 1;
         };
     }
@@ -2566,9 +2668,14 @@ mod def {
     }
 
     #[opcode]
-    fn pure_to_witness_ref(#[out] res: *mut BoxedValue, #[frame] v: Field, vm: &mut VM) {
-        let val = BoxedValue::alloc(BoxedLayout::ad_const(), vm);
-        let d = val.as_ad_const();
+    #[field_opcode]
+    fn pure_to_witness_ref<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut BoxedValue,
+        #[frame] v: F,
+        vm: &mut VM,
+    ) {
+        let val = BoxedValue::alloc(BoxedLayout::ad_const::<F>(), vm);
+        let d = val.as_ad_const::<F>();
         unsafe {
             (*d).value = v;
             *res = val;
@@ -2576,47 +2683,41 @@ mod def {
     }
 
     #[opcode]
-    fn unbox_field(#[out] res: *mut Field, #[frame] v: BoxedValue) {
-        let d = v.as_ad_const();
-        unsafe {
-            *res = (*d).value;
-        }
-    }
-
-    #[opcode]
-    fn mul_const(
+    #[field_opcode]
+    fn mul_const<F: mavros_artifacts::MavrosField>(
         #[out] res: *mut BoxedValue,
-        #[frame] coeff: Field,
+        #[frame] coeff: F,
         #[frame] v: BoxedValue,
         vm: &mut VM,
     ) {
-        let val = BoxedValue::alloc(BoxedLayout::mul_const(), vm);
-        let d = val.as_mul_const();
+        let val = BoxedValue::alloc(BoxedLayout::mul_const::<F>(), vm);
+        let d = val.as_mul_const::<F>();
         unsafe {
             (*d).coeff = coeff;
             (*d).value = v;
-            (*d).da = Field::ZERO;
-            (*d).db = Field::ZERO;
-            (*d).dc = Field::ZERO;
+            (*d).da = F::ZERO;
+            (*d).db = F::ZERO;
+            (*d).dc = F::ZERO;
             *res = val;
         }
     }
 
     #[opcode]
-    fn add_boxed(
+    #[field_opcode]
+    fn add_boxed<F: mavros_artifacts::MavrosField>(
         #[out] res: *mut BoxedValue,
         #[frame] a: BoxedValue,
         #[frame] b: BoxedValue,
         vm: &mut VM,
     ) {
-        let val = BoxedValue::alloc(BoxedLayout::ad_sum(), vm);
-        let d = val.as_ad_sum();
+        let val = BoxedValue::alloc(BoxedLayout::ad_sum::<F>(), vm);
+        let d = val.as_ad_sum::<F>();
         unsafe {
             (*d).a = a;
             (*d).b = b;
-            (*d).da = Field::ZERO;
-            (*d).db = Field::ZERO;
-            (*d).dc = Field::ZERO;
+            (*d).da = F::ZERO;
+            (*d).db = F::ZERO;
+            (*d).dc = F::ZERO;
             *res = val;
         }
     }
@@ -2669,12 +2770,13 @@ mod def {
     }
 
     #[raw_opcode]
-    fn assert_eq_field(
+    #[field_opcode]
+    fn assert_eq_field<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] a: Field,
-        #[frame] b: Field,
+        #[frame] a: F,
+        #[frame] b: F,
     ) -> (*const u64, Frame) {
         if a != b {
             return trap(pc, frame, vm);
@@ -2682,52 +2784,42 @@ mod def {
         (unsafe { pc.offset(3) }, frame)
     }
 
+    /// Traps unless `val`'s integer is below `2^max_bits`.
     #[raw_opcode]
-    fn assert_r1c(
+    #[field_opcode]
+    #[inline(never)]
+    fn rangecheck<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] a: Field,
-        #[frame] b: Field,
-        #[frame] c: Field,
-    ) -> (*const u64, Frame) {
-        if a * b != c {
-            return trap(pc, frame, vm);
-        }
-        (unsafe { pc.offset(4) }, frame)
-    }
-
-    #[raw_opcode]
-    #[inline(never)] // TODO better impl
-    fn rangecheck(
-        pc: *const u64,
-        frame: Frame,
-        vm: &mut VM,
-        #[frame] val: Field,
+        #[frame] val: F,
         max_bits: usize,
     ) -> (*const u64, Frame) {
-        // Convert field to bigint and check if it fits in max_bits
-        // FIELD-ASSUMPTION: L4-decompose
-        let bigint = ark_ff::PrimeField::into_bigint(val);
-        let check = bigint.to_bits_le().iter().skip(max_bits).all(|b| !b);
-        if !check {
+        if !limbs_fit_bits(val.to_canonical_limbs().as_ref(), max_bits) {
             return trap(pc, frame, vm);
         }
         (unsafe { pc.offset(3) }, frame)
     }
 
     #[opcode]
-    fn to_bytes_be(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
-        let val = ark_ff::PrimeField::into_bigint(val);
+    #[field_opcode]
+    fn to_bytes_be<F: mavros_artifacts::MavrosField>(
+        #[frame] val: F,
+        count: u64,
+        #[out] res: *mut BoxedValue,
+        vm: &mut VM,
+    ) {
+        let limbs = val.to_canonical_limbs();
+        let limbs = limbs.as_ref();
         let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
         unsafe {
             for i in 0..count {
-                // Each limb in val.0 is a u64 (8 bytes), little-endian limb order
+                // Each limb is a u64 (8 bytes), little-endian limb order
                 let byte_idx = i as usize; // byte index from LSB
                 let limb_idx = byte_idx / 8;
                 let byte_in_limb = byte_idx % 8;
-                let byte_val = if limb_idx < val.0.len() {
-                    (val.0[limb_idx] >> (byte_in_limb * 8)) & 0xFF
+                let byte_val = if limb_idx < limbs.len() {
+                    (limbs[limb_idx] >> (byte_in_limb * 8)) & 0xFF
                 } else {
                     0
                 };
@@ -2738,17 +2830,24 @@ mod def {
     }
 
     #[opcode]
-    fn to_bytes_le(#[frame] val: Field, count: u64, #[out] res: *mut BoxedValue, vm: &mut VM) {
-        let val = ark_ff::PrimeField::into_bigint(val);
+    #[field_opcode]
+    fn to_bytes_le<F: mavros_artifacts::MavrosField>(
+        #[frame] val: F,
+        count: u64,
+        #[out] res: *mut BoxedValue,
+        vm: &mut VM,
+    ) {
+        let limbs = val.to_canonical_limbs();
+        let limbs = limbs.as_ref();
         let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
         unsafe {
             for i in 0..count {
-                // Each limb in val.0 is a u64 (8 bytes), little-endian limb order.
+                // Each limb is a u64 (8 bytes), little-endian limb order.
                 let byte_idx = i as usize;
                 let limb_idx = byte_idx / 8;
                 let byte_in_limb = byte_idx % 8;
-                let byte_val = if limb_idx < val.0.len() {
-                    (val.0[limb_idx] >> (byte_in_limb * 8)) & 0xFF
+                let byte_val = if limb_idx < limbs.len() {
+                    (limbs[limb_idx] >> (byte_in_limb * 8)) & 0xFF
                 } else {
                     0
                 };
@@ -2759,16 +2858,23 @@ mod def {
     }
 
     #[opcode]
-    fn to_bits_le(#[out] res: *mut BoxedValue, #[frame] val: Field, count: u64, vm: &mut VM) {
-        let val = ark_ff::PrimeField::into_bigint(val);
+    #[field_opcode]
+    fn to_bits_le<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut BoxedValue,
+        #[frame] val: F,
+        count: u64,
+        vm: &mut VM,
+    ) {
+        let limbs = val.to_canonical_limbs();
+        let limbs = limbs.as_ref();
         let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
         unsafe {
             for i in 0..count {
                 let bit_idx = i as usize;
                 let limb_idx = bit_idx / 64;
                 let bit_in_limb = bit_idx % 64;
-                let bit = if limb_idx < val.0.len() {
-                    (val.0[limb_idx] >> bit_in_limb) & 1
+                let bit = if limb_idx < limbs.len() {
+                    (limbs[limb_idx] >> bit_in_limb) & 1
                 } else {
                     0
                 };
@@ -2779,16 +2885,23 @@ mod def {
     }
 
     #[opcode]
-    fn to_bits_be(#[out] res: *mut BoxedValue, #[frame] val: Field, count: u64, vm: &mut VM) {
-        let val = ark_ff::PrimeField::into_bigint(val);
+    #[field_opcode]
+    fn to_bits_be<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut BoxedValue,
+        #[frame] val: F,
+        count: u64,
+        vm: &mut VM,
+    ) {
+        let limbs = val.to_canonical_limbs();
+        let limbs = limbs.as_ref();
         let r = BoxedValue::alloc(BoxedLayout::array(count as usize, false), vm);
         unsafe {
             for i in 0..count {
                 let bit_idx = i as usize;
                 let limb_idx = bit_idx / 64;
                 let bit_in_limb = bit_idx % 64;
-                let bit = if limb_idx < val.0.len() {
-                    (val.0[limb_idx] >> bit_in_limb) & 1
+                let bit = if limb_idx < limbs.len() {
+                    (limbs[limb_idx] >> bit_in_limb) & 1
                 } else {
                     0
                 };
@@ -2864,26 +2977,24 @@ mod def {
     }
 
     #[raw_opcode]
-    fn spread_lookup_field(
+    #[field_opcode]
+    fn spread_lookup_field<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] val: Field,
-        #[frame] result: Field,
-        #[frame] flag: Field,
+        #[frame] val: F,
+        #[frame] result: F,
+        #[frame] flag: F,
         bits: usize,
     ) -> (*const u64, Frame) {
-        // Initialize spread table for this bit-width on first call.
+        // Initialize the spread table for this width on first call.
         //
-        // Spread tables use the folded single-constraint allocation (`TableKind::Spread`): both
-        // operands of each entry (key=i, value=spread(i)) are constants, so each entry is just one
-        // `y·(α-i+β·spread(i))=m` constraint/witness instead of the generic two-constraint
-        // key-value form. Phase 2 recomputes `spread(i)` itself, so there is nothing to dump here.
+        // Both parts of each entry are constants, so it uses the folded single-constraint form
+        // (`TableKind::Spread`). Phase 2 recomputes `spread(i)`, so nothing is dumped here.
         if vm.spread_tables[bits].is_none() {
             let length = 1usize << bits;
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
-                num_indices: 1,
                 kind: TableKind::Spread,
                 length,
                 elem_inverses_constraint_section_offset: unsafe {
@@ -2897,8 +3008,10 @@ mod def {
             vm.tables.push(table_info);
 
             unsafe {
-                vm.data.as_forward.multiplicities_witness =
-                    vm.data.as_forward.multiplicities_witness.add(length);
+                vm.data
+                    .as_forward
+                    .multiplicities_witness
+                    .advance::<F>(length);
                 // One constraint per entry + one sum constraint; one witness per entry.
                 vm.data.as_forward.elem_inverses_constraint_section_offset += length + 1;
                 vm.data.as_forward.elem_inverses_witness_section_offset += length;
@@ -2906,7 +3019,7 @@ mod def {
         }
 
         let table_idx = vm.spread_tables[bits].unwrap();
-        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        let flag_u64 = flag.to_canonical_limbs().as_ref()[0];
         // The table's keys are `0..2^bits`, so a wider `val` has nothing to look up.
         if !unsafe { forward_kv_lookup_emit(table_idx, val, result, flag_u64, vm) } {
             return trap(pc, frame, vm);
@@ -2916,7 +3029,8 @@ mod def {
     }
 
     #[opcode]
-    fn dspread_lookup_field(
+    #[field_opcode]
+    fn dspread_lookup_field<F: mavros_artifacts::MavrosField>(
         #[frame] val: BoxedValue,
         #[frame] result: BoxedValue,
         #[frame] flag: BoxedValue,
@@ -2930,8 +3044,7 @@ mod def {
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
             let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
             let table_info = TableInfo {
-                multiplicities_wit: ptr::null_mut(),
-                num_indices: 1,
+                multiplicities_wit: Tape::NONE,
                 kind: TableKind::Spread,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
@@ -2951,7 +3064,7 @@ mod def {
                 *vm.data
                     .as_ad
                     .ad_coeffs
-                    .offset(inverses_constraint_section_offset as isize + length as isize)
+                    .at::<F>(inverses_constraint_section_offset + length)
             };
 
             for i in 0..length {
@@ -2961,51 +3074,47 @@ mod def {
                     *vm.data
                         .as_ad
                         .ad_coeffs
-                        .offset(inverses_constraint_section_offset as isize + i as isize)
+                        .at::<F>(inverses_constraint_section_offset + i)
                 };
                 unsafe {
                     // da[y_wit] += coeff
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(inverses_witness_section_offset as isize + i as isize) += coeff;
+                        .at::<F>(inverses_witness_section_offset + i) += coeff;
 
                     // db[α] += coeff
                     *vm.data
                         .as_ad
                         .out_db
-                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
+                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += coeff;
                     // db[w0] -= coeff * i
-                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
+                    *vm.data.as_ad.out_db.slot::<F>() -= coeff * F::from(i as u64);
                     // db[β] += coeff * spread(i)
                     *vm.data
                         .as_ad
                         .out_db
-                        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) +=
-                        coeff * Field::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
+                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) +=
+                        coeff * F::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
 
                     // dc[m] += coeff
-                    *vm.data
-                        .as_ad
-                        .out_dc
-                        .offset(multiplicities_wit_offset as isize + i as isize) += coeff;
+                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += coeff;
 
                     // Sum: inv goes into A position
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(inverses_witness_section_offset as isize + i as isize) +=
-                        inv_sum_coeff;
+                        .at::<F>(inverses_witness_section_offset + i) += inv_sum_coeff;
                 }
             }
 
             unsafe {
-                *vm.data.as_ad.out_db += inv_sum_coeff;
+                *vm.data.as_ad.out_db.slot::<F>() += inv_sum_coeff;
             }
         }
 
         let table_idx = vm.spread_tables[bits].unwrap();
-        unsafe { ad_kv_lookup_emit(table_idx, val, result, flag, vm) };
+        unsafe { ad_kv_lookup_emit::<F>(table_idx, val, result, flag, vm) };
     }
 
     /// Prove `factor == 2^amount` with `amount` below the shifted operand's width, by bumping
@@ -3016,13 +3125,14 @@ mod def {
     /// encoding is far larger -- has no row and traps, which is how a witness-amount shift gets
     /// the rejection that `shift_guard` builds out of a comparison on the pure path.
     #[raw_opcode]
-    fn pow2_lookup_field(
+    #[field_opcode]
+    fn pow2_lookup_field<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] amount: Field,
-        #[frame] factor: Field,
-        #[frame] flag: Field,
+        #[frame] amount: F,
+        #[frame] factor: F,
+        #[frame] flag: F,
         size: usize,
     ) -> (*const u64, Frame) {
         // Initialize the powers-of-two table for this width on first call. Laid out exactly like
@@ -3033,7 +3143,6 @@ mod def {
             let length = 1usize << size;
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
-                num_indices: 1,
                 kind: TableKind::Pow2,
                 length,
                 elem_inverses_constraint_section_offset: unsafe {
@@ -3047,15 +3156,17 @@ mod def {
             vm.tables.push(table_info);
 
             unsafe {
-                vm.data.as_forward.multiplicities_witness =
-                    vm.data.as_forward.multiplicities_witness.add(length);
+                vm.data
+                    .as_forward
+                    .multiplicities_witness
+                    .advance::<F>(length);
                 vm.data.as_forward.elem_inverses_constraint_section_offset += length + 1;
                 vm.data.as_forward.elem_inverses_witness_section_offset += length;
             }
         }
 
         let table_idx = vm.pow2_tables[size].unwrap();
-        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        let flag_u64 = flag.to_canonical_limbs().as_ref()[0];
         // The table's keys are `0..2^size`, so an out-of-range amount has nothing to look up.
         if !unsafe { forward_kv_lookup_emit(table_idx, amount, factor, flag_u64, vm) } {
             return trap(pc, frame, vm);
@@ -3066,7 +3177,8 @@ mod def {
 
     /// The AD twin of [`Self::pow2_lookup_field`].
     #[opcode]
-    fn dpow2_lookup_field(
+    #[field_opcode]
+    fn dpow2_lookup_field<F: mavros_artifacts::MavrosField>(
         #[frame] amount: BoxedValue,
         #[frame] factor: BoxedValue,
         #[frame] flag: BoxedValue,
@@ -3080,8 +3192,7 @@ mod def {
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
             let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
             let table_info = TableInfo {
-                multiplicities_wit: ptr::null_mut(),
-                num_indices: 1,
+                multiplicities_wit: Tape::NONE,
                 kind: TableKind::Pow2,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
@@ -3101,60 +3212,56 @@ mod def {
                 *vm.data
                     .as_ad
                     .ad_coeffs
-                    .offset(inverses_constraint_section_offset as isize + length as isize)
+                    .at::<F>(inverses_constraint_section_offset + length)
             };
 
-            for (i, pow) in pow2_rows(length).enumerate() {
+            for (i, pow) in pow2_rows::<F>(length).enumerate() {
                 // Single folded constraint: y · (α - i + β·2^i) - m = 0
                 //   A = (y), B = (α) + (w0, -i) + (β, 2^i), C = (m)
                 let coeff = unsafe {
                     *vm.data
                         .as_ad
                         .ad_coeffs
-                        .offset(inverses_constraint_section_offset as isize + i as isize)
+                        .at::<F>(inverses_constraint_section_offset + i)
                 };
                 unsafe {
                     // da[y_wit] += coeff
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(inverses_witness_section_offset as isize + i as isize) += coeff;
+                        .at::<F>(inverses_witness_section_offset + i) += coeff;
 
                     // db[α] += coeff
                     *vm.data
                         .as_ad
                         .out_db
-                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
+                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += coeff;
                     // db[w0] -= coeff * i
-                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
+                    *vm.data.as_ad.out_db.slot::<F>() -= coeff * F::from(i as u64);
                     // db[β] += coeff * 2^i
                     *vm.data
                         .as_ad
                         .out_db
-                        .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += coeff * pow;
+                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) += coeff * pow;
 
                     // dc[m] += coeff
-                    *vm.data
-                        .as_ad
-                        .out_dc
-                        .offset(multiplicities_wit_offset as isize + i as isize) += coeff;
+                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += coeff;
 
                     // Sum: inv goes into A position
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(inverses_witness_section_offset as isize + i as isize) +=
-                        inv_sum_coeff;
+                        .at::<F>(inverses_witness_section_offset + i) += inv_sum_coeff;
                 }
             }
 
             unsafe {
-                *vm.data.as_ad.out_db += inv_sum_coeff;
+                *vm.data.as_ad.out_db.slot::<F>() += inv_sum_coeff;
             }
         }
 
         let table_idx = vm.pow2_tables[size].unwrap();
-        unsafe { ad_kv_lookup_emit(table_idx, amount, factor, flag, vm) };
+        unsafe { ad_kv_lookup_emit::<F>(table_idx, amount, factor, flag, vm) };
     }
 
     /// The lookup-argument form of [`Self::rangecheck`]: instead of decomposing
@@ -3162,19 +3269,19 @@ mod def {
     /// `bits`-wide rangecheck table. A value with no row in that table fails the
     /// check, so this traps for exactly the inputs `rangecheck` traps on.
     #[raw_opcode]
-    fn rngchk_field(
+    #[field_opcode]
+    fn rngchk_field<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
-        #[frame] val: Field,
-        #[frame] flag: Field,
+        #[frame] val: F,
+        #[frame] flag: F,
         bits: usize,
     ) -> (*const u64, Frame) {
         if vm.rgchk_tables[bits].is_none() {
             let length = 1usize << bits;
             let table_info = TableInfo {
                 multiplicities_wit: unsafe { vm.data.as_forward.multiplicities_witness },
-                num_indices: 1,
                 kind: TableKind::RangeCheck,
                 length,
                 elem_inverses_constraint_section_offset: unsafe {
@@ -3187,13 +3294,15 @@ mod def {
             vm.rgchk_tables[bits] = Some(vm.tables.len());
             vm.tables.push(table_info);
             unsafe {
-                vm.data.as_forward.multiplicities_witness =
-                    vm.data.as_forward.multiplicities_witness.add(length);
+                vm.data
+                    .as_forward
+                    .multiplicities_witness
+                    .advance::<F>(length);
                 vm.data.as_forward.elem_inverses_constraint_section_offset += length + 1;
                 vm.data.as_forward.elem_inverses_witness_section_offset += length;
             }
         }
-        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        let flag_u64 = flag.to_canonical_limbs().as_ref()[0];
         let table_idx = vm.rgchk_tables[bits].unwrap();
         let table_info = &vm.tables[table_idx];
 
@@ -3208,36 +3317,37 @@ mod def {
             None
         };
 
+        let tapes = unsafe { &mut vm.data.as_forward };
         unsafe {
+            *tapes.lookups_a.cell0() = table_idx as u64;
             if let Some(val_u64) = val_row {
-                let ptr = table_info.multiplicities_wit.offset(val_u64 as isize);
-                *(ptr as *mut u64) += flag_u64;
-                *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-                *(vm.data.as_forward.lookups_b as *mut u64) = val_u64;
-                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+                *table_info
+                    .multiplicities_wit
+                    .at::<F>(val_u64 as usize)
+                    .cast::<u64>() += flag_u64;
+                *tapes.lookups_b.cell0() = val_u64;
             } else {
-                *(vm.data.as_forward.lookups_a as *mut u64) = table_idx as u64;
-                vm.data.as_forward.lookups_a = vm.data.as_forward.lookups_a.offset(1);
-                *(vm.data.as_forward.lookups_b as *mut Field) = val;
-                vm.data.as_forward.lookups_b = vm.data.as_forward.lookups_b.offset(1);
+                *tapes.lookups_b.slot::<F>() = val;
             }
-            *(vm.data.as_forward.lookups_c as *mut u64) = flag_u64;
-            vm.data.as_forward.lookups_c = vm.data.as_forward.lookups_c.offset(1);
+            *tapes.lookups_c.cell0() = flag_u64;
+            tapes.lookups_a.advance::<F>(1);
+            tapes.lookups_b.advance::<F>(1);
+            tapes.lookups_c.advance::<F>(1);
         }
 
         (unsafe { pc.offset(4) }, frame)
     }
 
     #[raw_opcode]
-    fn array_lookup_field(
+    #[field_opcode]
+    fn array_lookup_field<F: mavros_artifacts::MavrosField>(
         pc: *const u64,
         frame: Frame,
         vm: &mut VM,
         #[frame] array: BoxedValue,
-        #[frame] index: Field,
-        #[frame] result: Field,
-        #[frame] flag: Field,
+        #[frame] index: F,
+        #[frame] result: F,
+        #[frame] flag: F,
         stride: usize,
         elem_kind: usize,
     ) -> (*const u64, Frame) {
@@ -3257,15 +3367,14 @@ mod def {
             // Dump array element values into the x-slots (even offsets) of the table section
             let length = unsafe {
                 for_each_array_leaf(array, stride, |i, elem_ptr| {
-                    let elem_field = read_pure_elem_as_field(elem_ptr, elem_kind, stride);
+                    let elem_field = read_pure_elem_as_field::<F>(elem_ptr, elem_kind, stride);
                     // Write it into the x-slot (even offset: 2*i) of the constraint section
-                    *vm.data.as_forward.out_a_base.add(cnst_off + 2 * i) = elem_field;
+                    *vm.data.as_forward.out_a_base.at::<F>(cnst_off + 2 * i) = elem_field;
                 })
             };
 
             let table_info = TableInfo {
                 multiplicities_wit: mult_wit,
-                num_indices: 1,
                 kind: TableKind::Array,
                 length,
                 elem_inverses_constraint_section_offset: cnst_off,
@@ -3275,7 +3384,10 @@ mod def {
             vm.tables.push(table_info);
 
             unsafe {
-                vm.data.as_forward.multiplicities_witness = mult_wit.add(length);
+                vm.data
+                    .as_forward
+                    .multiplicities_witness
+                    .advance::<F>(length);
                 // 2 constraints per element + 1 sum constraint
                 vm.data.as_forward.elem_inverses_constraint_section_offset += 2 * length + 1;
                 // 2 witness slots per element
@@ -3290,7 +3402,7 @@ mod def {
             table_idx as usize
         };
 
-        let flag_u64 = ark_ff::PrimeField::into_bigint(flag).0[0];
+        let flag_u64 = flag.to_canonical_limbs().as_ref()[0];
         // The table's keys are the element indices, so an out-of-bounds `index`
         // has nothing to look up — the bounds check the compiler emits alongside
         // this read is what normally rules that out.
@@ -3302,7 +3414,8 @@ mod def {
     }
 
     #[opcode]
-    fn drngchk_field(
+    #[field_opcode]
+    fn drngchk_field<F: mavros_artifacts::MavrosField>(
         #[frame] val: BoxedValue,
         #[frame] flag: BoxedValue,
         bits: usize,
@@ -3315,8 +3428,7 @@ mod def {
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
             let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
             let table_info = TableInfo {
-                multiplicities_wit: ptr::null_mut(),
-                num_indices: 1,
+                multiplicities_wit: Tape::NONE,
                 kind: TableKind::RangeCheck,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
@@ -3333,22 +3445,22 @@ mod def {
                 *vm.data
                     .as_ad
                     .ad_coeffs
-                    .offset(inverses_constraint_section_offset as isize + length as isize)
+                    .at::<F>(inverses_constraint_section_offset + length)
             };
 
-            for i in 0..length as isize {
+            for i in 0..length {
                 // For each element in the table, we have constraint `elem_inv_witness * (alpha - i) - multiplicity_witness = 0`
                 let coeff = unsafe {
                     *vm.data
                         .as_ad
                         .ad_coeffs
-                        .offset(inverses_constraint_section_offset as isize + i)
+                        .at::<F>(inverses_constraint_section_offset + i)
                 };
                 unsafe {
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(inverses_witness_section_offset as isize + i) += coeff;
+                        .at::<F>(inverses_witness_section_offset + i) += coeff;
                     // if i == 0 {
                     //     println!("bump da at {} from inv by {coeff}", inverses_witness_section_offset as isize + i);
                     // }
@@ -3356,13 +3468,10 @@ mod def {
                     *vm.data
                         .as_ad
                         .out_db
-                        .add(vm.data.as_ad.logup_wit_challenge_off) += coeff;
-                    *vm.data.as_ad.out_db -= coeff * Field::from(i as u64);
+                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += coeff;
+                    *vm.data.as_ad.out_db.slot::<F>() -= coeff * F::from(i as u64);
 
-                    *vm.data
-                        .as_ad
-                        .out_dc
-                        .offset(multiplicities_wit_offset as isize + i) += coeff;
+                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += coeff;
                 }
 
                 // Also each inv goes into the A position of the total sum
@@ -3370,13 +3479,13 @@ mod def {
                     *vm.data
                         .as_ad
                         .out_da
-                        .offset(inverses_witness_section_offset as isize + i) += inv_sum_coeff;
+                        .at::<F>(inverses_witness_section_offset + i) += inv_sum_coeff;
                 }
             }
 
             // The coeff at B on the sum constraint is just `1` so we bump it.
             unsafe {
-                *vm.data.as_ad.out_db += inv_sum_coeff;
+                *vm.data.as_ad.out_db.slot::<F>() += inv_sum_coeff;
             }
         }
         let table_idx = vm.rgchk_tables[bits].unwrap();
@@ -3387,7 +3496,7 @@ mod def {
                 .data
                 .as_ad
                 .ad_coeffs
-                .add(vm.data.as_ad.current_cnst_lookups_off);
+                .at::<F>(vm.data.as_ad.current_cnst_lookups_off);
             vm.data.as_ad.current_cnst_lookups_off += 1;
             r
         };
@@ -3396,7 +3505,7 @@ mod def {
             *vm.data
                 .as_ad
                 .ad_coeffs
-                .add(table_info.elem_inverses_constraint_section_offset + length)
+                .at::<F>(table_info.elem_inverses_constraint_section_offset + length)
         };
 
         let current_inv_wit_offset = unsafe {
@@ -3407,17 +3516,17 @@ mod def {
 
         unsafe {
             // bump for the RHS of the sum
-            *vm.data.as_ad.out_dc.add(current_inv_wit_offset) += inv_sum_coeff;
+            *vm.data.as_ad.out_dc.at::<F>(current_inv_wit_offset) += inv_sum_coeff;
 
             // bumps for the inversion assert: y*(α-key) = flag
             // da[y] += inv_coeff
-            *vm.data.as_ad.out_da.add(current_inv_wit_offset) += inv_coeff;
+            *vm.data.as_ad.out_da.at::<F>(current_inv_wit_offset) += inv_coeff;
 
             // db[α] += inv_coeff
             *vm.data
                 .as_ad
                 .out_db
-                .add(vm.data.as_ad.logup_wit_challenge_off) += inv_coeff;
+                .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += inv_coeff;
             // db[key] -= inv_coeff
             val.bump_db(-inv_coeff, vm);
 
@@ -3427,7 +3536,8 @@ mod def {
     }
 
     #[opcode]
-    fn darray_lookup_field(
+    #[field_opcode]
+    fn darray_lookup_field<F: mavros_artifacts::MavrosField>(
         #[frame] array: BoxedValue,
         #[frame] index: BoxedValue,
         #[frame] result: BoxedValue,
@@ -3446,58 +3556,60 @@ mod def {
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
             let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
 
-            let length =
-                unsafe {
-                    for_each_array_leaf(array, stride, |i, elem_ptr| {
-                        // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
-                        let x_coeff =
-                            *vm.data.as_ad.ad_coeffs.offset(
-                                inverses_constraint_section_offset as isize + 2 * i as isize,
-                            );
-                        // da[beta] += x_coeff (A entry: (beta, 1))
-                        *vm.data
-                            .as_ad
-                            .out_da
-                            .offset(vm.data.as_ad.logup_wit_challenge_off as isize + 1) += x_coeff;
-                        // db[v_i] += x_coeff (B entry: element value)
-                        lookup_elem_bump_db(elem_ptr, elem_kind, stride, x_coeff, vm);
-                        // dc[x_wit] -= x_coeff (C entry: (x, -1))
-                        *vm.data
-                            .as_ad
-                            .out_dc
-                            .offset(inverses_witness_section_offset as isize + 2 * i as isize) -=
-                            x_coeff;
+            let length = unsafe {
+                for_each_array_leaf(array, stride, |i, elem_ptr| {
+                    // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
+                    let x_coeff = *vm
+                        .data
+                        .as_ad
+                        .ad_coeffs
+                        .at::<F>(inverses_constraint_section_offset + 2 * i);
+                    // da[beta] += x_coeff (A entry: (beta, 1))
+                    *vm.data
+                        .as_ad
+                        .out_da
+                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) += x_coeff;
+                    // db[v_i] += x_coeff (B entry: element value)
+                    lookup_elem_bump_db(elem_ptr, elem_kind, stride, x_coeff, vm);
+                    // dc[x_wit] -= x_coeff (C entry: (x, -1))
+                    *vm.data
+                        .as_ad
+                        .out_dc
+                        .at::<F>(inverses_witness_section_offset + 2 * i) -= x_coeff;
 
-                        // y-constraint at base + 2*i + 1: A=y_i, B=(alpha - i - x_i), C=mult_i
-                        let y_coeff = *vm.data.as_ad.ad_coeffs.offset(
-                            inverses_constraint_section_offset as isize + 2 * i as isize + 1,
-                        );
-                        // dA[y_witness] += y_coeff
-                        *vm.data.as_ad.out_da.offset(
-                            inverses_witness_section_offset as isize + 2 * i as isize + 1,
-                        ) += y_coeff;
-                        // dB[alpha] += y_coeff
-                        *vm.data
-                            .as_ad
-                            .out_db
-                            .add(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
-                        // dB -= y_coeff * i (constant part)
-                        *vm.data.as_ad.out_db -= y_coeff * Field::from(i as u64);
-                        // dB[x_witness] -= y_coeff (x_i appears negated in B)
-                        *vm.data
-                            .as_ad
-                            .out_db
-                            .add(inverses_witness_section_offset + 2 * i) -= y_coeff;
-                        // dC[mult_witness] += y_coeff
-                        *vm.data.as_ad.out_dc.add(multiplicities_wit_offset + i) += y_coeff;
-                    })
-                };
+                    // y-constraint at base + 2*i + 1: A=y_i, B=(alpha - i - x_i), C=mult_i
+                    let y_coeff = *vm
+                        .data
+                        .as_ad
+                        .ad_coeffs
+                        .at::<F>(inverses_constraint_section_offset + 2 * i + 1);
+                    // dA[y_witness] += y_coeff
+                    *vm.data
+                        .as_ad
+                        .out_da
+                        .at::<F>(inverses_witness_section_offset + 2 * i + 1) += y_coeff;
+                    // dB[alpha] += y_coeff
+                    *vm.data
+                        .as_ad
+                        .out_db
+                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
+                    // dB -= y_coeff * i (constant part)
+                    *vm.data.as_ad.out_db.slot::<F>() -= y_coeff * F::from(i as u64);
+                    // dB[x_witness] -= y_coeff (x_i appears negated in B)
+                    *vm.data
+                        .as_ad
+                        .out_db
+                        .at::<F>(inverses_witness_section_offset + 2 * i) -= y_coeff;
+                    // dC[mult_witness] += y_coeff
+                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += y_coeff;
+                })
+            };
 
             let sum_coeff = unsafe {
                 *vm.data
                     .as_ad
                     .ad_coeffs
-                    .offset(inverses_constraint_section_offset as isize + 2 * length as isize)
+                    .at::<F>(inverses_constraint_section_offset + 2 * length)
             };
 
             // Sum constraint: y_i goes into A position
@@ -3506,18 +3618,17 @@ mod def {
                     *vm.data
                         .as_ad
                         .out_da
-                        .add(inverses_witness_section_offset + 2 * i + 1) += sum_coeff;
+                        .at::<F>(inverses_witness_section_offset + 2 * i + 1) += sum_coeff;
                 }
             }
 
             // Sum constraint B=1: bump out_db by sum_coeff
             unsafe {
-                *vm.data.as_ad.out_db += sum_coeff;
+                *vm.data.as_ad.out_db.slot::<F>() += sum_coeff;
             }
 
             let table_info = TableInfo {
-                multiplicities_wit: ptr::null_mut(),
-                num_indices: 1,
+                multiplicities_wit: Tape::NONE,
                 kind: TableKind::Array,
                 length,
                 elem_inverses_witness_section_offset: inverses_witness_section_offset,
@@ -3537,7 +3648,7 @@ mod def {
             table_idx as usize
         };
 
-        unsafe { ad_kv_lookup_emit(table_idx, index, result, flag, vm) };
+        unsafe { ad_kv_lookup_emit::<F>(table_idx, index, result, flag, vm) };
     }
 
     #[opcode]
@@ -3579,6 +3690,161 @@ mod def {
             std::ptr::copy_nonoverlapping(vm.constants.as_ptr().add(pool_offset), res, size);
         }
     }
+    #[opcode]
+    #[field_opcode]
+    fn verifier_read_witness<F: mavros_artifacts::MavrosField>(#[out] res: *mut F, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *res = data.w::<F>(data.witness_cursor);
+            data.witness_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_constant<F: mavros_artifacts::MavrosField>(
+        #[out] res: *mut F,
+        #[frame] v: F,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            *res = v * vm.data.as_verifier.w::<F>(0);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_next_coeff<F: mavros_artifacts::MavrosField>(#[out] v: *mut F, vm: &mut VM) {
+        unsafe {
+            let data = &mut vm.data.as_verifier;
+            *v = *data.coeffs.at::<F>(data.constraint_cursor);
+            data.constraint_cursor += 1;
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_accumulate<F: mavros_artifacts::MavrosField>(
+        #[frame] v: F,
+        #[frame] coeff: F,
+        matrix: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            *vm.data.as_verifier.outputs[matrix].slot::<F>() += coeff * v;
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_rngchk_field<F: mavros_artifacts::MavrosField>(
+        #[frame] val: F,
+        #[frame] flag: F,
+        bits: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.rgchk_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::RangeCheck, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, (0..length).map(|_| F::ZERO));
+                vm.rgchk_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.rgchk_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, None, flag);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_spread_lookup_field<F: mavros_artifacts::MavrosField>(
+        #[frame] val: F,
+        #[frame] result: F,
+        #[frame] flag: F,
+        bits: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.spread_tables[bits].is_none() {
+                let length = 1usize << bits;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Spread, length);
+                vm.data.as_verifier.constant_table(
+                    &table,
+                    mult,
+                    (0..length).map(|i| F::from(mavros_limb_arith::spread_u32_to_u64(i as u32))),
+                );
+                vm.spread_tables[bits] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.spread_tables[bits].unwrap()];
+            vm.data.as_verifier.lookup(table, val, Some(result), flag);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_pow2_lookup_field<F: mavros_artifacts::MavrosField>(
+        #[frame] amount: F,
+        #[frame] factor: F,
+        #[frame] flag: F,
+        size: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            if vm.pow2_tables[size].is_none() {
+                let length = 1usize << size;
+                let (table, mult) = vm.data.as_verifier.table(TableKind::Pow2, length);
+                vm.data
+                    .as_verifier
+                    .constant_table(&table, mult, pow2_rows::<F>(length));
+                vm.pow2_tables[size] = Some(vm.tables.len());
+                vm.tables.push(table);
+            }
+            let table = &vm.tables[vm.pow2_tables[size].unwrap()];
+            vm.data
+                .as_verifier
+                .lookup(table, amount, Some(factor), flag);
+        }
+    }
+
+    #[opcode]
+    #[field_opcode]
+    fn verifier_array_lookup_field<F: mavros_artifacts::MavrosField>(
+        #[frame] array: BoxedValue,
+        #[frame] index: F,
+        #[frame] result: F,
+        #[frame] flag: F,
+        stride: usize,
+        elem_kind: usize,
+        vm: &mut VM,
+    ) {
+        unsafe {
+            let table_id = array.table_id();
+            if *table_id == u64::MAX {
+                let (mut table, mult) = vm.data.as_verifier.begin_table(TableKind::Array);
+                let length = for_each_array_leaf(array, stride, |i, elem| {
+                    let value = if elem_kind == ELEM_VERIFIER {
+                        *(elem as *const F)
+                    } else {
+                        read_pure_elem_as_field::<F>(elem, elem_kind, stride)
+                            * vm.data.as_verifier.w::<F>(0)
+                    };
+                    vm.data.as_verifier.array_row(&table, mult, i, value);
+                });
+                table.length = length;
+                vm.data.as_verifier.reserve_table(&table);
+                vm.data.as_verifier.array_sum::<F>(&table);
+                *table_id = vm.tables.len() as u64;
+                vm.tables.push(table);
+            }
+            vm.data
+                .as_verifier
+                .lookup(&vm.tables[*table_id as usize], index, Some(result), flag);
+        }
+    }
 }
 
 pub struct Function {
@@ -3603,16 +3869,43 @@ impl Display for Function {
 pub const ENTRY_WITGEN: usize = 0;
 /// Index of the AD entry point in a program's entry table.
 pub const ENTRY_AD: usize = 1;
+/// Index of the direct forward verifier entry point.
+pub const ENTRY_VERIFIER: usize = 2;
+/// An absent entry in a program or serialized entry table.
+pub const NO_ENTRY_POINT: usize = usize::MAX;
+
+/// Buffer layouts bound to the compiled constraint traversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstraintLayouts([u64; 8]);
+
+impl ConstraintLayouts {
+    pub fn new(witness: WitnessLayout, constraints: ConstraintsLayout) -> Self {
+        Self([
+            witness.algebraic_size as u64,
+            witness.multiplicities_size as u64,
+            witness.challenges_size as u64,
+            witness.tables_data_size as u64,
+            witness.lookups_data_size as u64,
+            constraints.algebraic_size as u64,
+            constraints.tables_data_size as u64,
+            constraints.lookups_data_size as u64,
+        ])
+    }
+}
 
 pub struct Program {
+    /// Required for AD/verifier execution; absent for programs built only for inspection or witgen.
+    pub constraint_layouts: Option<ConstraintLayouts>,
     pub functions: Vec<Function>,
     /// Indices into `functions` of the program's entry points, in entry-table order
-    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...).
+    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], [`ENTRY_VERIFIER`]). Absent entries use
+    /// [`NO_ENTRY_POINT`].
     pub entry_points: Vec<usize>,
+    /// The field the program computes over, which every field opcode in it belongs to.
+    pub field: FieldId,
     /// Flattened field count of the witgen entry blob
     pub entry_blob_field_count: usize,
     pub global_frame_size: usize,
-    pub struct_layouts: Vec<StructDescriptor>,
     /// Interned constant pool: a flat word buffer holding each distinct multi-cell constant
     /// once. Referenced by `MovConstPool { pool_offset, size }` instead of being re-spilled
     /// into every function's frame.
@@ -3641,19 +3934,14 @@ impl Display for Program {
     }
 }
 
-/// Encode a single field of a `StructDescriptor` as one `u64`:
-/// high bit = refcounted flag, low 32 bits = field size in u64 words.
-#[inline(always)]
-fn encode_struct_field(size: u32, refcounted: bool) -> u64 {
-    (refcounted as u64) << 63 | (size as u64)
-}
+/// The first word of every program binary: `MAVROSVM` as big-endian ASCII.
+pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 
-#[inline(always)]
-fn decode_struct_field(word: u64) -> (u32, bool) {
-    let refcounted = (word >> 63) != 0;
-    let size = (word & 0xFFFF_FFFF) as u32;
-    (size, refcounted)
-}
+/// The program binary's format version, its second word. Changing existing production opcode
+/// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
+/// Appending opcodes without changing existing production encodings does not require a bump.
+/// The third word names the program's field ([`FieldId::code`]).
+pub const PROGRAM_FORMAT_VERSION: u64 = 4;
 
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
@@ -3676,16 +3964,10 @@ impl Program {
     }
 
     fn to_binary_impl(&self, include_debug_info: bool) -> (Vec<u64>, Option<DebugInfo>) {
-        let mut binary = Vec::new();
-        // Layout-table header: [num_descriptors, ...descriptors...].
-        // Each descriptor: [num_fields, field_0_packed, field_1_packed, ...].
-        binary.push(self.struct_layouts.len() as u64);
-        for desc in &self.struct_layouts {
-            let fields = desc.fields();
-            binary.push(fields.len() as u64);
-            for &(size, refcounted) in fields {
-                binary.push(encode_struct_field(size, refcounted));
-            }
+        let mut binary = vec![PROGRAM_MAGIC, PROGRAM_FORMAT_VERSION, self.field.code()];
+        binary.push(u64::from(self.constraint_layouts.is_some()));
+        if let Some(layouts) = self.constraint_layouts {
+            binary.extend_from_slice(&layouts.0);
         }
 
         // Constant pool: [pool_len, ...words...].
@@ -3760,7 +4042,11 @@ impl Program {
         }
 
         for (slot, fn_idx) in self.entry_points.iter().enumerate() {
-            binary[entry_table_start + slot] = function_markers[*fn_idx] as u64;
+            binary[entry_table_start + slot] = if *fn_idx == NO_ENTRY_POINT {
+                NO_ENTRY_POINT as u64
+            } else {
+                function_markers[*fn_idx] as u64
+            };
         }
         for (jump_position, add_offset) in jumps_to_fix {
             let target = binary[jump_position];
@@ -3774,7 +4060,10 @@ impl Program {
 
 /// The decoded header of a program binary.
 pub struct ProgramHeader {
-    pub struct_layouts: Vec<StructDescriptor>,
+    /// The field the program computes over.
+    pub field: FieldId,
+    /// Layouts emitted by the compiler, checked before constraint execution.
+    pub constraint_layouts: Option<ConstraintLayouts>,
     /// Interned constant pool (flat words), read at runtime by `mov_const_pool`.
     pub constant_pool: Vec<u64>,
     pub global_frame_size: usize,
@@ -3782,16 +4071,44 @@ pub struct ProgramHeader {
     pub entry_blob_field_count: usize,
     /// Absolute word offsets of each entry point's function marker, in entry-table order
     /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
-    /// its first opcode at `offset + 2`.
+    /// its first opcode at `offset + 2`. [`NO_ENTRY_POINT`] marks an absent entry.
     pub entry_points: Vec<usize>,
     /// Word offset of the first function marker, i.e. where the opcode stream begins.
     pub code_start: usize,
 }
 
-/// Decode a program binary's header: struct layouts, global frame size and the entry-point
-/// table.
+/// Decode a program binary's field, layouts, constant pool, global frame size, entry blob
+/// field count and entry-point table.
+///
+/// # Panics
+///
+/// If the binary does not open with [`PROGRAM_MAGIC`] followed by [`PROGRAM_FORMAT_VERSION`]: a
+/// binary of any other format numbers its opcodes differently, so they would select the wrong
+/// handlers. If its field word names no supported field.
 pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
-    let (struct_layouts, off) = parse_struct_layouts(program);
+    assert!(
+        program.first() == Some(&PROGRAM_MAGIC),
+        "not a mavros VM program binary"
+    );
+    let version = program.get(1).copied();
+    assert!(
+        version == Some(PROGRAM_FORMAT_VERSION),
+        "unsupported VM program format version {version:?}; expected {PROGRAM_FORMAT_VERSION}"
+    );
+    let field = FieldId::from_code(program[2]).unwrap_or_else(|| {
+        panic!(
+            "the VM program names no supported field (word {})",
+            program[2]
+        )
+    });
+    let (constraint_layouts, off) = match program[3] {
+        0 => (None, 4),
+        1 => (
+            Some(ConstraintLayouts(program[4..12].try_into().unwrap())),
+            12,
+        ),
+        _ => panic!("invalid constraint layout tag"),
+    };
     let pool_len = program[off] as usize;
     let constant_pool = program[off + 1..off + 1 + pool_len].to_vec();
     let off = off + 1 + pool_len;
@@ -3803,33 +4120,14 @@ pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
         .collect();
     let code_start = off + 3 + num_entries;
     ProgramHeader {
-        struct_layouts,
+        field,
+        constraint_layouts,
         constant_pool,
         global_frame_size,
         entry_blob_field_count,
         entry_points,
         code_start,
     }
-}
-
-/// Read the struct-layout table from the binary header and return both the
-/// descriptors and the offset (in u64 words) at which the rest of the program
-/// (starting with `global_frame_size`) begins.
-pub fn parse_struct_layouts(program: &[u64]) -> (Vec<StructDescriptor>, usize) {
-    let num_descriptors = program[0] as usize;
-    let mut layouts = Vec::with_capacity(num_descriptors);
-    let mut off = 1usize;
-    for _ in 0..num_descriptors {
-        let n = program[off] as usize;
-        off += 1;
-        let mut fields = Vec::with_capacity(n);
-        for _ in 0..n {
-            fields.push(decode_struct_field(program[off]));
-            off += 1;
-        }
-        layouts.push(StructDescriptor::new(fields));
-    }
-    (layouts, off)
 }
 
 /// Every width the `_int128` lane holds that is worth sweeping, narrowest first.
@@ -3848,14 +4146,41 @@ fn double_lane_widths() -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_field::signed;
+    use ark_ff::AdditiveGroup as _;
 
     fn location(function: &str, line: u64) -> SourceLocation {
         SourceLocation::new(format!("src/{function}.nr"), line, 7)
     }
 
-    fn empty_witgen_vm() -> VM {
+    /// A witgen VM over `tapes`, split into its eight tapes.
+    fn witgen_vm_on<F: mavros_artifacts::MavrosField>(tapes: &mut [F]) -> VM {
+        let len = tapes.len() / 8;
+        let mut ptrs = tapes.chunks_mut(len).map(|chunk| chunk.as_mut_ptr());
         VM::new_witgen(
+            ptrs.next().unwrap(),
+            ptrs.next().unwrap(),
+            ptrs.next().unwrap(),
+            ptrs.next().unwrap(),
+            ptrs.next().unwrap(),
+            ptrs.next().unwrap(),
+            ptrs.next().unwrap(),
+            ptrs.next().unwrap(),
+            0,
+            0,
             ptr::null_mut(),
+            vec![],
+        )
+    }
+
+    /// The number of the first Goldilocks copy, `goldilocks_r1c`, which `opcode_numbers_are_pinned`
+    /// checks.
+    const FIRST_GOLDILOCKS_OPCODE: usize = 131;
+
+    /// A witgen VM over `F` without tapes.
+    fn empty_witgen_vm<F: mavros_artifacts::MavrosField>() -> VM {
+        VM::new_witgen(
+            ptr::null_mut::<F>(),
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
@@ -3866,20 +4191,17 @@ mod tests {
             0,
             0,
             ptr::null_mut(),
-            Vec::new(),
             Vec::new(),
         )
     }
 
     /// Run the wide lane through real dispatch.
     ///
-    /// The conformance sweeps in `int_limbs` call the bodies directly, so they say nothing about
-    /// whether an operand survives being written to the binary and read back: a slice takes its
-    /// length from a width immediate the same instruction carries, and a writer and a reader that
-    /// disagreed about the operand order would still compute the right answer on the wrong cells.
+    /// The `int_limbs` sweeps call the bodies directly, so they cannot catch an encoder and decoder
+    /// that disagree on operand order, which would compute right answers on the wrong cells.
     ///
-    /// The program ends in `trap` rather than `ret` because `ret` deallocates the base frame, and
-    /// the results are read out of that frame afterwards.
+    /// The program ends in `trap`, not `ret`, because `ret` frees the base frame the results are
+    /// read from.
     #[test]
     fn the_wide_lane_survives_the_round_trip_through_dispatch() {
         const BITS: u64 = 192;
@@ -3914,6 +4236,8 @@ mod tests {
         ];
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 20,
@@ -3923,7 +4247,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
 
@@ -3931,14 +4254,12 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(20, &mut vm);
 
-        // Every cell either operand covers is written below, which a pushed frame requires: it is
-        // `alloc`ated rather than zeroed.
-        //
-        // `a` is the largest value one limb holds, so every answer below crosses a limb boundary.
+        // A pushed frame is `alloc`ated, not zeroed, so every operand cell is written below. `a` is
+        // one full limb, so every answer crosses a limb boundary.
         for (i, word) in [u64::MAX, 0, 0].into_iter().enumerate() {
             frame.write_u64((a + i) as isize, word);
         }
@@ -3969,12 +4290,11 @@ mod tests {
         frame.pop(&mut vm);
     }
 
-    /// The spread opcodes through real dispatch, in a frame whose every cell starts as garbage.
+    /// The spread opcodes through real dispatch, in a frame of garbage cells.
     ///
-    /// The conformance sweeps call the opcode bodies' helpers directly, and they start from zeroed
-    /// buffers where a frame cell starts as whatever was there. Each operand carries set bits above
-    /// its read, each result is compared limb for limb, so a bit the opcode failed to clear shows,
-    /// and the shapes are the ones where the streams and the operand differ in cell count.
+    /// The sweeps call the opcodes' bodies directly. This holds the encoder and the decoder to the
+    /// same immediates and frame slices, at the shapes where the streams and the operand differ in
+    /// cell count.
     #[test]
     fn the_spread_opcodes_survive_the_round_trip_through_dispatch() {
         use mavros_int_semantics::IntBits;
@@ -3987,8 +4307,8 @@ mod tests {
         let narrow_spread_in = IntBits::from_u128(32, 0xFFFF_FFFF);
         let narrow_unspread_in = IntBits::from_u128(64, u128::from(u64::MAX));
 
-        // Positions, each operand's and result's own cells, and one cell after the wide spread's
-        // result that nothing writes.
+        // Positions: separate cells for every operand and result, plus one unwritten cell after
+        // the wide spread's result.
         let (a1, r1, after_r1) = (0usize, 1, 3);
         let (a2, odd2, even2) = (4usize, 7, 8);
         let (a3, odd3, even3) = (10usize, 12, 13);
@@ -4037,6 +4357,8 @@ mod tests {
         ];
         let locations = vec![location("main", 1); code.len()];
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: FRAME,
@@ -4046,7 +4368,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
 
@@ -4054,7 +4375,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(FRAME as u64, &mut vm);
         for cell in 0..FRAME {
@@ -4117,6 +4438,8 @@ mod tests {
     #[should_panic(expected = "overlap")]
     fn a_scalar_result_inside_a_wide_operand_is_caught() {
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4135,25 +4458,22 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
         let (mut binary, debug_info) = program.to_binary_and_debug_info();
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
         let entry = header.entry_points[0];
         unsafe { crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm) };
     }
 
-    /// The two wide shapes the round trip above does not reach.
-    ///
-    /// `not_intn` is the only `_intn` opcode with one operand, and `assert_eq_intn` is the only one
-    /// whose instruction length is written by hand rather than derived by the macro — its
-    /// `pc.offset(4)`. A wrong length there does not compute a wrong answer, it resumes dispatch on
-    /// an operand word, so the check is that the instruction _after_ the assertion runs at all.
+    /// The two wide shapes the round trip above does not reach: `not_intn`, the only one-operand
+    /// `_intn` opcode, and `assert_eq_intn`, whose instruction length (`pc.offset(4)`) is written
+    /// by hand. A wrong length resumes dispatch on an operand word, so the check is that the next
+    /// instruction runs.
     #[test]
     fn the_remaining_wide_shapes_survive_dispatch() {
         const BITS: u64 = 192;
@@ -4173,6 +4493,8 @@ mod tests {
             OpCode::Trap {},
         ];
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4182,7 +4504,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
 
@@ -4190,7 +4511,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
         // A pushed frame is `alloc`ated and not zeroed, so every cell an operand covers is written.
@@ -4217,6 +4538,244 @@ mod tests {
         frame.pop(&mut vm);
     }
 
+    /// Every two-operand `_intn` opcode, and the round trip through a field element, through real
+    /// dispatch against the model.
+    ///
+    /// The sweeps in `int_limbs` call the bodies directly, and the round trips above each name a
+    /// handful of opcodes; this is the one that reaches every opcode's handler from its encoding.
+    /// The frame starts as garbage so a cell an opcode fails to write shows. A division by zero is
+    /// skipped where the model leaves its pattern unspecified.
+    #[test]
+    fn every_wide_opcode_agrees_with_the_model_through_dispatch() {
+        use mavros_int_semantics::{CmpOp, IntBits, IntOp, residue};
+
+        const GARBAGE: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+        type Arith = fn(u64, FramePosition, FramePosition, FramePosition) -> OpCode;
+        type Compare = fn(u64, FramePosition, FramePosition, FramePosition) -> OpCode;
+        let arith: [(IntOp, Arith); 13] = [
+            (IntOp::UAdd, |bits, res, a, b| OpCode::AddIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::USub, |bits, res, a, b| OpCode::SubIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::UMul, |bits, res, a, b| OpCode::MulIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::UDiv, |bits, res, a, b| OpCode::UdivIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::URem, |bits, res, a, b| OpCode::UremIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::SDiv, |bits, res, a, b| OpCode::SdivIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::SRem, |bits, res, a, b| OpCode::SremIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::And, |bits, res, a, b| OpCode::AndIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::Or, |bits, res, a, b| OpCode::OrIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::Xor, |bits, res, a, b| OpCode::XorIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::Shl, |bits, res, a, b| OpCode::ShlIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::UShr, |bits, res, a, b| OpCode::UshrIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (IntOp::SShr, |bits, res, a, b| OpCode::AshrIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+        ];
+        let compare: [(CmpOp, Compare); 3] = [
+            (CmpOp::Eq, |bits, res, a, b| OpCode::EqIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (CmpOp::ULt, |bits, res, a, b| OpCode::UltIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+            (CmpOp::SLt, |bits, res, a, b| OpCode::SltIntn {
+                bits,
+                res,
+                a,
+                b,
+            }),
+        ];
+
+        // Two widths past the double lane that are not a power of two, where a shift reduces its
+        // amount modulo the width, and one that is, where it masks.
+        for bits in [129usize, 192, 256] {
+            let cells = IntBits::limbs_for_bits(bits);
+            let values = [
+                IntBits::zero(bits),
+                IntBits::one(bits),
+                IntBits::from_u128(bits, 7),
+                IntBits::from_u128(bits, u128::from(u64::MAX)),
+                IntBits::from_signed(bits, &IntBits::signed_min(bits)),
+                IntBits::all_ones(bits),
+            ];
+            for lhs in &values {
+                for rhs in &values {
+                    // `a`, `b`, a result per arithmetic opcode, a cell per comparison, and the
+                    // field element and the integer the round trip comes back as.
+                    let (a, b) = (0, cells);
+                    let arith_at = |i: usize| 2 * cells + i * cells;
+                    let compare_at = |i: usize| arith_at(arith.len()) + i;
+                    let field_at = compare_at(compare.len());
+                    let back_at =
+                        field_at + <Field as mavros_artifacts::MavrosField>::STORAGE_CELLS;
+                    let frame_size = back_at + cells;
+                    let at = FramePosition;
+
+                    let mut code: Vec<OpCode> = arith
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, op))| op(bits as u64, at(arith_at(i)), at(a), at(b)))
+                        .collect();
+                    code.extend(
+                        compare
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (_, op))| op(bits as u64, at(compare_at(i)), at(a), at(b))),
+                    );
+                    // A width the field carries injectively, the only kind cast to Field.
+                    let crosses = bits < 254;
+                    if crosses {
+                        code.push(OpCode::Bn254CastIntnToField {
+                            bits: bits as u64,
+                            res: at(field_at),
+                            a: at(a),
+                        });
+                        code.push(OpCode::Bn254CastFieldToIntn {
+                            bits: bits as u64,
+                            res: at(back_at),
+                            a: at(field_at),
+                        });
+                    }
+                    code.push(OpCode::Trap {});
+
+                    let program = Program {
+                        field: FieldId::Bn254,
+                        constraint_layouts: None,
+                        functions: vec![Function {
+                            name: "main".to_string(),
+                            frame_size,
+                            source_locations: vec![location("main", 1); code.len()],
+                            code,
+                        }],
+                        entry_points: vec![0],
+                        entry_blob_field_count: 0,
+                        global_frame_size: 0,
+                        constant_pool: Vec::new(),
+                    };
+                    let (mut binary, debug_info) = program.to_binary_and_debug_info();
+                    let header = parse_program_header(&binary);
+                    crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
+
+                    let mut vm = empty_witgen_vm::<Field>();
+                    vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
+                    let frame = Frame::base_frame(frame_size as u64, &mut vm);
+                    for cell in 0..frame_size {
+                        frame.write_u64(cell as isize, GARBAGE);
+                    }
+                    for (i, &word) in lhs.limbs().iter().enumerate() {
+                        frame.write_u64((a + i) as isize, word);
+                    }
+                    for (i, &word) in rhs.limbs().iter().enumerate() {
+                        frame.write_u64((b + i) as isize, word);
+                    }
+
+                    let entry = header.entry_points[0];
+                    unsafe {
+                        crate::interpreter::dispatch(binary.as_ptr().add(entry + 2), frame, &mut vm)
+                    };
+
+                    let read = |at: usize| -> Vec<u64> {
+                        (0..cells)
+                            .map(|i| frame.read_u64((at + i) as isize))
+                            .collect()
+                    };
+                    for (i, (op, _)) in arith.iter().enumerate() {
+                        if let Some(want) = residue(*op, lhs, rhs) {
+                            assert_eq!(
+                                read(arith_at(i)),
+                                want.limbs(),
+                                "{op:?}({lhs:?}, {rhs:?}) at {bits} bits"
+                            );
+                        }
+                    }
+                    for (i, (op, _)) in compare.iter().enumerate() {
+                        assert_eq!(
+                            frame.read_u64(compare_at(i) as isize),
+                            u64::from(lhs.compare(*op, rhs)),
+                            "{op:?}({lhs:?}, {rhs:?}) at {bits} bits"
+                        );
+                    }
+                    if crosses {
+                        assert_eq!(
+                            read(back_at),
+                            lhs.limbs(),
+                            "{lhs:?} at {bits} bits through a field element"
+                        );
+                    }
+
+                    frame.pop(&mut vm);
+                }
+            }
+        }
+    }
+
     /// The double lane wraps at its operand's width, not at the width of its two cells.
     #[test]
     fn the_double_lane_wraps_at_the_operand_width() {
@@ -4224,6 +4783,8 @@ mod tests {
         let (a, b, sum) = (2usize, 4, 6);
 
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4241,7 +4802,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
 
@@ -4249,13 +4809,12 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
 
-        // A pushed frame is `alloc`ated and not zeroed, so every cell an opcode reads has to be
-        // written here, including the high cell of a small addend, which is otherwise whatever the
-        // allocator last left there.
+        // A pushed frame is `alloc`ated, not zeroed, so every cell read is written here, including
+        // the high cell of a small addend.
         for cell in 0..12 {
             frame.write_u64(cell, 0);
         }
@@ -4280,13 +4839,15 @@ mod tests {
         frame.pop(&mut vm);
     }
 
-    /// The overlap check exists because SSA is what keeps a result off its own operands: a property
-    /// of the frame layouter in another crate.
+    /// Only SSA keeps a result off its operands, and that is a property of the frame layouter in
+    /// another crate, so the opcode checks for overlap itself.
     #[test]
     #[should_panic(expected = "overlap")]
     fn a_result_sharing_cells_with_an_operand_is_caught() {
         const BITS: u64 = 192;
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 12,
@@ -4305,7 +4866,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
 
@@ -4313,7 +4873,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
         let entry = header.entry_points[0];
@@ -4347,7 +4907,7 @@ mod tests {
                     len: 2,
                 },
             ] {
-                let mut vm = empty_witgen_vm();
+                let mut vm = empty_witgen_vm::<Field>();
                 let frame = Frame::base_frame(16, &mut vm);
                 let array = BoxedValue::alloc(BoxedLayout::array(8, false), &mut vm);
                 let initial = [10, 11, 12, 13, 14, 15, 16, 17];
@@ -4405,7 +4965,7 @@ mod tests {
         let frame = Frame {
             data: ptr::null_mut(),
         };
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         // The invariant must be checked before touching any of these null pointers.
         for operation in ["array_get", "array_set", "blob_get", "slice_len"] {
             let panic =
@@ -4474,12 +5034,18 @@ mod tests {
             },
             OpCode::Ret {},
             OpCode::Trap {},
-            OpCode::R1C {
+            OpCode::Bn254R1C {
                 a: P(2),
                 b: P(2),
                 c: P(2),
             },
-            OpCode::WriteWitness { val: P(2) },
+            OpCode::GoldilocksR1C {
+                a: P(2),
+                b: P(2),
+                c: P(2),
+            },
+            OpCode::Bn254WriteWitness { val: P(2) },
+            OpCode::GoldilocksWriteWitness { val: P(2) },
             OpCode::ArrayGet {
                 res: P(10),
                 array: P(20),
@@ -4507,34 +5073,59 @@ mod tests {
                 a: P(2),
                 b: P(6),
             },
-            OpCode::AssertEqField { a: P(2), b: P(2) },
-            OpCode::AssertR1C {
-                a: P(2),
-                b: P(2),
-                c: P(2),
-            },
-            OpCode::Rangecheck {
+            OpCode::Bn254AssertEqField { a: P(2), b: P(2) },
+            OpCode::GoldilocksAssertEqField { a: P(2), b: P(2) },
+            OpCode::GoldilocksRangecheck {
                 val: P(2),
                 max_bits: 8,
             },
-            OpCode::SpreadLookupField {
+            OpCode::Bn254Rangecheck {
+                val: P(2),
+                max_bits: 8,
+            },
+            OpCode::Bn254SpreadLookupField {
                 val: P(2),
                 result: P(2),
                 flag: P(2),
                 bits: 1,
             },
-            OpCode::Pow2LookupField {
+            OpCode::GoldilocksSpreadLookupField {
+                val: P(2),
+                result: P(2),
+                flag: P(2),
+                bits: 1,
+            },
+            OpCode::Bn254Pow2LookupField {
                 amount: P(2),
                 factor: P(2),
                 flag: P(2),
                 size: 1,
             },
-            OpCode::RngchkField {
+            OpCode::GoldilocksPow2LookupField {
+                amount: P(2),
+                factor: P(2),
+                flag: P(2),
+                size: 1,
+            },
+            OpCode::Bn254RngchkField {
                 val: P(2),
                 flag: P(2),
                 bits: 1,
             },
-            OpCode::ArrayLookupField {
+            OpCode::GoldilocksRngchkField {
+                val: P(2),
+                flag: P(2),
+                bits: 1,
+            },
+            OpCode::Bn254ArrayLookupField {
+                array: P(20),
+                index: P(2),
+                result: P(2),
+                flag: P(2),
+                stride: 4,
+                elem_kind: ELEM_FIELD,
+            },
+            OpCode::GoldilocksArrayLookupField {
                 array: P(20),
                 index: P(2),
                 result: P(2),
@@ -4543,24 +5134,16 @@ mod tests {
                 elem_kind: ELEM_FIELD,
             },
         ] {
-            // Separate tape regions keep every forward opcode's writes in allocated storage.
-            let mut tapes = vec![Field::ZERO; 8 * 16];
-            let mut ptrs = tapes.chunks_mut(16).map(|chunk| chunk.as_mut_ptr());
-            let mut vm = VM::new_witgen(
-                ptrs.next().unwrap(),
-                ptrs.next().unwrap(),
-                ptrs.next().unwrap(),
-                ptrs.next().unwrap(),
-                ptrs.next().unwrap(),
-                ptrs.next().unwrap(),
-                ptrs.next().unwrap(),
-                ptrs.next().unwrap(),
-                0,
-                0,
-                ptr::null_mut(),
-                vec![],
-                vec![],
-            );
+            // Separate tape regions keep every forward opcode's writes in allocated storage, and
+            // each field's copies run on tapes of that field.
+            let mut bn254_tapes = vec![Field::ZERO; 8 * 16];
+            let mut test_tapes =
+                vec![<mavros_artifacts::Goldilocks as mavros_artifacts::MavrosField>::ZERO; 8 * 16];
+            let mut vm = if opcode.to_string().starts_with("goldilocks_") {
+                witgen_vm_on(&mut test_tapes)
+            } else {
+                witgen_vm_on(&mut bn254_tapes)
+            };
             let frame = Frame::base_frame(24, &mut vm);
             let array = BoxedValue::alloc(BoxedLayout::array(8, false), &mut vm);
             unsafe {
@@ -4613,12 +5196,839 @@ mod tests {
         );
     }
 
+    /// An opcode's number is its index in the generated list (the declared opcodes, a field
+    /// opcode standing as its first field's copy, then each further field's copies), so
+    /// inserting, removing or reordering an opcode renumbers every later one and breaks every
+    /// compiled program. Byte sizes cannot see that, so this table pins the numbers, and a change
+    /// to existing production numbers must bump [`PROGRAM_FORMAT_VERSION`]. Appending a declared
+    /// opcode also shifts Goldilocks' copies, which are persisted in artifacts.
+    #[test]
+    fn opcode_numbers_are_pinned() {
+        assert_eq!(
+            PROGRAM_FORMAT_VERSION, 4,
+            "the format version these numbers belong to"
+        );
+        let pinned: &[(usize, &str)] = &[
+            (0, "jmp"),
+            (1, "jmp_if"),
+            (2, "call"),
+            (3, "ret"),
+            (4, "trap"),
+            (5, "bn254_r1c"),
+            (6, "bn254_write_witness"),
+            (7, "nop"),
+            (8, "mov_const"),
+            (9, "mov_frame"),
+            (10, "write_ptr"),
+            (11, "add_int"),
+            (12, "sub_int"),
+            (13, "mul_int"),
+            (14, "add_int128"),
+            (15, "sub_int128"),
+            (16, "mul_int128"),
+            (17, "udiv_int"),
+            (18, "urem_int"),
+            (19, "sdiv_int"),
+            (20, "srem_int"),
+            (21, "udiv_int128"),
+            (22, "urem_int128"),
+            (23, "sdiv_int128"),
+            (24, "srem_int128"),
+            (25, "and_int"),
+            (26, "or_int"),
+            (27, "xor_int"),
+            (28, "and_int128"),
+            (29, "or_int128"),
+            (30, "xor_int128"),
+            (31, "shl_int"),
+            (32, "ushr_int"),
+            (33, "ashr_int"),
+            (34, "shl_int128"),
+            (35, "ushr_int128"),
+            (36, "ashr_int128"),
+            (37, "not_int"),
+            (38, "not_int128"),
+            (39, "eq_int"),
+            (40, "ult_int"),
+            (41, "eq_int128"),
+            (42, "bn254_eq_field"),
+            (43, "bn254_lt_field"),
+            (44, "ult_int128"),
+            (45, "slt_int"),
+            (46, "slt_int128"),
+            (47, "truncate_int"),
+            (48, "truncate_int128"),
+            (49, "add_intn"),
+            (50, "sub_intn"),
+            (51, "mul_intn"),
+            (52, "udiv_intn"),
+            (53, "urem_intn"),
+            (54, "sdiv_intn"),
+            (55, "srem_intn"),
+            (56, "and_intn"),
+            (57, "or_intn"),
+            (58, "xor_intn"),
+            (59, "not_intn"),
+            (60, "shl_intn"),
+            (61, "ushr_intn"),
+            (62, "ashr_intn"),
+            (63, "eq_intn"),
+            (64, "ult_intn"),
+            (65, "slt_intn"),
+            (66, "cast_intn"),
+            (67, "bn254_add_field"),
+            (68, "bn254_sub_field"),
+            (69, "bn254_div_field"),
+            (70, "bn254_mul_field"),
+            (71, "bn254_cast_field_to_int"),
+            (72, "bn254_cast_field_to_int128"),
+            (73, "bn254_cast_int_to_field"),
+            (74, "bn254_cast_int128_to_field"),
+            (75, "bn254_cast_field_to_intn"),
+            (76, "bn254_cast_intn_to_field"),
+            (77, "array_alloc"),
+            (78, "array_alloc_from_frame"),
+            (79, "array_alloc_repeated"),
+            (80, "ref_alloc"),
+            (81, "ref_store"),
+            (82, "ref_load"),
+            (83, "array_get"),
+            (84, "blob_get"),
+            (85, "array_set"),
+            (86, "slice_len"),
+            (87, "slice_push"),
+            (88, "inc_rc"),
+            (89, "dec_rc"),
+            (90, "bn254_bump_da"),
+            (91, "bn254_bump_db"),
+            (92, "bn254_bump_dc"),
+            (93, "bn254_next_d_coeff"),
+            (94, "fresh_witness"),
+            (95, "bn254_pure_to_witness_ref"),
+            (96, "bn254_mul_const"),
+            (97, "bn254_add_boxed"),
+            (98, "assert_eq_int"),
+            (99, "assert_eq_int128"),
+            (100, "assert_eq_intn"),
+            (101, "bn254_assert_eq_field"),
+            (102, "bn254_rangecheck"),
+            (103, "bn254_to_bytes_be"),
+            (104, "bn254_to_bytes_le"),
+            (105, "bn254_to_bits_le"),
+            (106, "bn254_to_bits_be"),
+            (107, "spread_u32_to_u64"),
+            (108, "unspread_u64_to_u32"),
+            (109, "spread_intn"),
+            (110, "unspread_intn"),
+            (111, "bn254_spread_lookup_field"),
+            (112, "bn254_dspread_lookup_field"),
+            (113, "bn254_pow2_lookup_field"),
+            (114, "bn254_dpow2_lookup_field"),
+            (115, "bn254_rngchk_field"),
+            (116, "bn254_array_lookup_field"),
+            (117, "bn254_drngchk_field"),
+            (118, "bn254_darray_lookup_field"),
+            (119, "init_global"),
+            (120, "read_global"),
+            (121, "drop_global"),
+            (122, "mov_const_pool"),
+            (123, "bn254_verifier_read_witness"),
+            (124, "bn254_verifier_constant"),
+            (125, "bn254_verifier_next_coeff"),
+            (126, "bn254_verifier_accumulate"),
+            (127, "bn254_verifier_rngchk_field"),
+            (128, "bn254_verifier_spread_lookup_field"),
+            (129, "bn254_verifier_pow2_lookup_field"),
+            (130, "bn254_verifier_array_lookup_field"),
+            // Goldilocks' copies: appended after every declared opcode, so they move whenever
+            // an opcode is declared.
+            (131, "goldilocks_r1c"),
+            (132, "goldilocks_write_witness"),
+            (133, "goldilocks_eq_field"),
+            (134, "goldilocks_lt_field"),
+            (135, "goldilocks_add_field"),
+            (136, "goldilocks_sub_field"),
+            (137, "goldilocks_div_field"),
+            (138, "goldilocks_mul_field"),
+            (139, "goldilocks_cast_field_to_int"),
+            (140, "goldilocks_cast_field_to_int128"),
+            (141, "goldilocks_cast_int_to_field"),
+            (142, "goldilocks_cast_int128_to_field"),
+            (143, "goldilocks_cast_field_to_intn"),
+            (144, "goldilocks_cast_intn_to_field"),
+            (145, "goldilocks_bump_da"),
+            (146, "goldilocks_bump_db"),
+            (147, "goldilocks_bump_dc"),
+            (148, "goldilocks_next_d_coeff"),
+            (149, "goldilocks_pure_to_witness_ref"),
+            (150, "goldilocks_mul_const"),
+            (151, "goldilocks_add_boxed"),
+            (152, "goldilocks_assert_eq_field"),
+            (153, "goldilocks_rangecheck"),
+            (154, "goldilocks_to_bytes_be"),
+            (155, "goldilocks_to_bytes_le"),
+            (156, "goldilocks_to_bits_le"),
+            (157, "goldilocks_to_bits_be"),
+            (158, "goldilocks_spread_lookup_field"),
+            (159, "goldilocks_dspread_lookup_field"),
+            (160, "goldilocks_pow2_lookup_field"),
+            (161, "goldilocks_dpow2_lookup_field"),
+            (162, "goldilocks_rngchk_field"),
+            (163, "goldilocks_array_lookup_field"),
+            (164, "goldilocks_drngchk_field"),
+            (165, "goldilocks_darray_lookup_field"),
+            (166, "goldilocks_verifier_read_witness"),
+            (167, "goldilocks_verifier_constant"),
+            (168, "goldilocks_verifier_next_coeff"),
+            (169, "goldilocks_verifier_accumulate"),
+            (170, "goldilocks_verifier_rngchk_field"),
+            (171, "goldilocks_verifier_spread_lookup_field"),
+            (172, "goldilocks_verifier_pow2_lookup_field"),
+            (173, "goldilocks_verifier_array_lookup_field"),
+        ];
+        let actual: Vec<(usize, &str)> = OPCODE_NAMES.iter().copied().enumerate().collect();
+        let mismatches: Vec<_> = actual.iter().zip(pinned).filter(|(a, p)| a != p).collect();
+        assert!(
+            mismatches.is_empty(),
+            "renumbered opcodes (actual, pinned): {mismatches:?}"
+        );
+        assert_eq!(actual.len(), pinned.len(), "opcode count changed");
+        assert_eq!(pinned[FIRST_GOLDILOCKS_OPCODE], (131, "goldilocks_r1c"));
+        assert!(
+            !pinned[FIRST_GOLDILOCKS_OPCODE - 1]
+                .1
+                .starts_with("goldilocks_")
+        );
+    }
+
+    /// Goldilocks' frame-only arithmetic, comparison and cast copies, through real dispatch.
+    ///
+    /// Its elements are one cell wide, so operands sit in adjacent cells, where bn254's four-cell
+    /// elements would overlap. Every other cell holds a sentinel and the whole frame is compared
+    /// afterwards, so a copy that wrote bn254's width, or wrote an operand, fails.
+    #[test]
+    fn goldilocks_opcodes_run_at_one_cell_per_element() {
+        use mavros_artifacts::Goldilocks;
+        use mavros_artifacts::MavrosField;
+
+        const SENTINEL: u64 = 0xa5a5_a5a5_a5a5_a5a5;
+        let top = mavros_artifacts::field::goldilocks::MODULUS - 1;
+        let field = |value: u64| Goldilocks::from(value).storage_cell0();
+        // `2^32` is stored as `p - 1`, above `top`'s cell, so this pair's cells order the opposite
+        // way to its integers and the `lt` cases tell a canonical comparison from a cell one.
+        let low = 1u64 << 32;
+        assert!(field(low) > field(top) && low < top);
+        let (a, b, res, wide) = (FramePosition(2), FramePosition(3), FramePosition(4), 5);
+        let at = FramePosition;
+        // Each opcode, its `a` and `b` cells, where its result starts, and the result's cells.
+        let cases: Vec<(OpCode, [u64; 2], usize, Vec<u64>)> = vec![
+            (
+                OpCode::GoldilocksAddField { res, a, b },
+                [field(top), field(2)],
+                4,
+                vec![field(1)],
+            ),
+            (
+                OpCode::GoldilocksSubField { res, a, b },
+                [field(1), field(2)],
+                4,
+                vec![field(top)],
+            ),
+            (
+                OpCode::GoldilocksMulField { res, a, b },
+                [field(top), field(top)],
+                4,
+                vec![field(1)],
+            ),
+            (
+                OpCode::GoldilocksDivField { res, a, b },
+                [field(6), field(3)],
+                4,
+                vec![field(2)],
+            ),
+            (
+                OpCode::GoldilocksDivField { res, a, b },
+                [field(5), field(0)],
+                4,
+                vec![field(0)],
+            ),
+            (
+                OpCode::GoldilocksEqField { res, a, b },
+                [field(3), field(3)],
+                4,
+                vec![1],
+            ),
+            (
+                OpCode::GoldilocksEqField { res, a, b },
+                [field(3), field(4)],
+                4,
+                vec![0],
+            ),
+            (
+                OpCode::GoldilocksLtField { res, a, b },
+                [field(low), field(top)],
+                4,
+                vec![1],
+            ),
+            (
+                OpCode::GoldilocksLtField { res, a, b },
+                [field(top), field(low)],
+                4,
+                vec![0],
+            ),
+            (
+                OpCode::GoldilocksCastFieldToInt { res, a },
+                [field(top), 0],
+                4,
+                vec![top],
+            ),
+            (
+                OpCode::GoldilocksCastFieldToInt128 { res, a },
+                [field(top), 0],
+                4,
+                vec![top, 0],
+            ),
+            (
+                OpCode::GoldilocksCastIntToField { res, a },
+                [u64::MAX, 0],
+                4,
+                vec![field((1 << 32) - 2)],
+            ),
+            (
+                OpCode::GoldilocksCastInt128ToField { res, a },
+                [0, 1],
+                4,
+                vec![field((1 << 32) - 1)],
+            ),
+            (
+                OpCode::GoldilocksCastFieldToIntn {
+                    bits: 128,
+                    res: at(wide),
+                    a,
+                },
+                [field(top), 0],
+                wide,
+                vec![top, 0],
+            ),
+            (
+                OpCode::GoldilocksCastIntnToField { bits: 64, res, a },
+                [5, 0],
+                4,
+                vec![field(5)],
+            ),
+        ];
+        for (opcode, inputs, res_at, result) in cases {
+            let mut image = [SENTINEL; 8];
+            image[2..4].copy_from_slice(&inputs);
+            let mut vm = empty_witgen_vm::<Goldilocks>();
+            let frame = Frame::base_frame(8, &mut vm);
+            unsafe { ptr::copy_nonoverlapping(image.as_ptr(), frame.data, 8) };
+            image[res_at..res_at + result.len()].copy_from_slice(&result);
+
+            let mut binary = Vec::new();
+            opcode.to_binary(&mut binary, &mut Vec::new());
+            let id = binary[0] as usize;
+            assert!(
+                id >= FIRST_GOLDILOCKS_OPCODE,
+                "{opcode} is a Goldilocks copy, numbered after the declared opcodes"
+            );
+            let end = OpCode::next_opcode(&binary, 0);
+            assert_eq!(end, binary.len(), "{opcode}");
+            let (next_pc, _) = DISPATCH[id](binary.as_ptr(), frame, &mut vm);
+            assert_eq!(next_pc, unsafe { binary.as_ptr().add(end) }, "{opcode}");
+            let cells = unsafe { std::slice::from_raw_parts(frame.data, 8) };
+            assert_eq!(cells, image, "{opcode}");
+            frame.pop(&mut vm);
+        }
+    }
+
+    /// Goldilocks' assertion and decomposition copies. The decompositions and range checks run
+    /// on `2^32`, stored as `p - 1`, and on the element stored as the cell `1`, whose integer is
+    /// `R^-1 mod p`: a copy reading the storage cell gets each of those cases wrong.
+    #[test]
+    fn goldilocks_assertions_and_decompositions_read_the_integer() {
+        use mavros_artifacts::Goldilocks;
+        use mavros_artifacts::MavrosField;
+
+        let cell = |value: u64| Goldilocks::from(value).storage_cell0();
+        let low = 1u64 << 32;
+        let (a, b, c, res) = (
+            FramePosition(2),
+            FramePosition(3),
+            FramePosition(4),
+            FramePosition(8),
+        );
+        // Runs `opcode` with `cells` from position 2, and returns whether it trapped and the
+        // `count` cells of the array it left at `res`, if any.
+        let run = |opcode: OpCode, cells: &[u64], count: usize| -> (bool, Vec<u64>) {
+            let mut vm = empty_witgen_vm::<Goldilocks>();
+            let frame = Frame::base_frame(10, &mut vm);
+            unsafe { ptr::write_bytes(frame.data, 0, 10) };
+            for (index, value) in cells.iter().enumerate() {
+                unsafe { *frame.data.add(2 + index) = *value };
+            }
+            let mut binary = Vec::new();
+            opcode.to_binary(&mut binary, &mut Vec::new());
+            assert!(
+                binary[0] as usize >= FIRST_GOLDILOCKS_OPCODE,
+                "{opcode} is a Goldilocks copy"
+            );
+            let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
+            let trapped = next_pc.is_null();
+            let mut elements = Vec::new();
+            if count > 0 {
+                let array = frame.read_array(res.0 as isize);
+                elements = (0..count)
+                    .map(|i| unsafe { *array.array_idx(i, 1) })
+                    .collect();
+                array.dec_rc(&mut vm);
+            }
+            frame.pop(&mut vm);
+            (trapped, elements)
+        };
+
+        assert!(
+            !run(
+                OpCode::GoldilocksAssertEqField { a, b },
+                &[cell(low), cell(low)],
+                0
+            )
+            .0
+        );
+        assert!(
+            run(
+                OpCode::GoldilocksAssertEqField { a, b },
+                &[cell(low), cell(1)],
+                0
+            )
+            .0
+        );
+        let check = |max_bits| OpCode::GoldilocksRangecheck { val: a, max_bits };
+        assert!(!run(check(33), &[cell(low)], 0).0);
+        assert!(run(check(32), &[cell(low)], 0).0);
+        assert!(
+            !run(
+                check(64),
+                &[cell(mavros_artifacts::field::goldilocks::MODULUS - 1)],
+                0
+            )
+            .0
+        );
+        assert!(run(check(8), &[1], 0).0);
+
+        let mut bits = vec![0; 40];
+        bits[32] = 1;
+        let to_bits = OpCode::GoldilocksToBitsLe {
+            res,
+            val: a,
+            count: 40,
+        };
+        assert_eq!(run(to_bits, &[cell(low)], 40), (false, bits.clone()));
+        bits.reverse();
+        let to_bits = OpCode::GoldilocksToBitsBe {
+            res,
+            val: a,
+            count: 40,
+        };
+        assert_eq!(run(to_bits, &[cell(low)], 40), (false, bits));
+        // Bytes past the field's one limb read as zero.
+        let mut bytes = vec![0; 10];
+        bytes[4] = 1;
+        let to_bytes = OpCode::GoldilocksToBytesLe {
+            val: a,
+            count: 10,
+            res,
+        };
+        assert_eq!(run(to_bytes, &[cell(low)], 10), (false, bytes.clone()));
+        bytes.reverse();
+        let to_bytes = OpCode::GoldilocksToBytesBe {
+            val: a,
+            count: 10,
+            res,
+        };
+        assert_eq!(run(to_bytes, &[cell(low)], 10), (false, bytes));
+    }
+
+    /// Goldilocks' tape opcodes on a witgen VM whose tapes are `Goldilocks` vectors: each slot
+    /// is one cell, the `u64` table indices, flags and counts land in cell 0 of a slot, and a
+    /// lookup key is read as the integer it denotes. Every key is stored far past any row (`2` is
+    /// stored as `2^33 - 2`), and the element stored as the cell `1` denotes no row.
+    #[test]
+    fn goldilocks_tape_opcodes_fill_one_cell_slots() {
+        use mavros_artifacts::Goldilocks;
+        use mavros_artifacts::MavrosField;
+
+        let cell = |value: u64| Goldilocks::from(value).storage_cell0();
+        let field = |value: u64| Goldilocks::from(value);
+        let zero = <Goldilocks as mavros_artifacts::MavrosField>::ZERO;
+        let zeros = |len| vec![zero; len];
+        let (mut out_a, mut out_b, mut out_c) = (zeros(40), zeros(40), zeros(40));
+        let (mut witness, mut mults) = (zeros(8), zeros(32));
+        let (mut lookups_a, mut lookups_b, mut lookups_c) = (zeros(8), zeros(8), zeros(8));
+        // The tables' constraints start after the 8 algebraic rows.
+        let tables_start = 8;
+        let mut vm = VM::new_witgen(
+            out_a.as_mut_ptr(),
+            out_b.as_mut_ptr(),
+            out_c.as_mut_ptr(),
+            witness.as_mut_ptr(),
+            mults.as_mut_ptr(),
+            lookups_a.as_mut_ptr(),
+            lookups_b.as_mut_ptr(),
+            lookups_c.as_mut_ptr(),
+            tables_start,
+            0,
+            ptr::null_mut(),
+            vec![],
+        );
+        let frame = Frame::base_frame(16, &mut vm);
+        let array = BoxedValue::alloc(BoxedLayout::array(4, false), &mut vm);
+        let elements = [10, 20, 30, 40];
+        unsafe {
+            for (index, value) in [2, 3, 6, 9, 1, 3, 5, 2, 30].into_iter().enumerate() {
+                *frame.data.add(2 + index) = cell(value);
+            }
+            for (index, value) in elements.into_iter().enumerate() {
+                *array.array_idx(index, 1) = cell(value);
+            }
+            *frame.data.add(11) = array.0 as u64;
+        }
+        let at = FramePosition;
+        // Whether `opcode` ran to its end without trapping.
+        let step = |vm: &mut VM, opcode: OpCode| {
+            let mut binary = Vec::new();
+            opcode.to_binary(&mut binary, &mut Vec::new());
+            assert!(
+                binary[0] as usize >= FIRST_GOLDILOCKS_OPCODE,
+                "{opcode} is a Goldilocks copy"
+            );
+            let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, vm);
+            !next_pc.is_null()
+        };
+
+        let r1c = || OpCode::GoldilocksR1C {
+            a: at(2),
+            b: at(3),
+            c: at(4),
+        };
+        assert!(step(&mut vm, r1c()) && step(&mut vm, r1c()));
+        let write = || OpCode::GoldilocksWriteWitness { val: at(4) };
+        assert!(step(&mut vm, write()) && step(&mut vm, write()));
+        // A 16-row rangecheck table (table 0) and a 4-row spread table (table 1).
+        let rngchk = |val| OpCode::GoldilocksRngchkField {
+            val: at(val),
+            flag: at(6),
+            bits: 4,
+        };
+        assert!(step(&mut vm, rngchk(5)));
+        let spread = OpCode::GoldilocksSpreadLookupField {
+            val: at(7),
+            result: at(8),
+            flag: at(6),
+            bits: 2,
+        };
+        assert!(step(&mut vm, spread));
+        // Table 2: the array, whose elements are dumped into the x-slots of its constraints.
+        let lookup = OpCode::GoldilocksArrayLookupField {
+            array: at(11),
+            index: at(9),
+            result: at(10),
+            flag: at(6),
+            stride: 1,
+            elem_kind: ELEM_FIELD,
+        };
+        assert!(step(&mut vm, lookup));
+        // Table 3: a 2-row powers-of-two table, looking up `2^1 = 2`.
+        unsafe {
+            *frame.data.add(13) = cell(1);
+            *frame.data.add(14) = cell(2);
+        }
+        let pow2 = OpCode::GoldilocksPow2LookupField {
+            amount: at(13),
+            factor: at(14),
+            flag: at(6),
+            size: 1,
+        };
+        assert!(step(&mut vm, pow2));
+        // The element stored as the cell `1` denotes `R^-1 mod p`, which is no row of the 16-row
+        // table; its storage cell would address row 1.
+        unsafe { *frame.data.add(12) = 1 };
+        assert!(!step(&mut vm, rngchk(12)));
+        array.dec_rc(&mut vm);
+        frame.pop(&mut vm);
+
+        assert_eq!(out_a[..3], [field(2), field(2), zero]);
+        assert_eq!(out_b[..2], [field(3), field(3)]);
+        assert_eq!(out_c[..2], [field(6), field(6)]);
+        assert_eq!(witness[..3], [field(6), field(6), zero]);
+        // Table 0 starts at constraint 8 and takes 16 + 1, table 1 takes 4 + 1, so table 2's
+        // x-slots start at 30.
+        let x_slots: Vec<u64> = (0..4).map(|i| out_a[30 + 2 * i].storage_cell0()).collect();
+        assert_eq!(x_slots, elements.map(cell));
+        let counts =
+            |slots: &[Goldilocks]| slots.iter().map(|v| v.storage_cell0()).collect::<Vec<_>>();
+        // Multiplicities are plain counts: row 9 of table 0, row 3 of table 1 (at 16), row 2 of
+        // table 2 (at 20), row 1 of table 3 (at 24).
+        let mut expected = vec![0; 26];
+        expected[9] = 1;
+        expected[16 + 3] = 1;
+        expected[20 + 2] = 1;
+        expected[24 + 1] = 1;
+        assert_eq!(counts(&mults[..26]), expected);
+        // One entry for the rangecheck, two (x then y) for each key-value lookup, and none for the
+        // trapped rangecheck.
+        assert_eq!(counts(&lookups_a[..8]), [0, 1, 1, 2, 2, 3, 3, 0]);
+        assert_eq!(
+            counts(&lookups_b[..7]),
+            [9, cell(5), 3, cell(30), 2, cell(2), 1]
+        );
+        assert_eq!(counts(&lookups_c[..7]), [1, 0, 1, 0, 1, 0, 1]);
+    }
+
+    /// Runs every AD opcode over `F`, choosing the field copies with `pick`, and returns the three
+    /// derivative tapes, followed by the second coefficient read, as signed integers.
+    fn run_ad_program<F: mavros_artifacts::MavrosField>(
+        pick: fn(FieldOpCode) -> OpCode,
+    ) -> (Vec<Vec<i128>>, i128) {
+        use FramePosition as P;
+
+        let small = |value: i64| {
+            let magnitude = F::from(value.unsigned_abs());
+            if value < 0 { -magnitude } else { magnitude }
+        };
+        let witness_layout = WitnessLayout {
+            algebraic_size: 8,
+            multiplicities_size: 16,
+            challenges_size: 2,
+            tables_data_size: 32,
+            lookups_data_size: 16,
+        };
+        let constraints_layout = ConstraintsLayout {
+            algebraic_size: 8,
+            tables_data_size: 32,
+            lookups_data_size: 16,
+        };
+        let coeffs = (0..constraints_layout.size() as i64)
+            .map(|i| small(i * 7 % 23 - 11))
+            .collect::<Vec<F>>();
+        let mut tapes: [Vec<F>; 3] = std::array::from_fn(|_| vec![F::ZERO; witness_layout.size()]);
+        let [da, db, dc] = tapes.each_mut().map(|tape| tape.as_mut_ptr());
+        let mut vm = VM::new_ad(
+            da,
+            db,
+            dc,
+            coeffs.as_ptr(),
+            witness_layout,
+            constraints_layout,
+            ptr::null_mut(),
+            vec![],
+        );
+
+        // Field operands sit four cells apart, which fits bn254's elements.
+        let frame = Frame::base_frame(40, &mut vm);
+        for (at, value) in [(2, -3), (6, 5), (10, 7), (14, -11), (18, 13)] {
+            let cells = unsafe { std::slice::from_raw_parts_mut(frame.data.add(at), 4) };
+            small(value).to_frame_cells(cells);
+        }
+        let words = BoxedValue::alloc(BoxedLayout::array(3, false), &mut vm);
+        unsafe {
+            for (index, word) in [4, 9, 2].into_iter().enumerate() {
+                *words.array_idx(index, 1) = word;
+            }
+            *frame.data.add(29) = words.0 as u64;
+        }
+        let (minus_3, five, seven, minus_11, thirteen) = (P(2), P(6), P(10), P(14), P(18));
+        let (w0, w1, w2, k, m, s, s2, array, w3, w4) = (
+            P(22),
+            P(23),
+            P(24),
+            P(25),
+            P(26),
+            P(27),
+            P(28),
+            P(29),
+            P(30),
+            P(31),
+        );
+        let coeff = P(32);
+        let program = [
+            OpCode::FreshWitness { res: w0 },
+            OpCode::FreshWitness { res: w1 },
+            OpCode::FreshWitness { res: w2 },
+            OpCode::FreshWitness { res: w3 },
+            OpCode::FreshWitness { res: w4 },
+            pick(FieldOpCode::PureToWitnessRef { res: k, v: five }),
+            pick(FieldOpCode::MulConst {
+                res: m,
+                coeff: minus_3,
+                v: w1,
+            }),
+            pick(FieldOpCode::AddBoxed { res: s, a: m, b: k }),
+            pick(FieldOpCode::AddBoxed {
+                res: s2,
+                a: s,
+                b: w2,
+            }),
+            pick(FieldOpCode::BumpDa {
+                v: s2,
+                coeff: seven,
+            }),
+            pick(FieldOpCode::BumpDb {
+                v: s2,
+                coeff: minus_11,
+            }),
+            pick(FieldOpCode::BumpDc {
+                v: s2,
+                coeff: thirteen,
+            }),
+            pick(FieldOpCode::NextDCoeff { v: coeff }),
+            pick(FieldOpCode::NextDCoeff { v: coeff }),
+            pick(FieldOpCode::DrngchkField {
+                val: k,
+                flag: w3,
+                bits: 1,
+            }),
+            pick(FieldOpCode::DspreadLookupField {
+                val: w3,
+                result: w4,
+                flag: w0,
+                bits: 1,
+            }),
+            pick(FieldOpCode::Dpow2LookupField {
+                amount: w4,
+                factor: w3,
+                flag: w0,
+                size: 1,
+            }),
+            pick(FieldOpCode::DarrayLookupField {
+                array,
+                index: w0,
+                result: w3,
+                flag: w4,
+                stride: 1,
+                elem_kind: ELEM_WORD,
+            }),
+            // `s2` holds the only reference to every node built above, so freeing it
+            // back-propagates through all of them.
+            OpCode::DecRc { array: s2 },
+            OpCode::DecRc { array: w0 },
+            OpCode::DecRc { array: w3 },
+            OpCode::DecRc { array: w4 },
+            OpCode::DecRc { array },
+        ];
+        for opcode in program {
+            let mut binary = Vec::new();
+            opcode.to_binary(&mut binary, &mut Vec::new());
+            let end = OpCode::next_opcode(&binary, 0);
+            let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
+            assert_eq!(next_pc, unsafe { binary.as_ptr().add(end) }, "{opcode}");
+        }
+        let read = |at: P| signed(frame.read_field::<F>(at.0 as isize));
+        let coeff = read(coeff);
+        frame.pop(&mut vm);
+        assert_eq!(
+            vm.allocation_instrumenter.final_memory_usage(),
+            0,
+            "every node is freed at the size it was allocated at"
+        );
+        let tapes = tapes
+            .into_iter()
+            .map(|tape| tape.into_iter().map(signed).collect())
+            .collect();
+        (tapes, coeff)
+    }
+
+    /// Goldilocks' AD copies, through real dispatch on one-cell tapes, against bn254's.
+    ///
+    /// Every value is a small integer, so both fields must produce the same signed integers, and
+    /// the negative ones discriminate each field's arithmetic. The tapes hold one cell per element
+    /// for Goldilocks, so a write at bn254's stride lands on another witness's slot.
+    #[test]
+    fn goldilocks_ad_opcodes_agree_with_bn254() {
+        let (bn254, coeff) = run_ad_program::<Field>(FieldOpCode::bn254);
+        let goldilocks = run_ad_program::<mavros_artifacts::Goldilocks>(FieldOpCode::goldilocks);
+        assert_eq!(coeff, -4);
+        // Witness 1 reaches the tapes only through the multiply by -3, under the sum, under the
+        // sum; witness 2 only through the outer sum.
+        let witness = |index: usize| bn254.iter().map(|tape| tape[index]).collect::<Vec<_>>();
+        assert_eq!(witness(1), [-21, 33, -39]);
+        assert_eq!(witness(2), [7, -11, 13]);
+        assert!(bn254.iter().flatten().filter(|&&value| value != 0).count() > 20);
+        assert_eq!(goldilocks, (bn254, coeff));
+    }
+
+    /// The guard behind `Tape`'s one-field-per-run pairing.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "ran on a VM built for another field")]
+    fn a_field_opcode_panics_on_a_vm_built_for_another_field() {
+        let mut vm = empty_witgen_vm::<mavros_artifacts::Goldilocks>();
+        let frame = Frame::base_frame(16, &mut vm);
+        let opcode = FieldOpCode::AddField {
+            res: FramePosition(10),
+            a: FramePosition(2),
+            b: FramePosition(6),
+        }
+        .bn254();
+        let mut binary = Vec::new();
+        opcode.to_binary(&mut binary, &mut Vec::new());
+        DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
+    }
+
+    #[test]
+    fn limbs_fit_bits_matches_bit_decomposition() {
+        use ark_ff::BigInteger as _;
+
+        let values: [[u64; 4]; 6] = [
+            [0; 4],
+            [1, 0, 0, 0],
+            [u64::MAX, 0, 0, 0],
+            [5, 1 << 7, 0, 0],
+            [0, 0, 1 << 3, 0],
+            [0, 0, 0, 1 << 60],
+        ];
+        for limbs in values {
+            for max_bits in [
+                0, 1, 3, 63, 64, 65, 71, 72, 128, 131, 132, 191, 252, 253, 256, 300,
+            ] {
+                // The decomposition `rangecheck` used: every bit past `max_bits` is clear.
+                let expected = ark_ff::BigInt(limbs)
+                    .to_bits_le()
+                    .iter()
+                    .skip(max_bits)
+                    .all(|bit| !bit);
+                assert_eq!(
+                    limbs_fit_bits(&limbs, max_bits),
+                    expected,
+                    "{limbs:?} {max_bits}"
+                );
+            }
+        }
+    }
+
+    /// `FieldOpCode` picks the field's copy, keeping every operand.
+    #[test]
+    fn field_opcode_for_field_picks_the_bn254_copy() {
+        let (res, a, b) = (FramePosition(10), FramePosition(2), FramePosition(6));
+        let opcode =
+            FieldOpCode::SubField { res, a, b }.for_field(mavros_artifacts::FieldId::Bn254);
+        assert!(matches!(
+            opcode,
+            OpCode::Bn254SubField { res: r, a: x, b: y } if r.0 == 10 && x.0 == 2 && y.0 == 6
+        ));
+        let mut binary = Vec::new();
+        opcode.to_binary(&mut binary, &mut Vec::new());
+        assert_eq!(binary, [68, 10, 2, 6]);
+    }
+
     #[test]
     fn source_map_drives_deep_instruction_profile_and_trap_stack_trace() {
         let caller_location = location("main", 10);
         let middle_location = location("middle", 17);
         let callee_location = location("helper", 24);
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![
                 Function {
                     name: "main".to_string(),
@@ -4642,7 +6052,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
         let (binary, debug_info) = program.to_binary_and_debug_info();
@@ -4650,7 +6059,7 @@ mod tests {
         let middle_opcode = debug_info.functions[1].locations[0].code_offset;
         let helper_opcode = debug_info.functions[2].locations[0].code_offset;
 
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
 
         let caller = Frame::base_frame(3, &mut vm);
@@ -4694,7 +6103,7 @@ mod tests {
 
     #[test]
     fn instruction_profile_uses_unknown_without_debug_context() {
-        let mut vm = empty_witgen_vm();
+        let mut vm = empty_witgen_vm::<Field>();
         vm.enable_instruction_profile();
         vm.record_instruction(
             ptr::null(),
@@ -4706,21 +6115,172 @@ mod tests {
         assert_eq!(vm.take_instruction_profile().to_folded(), "<unknown> 1\n");
     }
 
+    /// `BoxedLayout` words travel in bytecode as `array_alloc`'s and `ref_alloc`'s `meta`, so their
+    /// encoding is part of the format [`PROGRAM_FORMAT_VERSION`] names.
+    #[test]
+    fn boxed_layout_encodings_are_pinned() {
+        assert_eq!(
+            PROGRAM_FORMAT_VERSION, 4,
+            "the format version these encodings belong to"
+        );
+        let codes = [
+            DataType::PrimArray,
+            DataType::BoxedArray,
+            DataType::ADConst,
+            DataType::ADWitness,
+            DataType::ADSum,
+            DataType::ADMulConst,
+            DataType::RefCell,
+        ]
+        .map(|data_type| data_type as u8);
+        assert_eq!(codes, [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(BoxedLayout::array(5, false).0, 5 << 8);
+        assert_eq!(BoxedLayout::array(5, true).0, 1 | 5 << 8);
+        assert_eq!(BoxedLayout::ref_cell(2, true).0, 6 | 0b1010 << 8);
+    }
+
+    /// A ref cell is allocated with room for its element, and freeing it frees a refcounted
+    /// element it holds.
+    #[test]
+    fn a_ref_cell_holds_and_frees_its_element() {
+        use FramePosition as P;
+
+        for elem_size in 1..8 {
+            for elem_is_refcounted in [false, true] {
+                let layout = BoxedLayout::ref_cell(elem_size, elem_is_refcounted);
+                assert_eq!(layout.underlying_array_size(), elem_size + 3);
+            }
+        }
+
+        let mut vm = empty_witgen_vm::<Field>();
+        let frame = Frame::base_frame(8, &mut vm);
+        let array = BoxedValue::alloc(BoxedLayout::array(3, false), &mut vm);
+        unsafe { *frame.data.add(3) = array.0 as u64 };
+        for opcode in [
+            OpCode::RefAlloc {
+                res: P(2),
+                meta: BoxedLayout::ref_cell(1, true),
+            },
+            OpCode::RefStore {
+                cell: P(2),
+                source: P(3),
+                stride: 1,
+                elem_rc: 1,
+            },
+            OpCode::RefLoad {
+                res: P(4),
+                cell: P(2),
+                stride: 1,
+            },
+            OpCode::DecRc { array: P(2) },
+        ] {
+            let mut binary = Vec::new();
+            opcode.to_binary(&mut binary, &mut Vec::new());
+            let end = OpCode::next_opcode(&binary, 0);
+            let (next_pc, _) = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
+            assert_eq!(next_pc, unsafe { binary.as_ptr().add(end) }, "{opcode}");
+        }
+        assert_eq!(unsafe { *frame.data.add(4) }, array.0 as u64);
+        frame.pop(&mut vm);
+        assert_eq!(
+            vm.allocation_instrumenter.final_memory_usage(),
+            0,
+            "the cell's last reference frees the array it holds"
+        );
+    }
+
     #[test]
     fn compact_binary_header_parses_without_debug_metadata() {
-        // Empty header: no struct layouts, constants, globals, entry blob fields, or
-        // entries, then code starts.
-        let binary = [0, 0, 0, 0, 0, u64::MAX, 0];
+        // Magic, version, field and absent layouts, then no constants, globals, entry blob fields
+        // or entries: code starts at the marker.
+        let binary = [
+            PROGRAM_MAGIC,
+            PROGRAM_FORMAT_VERSION,
+            FieldId::Goldilocks.code(),
+            0, // No constraint layouts.
+            0,
+            0,
+            0,
+            0,
+            u64::MAX,
+            0,
+        ];
         let header = parse_program_header(&binary);
 
-        assert_eq!(header.code_start, 5);
+        assert_eq!(header.field, FieldId::Goldilocks);
+        assert_eq!(header.code_start, 8);
         assert!(header.constant_pool.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "not a mavros VM program binary")]
+    fn a_binary_without_the_magic_word_is_refused() {
+        // An unversioned binary: its first word is the struct-layout count, always 0.
+        parse_program_header(&[0, 0, 0, 0, 0, u64::MAX, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported VM program format version Some(1); expected 4")]
+    fn a_binary_of_another_format_version_is_refused() {
+        // A version-1 binary, which has no field word.
+        parse_program_header(&[PROGRAM_MAGIC, 1, 0, 0, 0, 0, u64::MAX, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the VM program names no supported field (word 0)")]
+    fn a_binary_naming_no_field_is_refused() {
+        parse_program_header(&[
+            PROGRAM_MAGIC,
+            PROGRAM_FORMAT_VERSION,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u64::MAX,
+            0,
+        ]);
+    }
+
+    /// The header's field word round-trips each field, and its codes are pinned: they are part of
+    /// the format [`PROGRAM_FORMAT_VERSION`] names.
+    #[test]
+    fn the_program_header_names_its_field() {
+        assert_eq!(
+            PROGRAM_FORMAT_VERSION, 4,
+            "the format version these codes belong to"
+        );
+        assert_eq!([FieldId::Bn254.code(), FieldId::Goldilocks.code()], [1, 2]);
+        for field in [FieldId::Bn254, FieldId::Goldilocks] {
+            let binary = Program {
+                constraint_layouts: None,
+                functions: vec![Function {
+                    name: "main".to_string(),
+                    frame_size: 2,
+                    code: vec![OpCode::Ret {}],
+                    source_locations: vec![SourceLocation::new("<test>", 1, 1)],
+                }],
+                field,
+                entry_points: vec![0],
+                entry_blob_field_count: 0,
+                global_frame_size: 0,
+                constant_pool: Vec::new(),
+            }
+            .to_binary();
+            assert_eq!(binary[2], field.code());
+            assert_eq!(parse_program_header(&binary).field, field);
+            assert_eq!(FieldId::from_code(field.code()), Some(field));
+        }
+        assert_eq!(FieldId::from_code(0), None);
+        assert_eq!(FieldId::from_code(3), None);
     }
 
     #[test]
     fn bytecode_debug_info_is_always_standalone() {
         let source_location = location("main", 10);
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 3,
@@ -4730,7 +6290,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
 
@@ -4751,6 +6310,8 @@ mod tests {
     fn debug_info_serialization_interns_files_and_validates_the_version() {
         let source_location = location("shared", 10);
         let program = Program {
+            field: FieldId::Bn254,
+            constraint_layouts: None,
             functions: vec![Function {
                 name: "main".to_string(),
                 frame_size: 3,
@@ -4763,7 +6324,6 @@ mod tests {
             entry_points: vec![0],
             entry_blob_field_count: 0,
             global_frame_size: 0,
-            struct_layouts: Vec::new(),
             constant_pool: Vec::new(),
         };
 
@@ -4804,10 +6364,8 @@ mod tests {
         assert_eq!(table_row_index(Field::from(0u64), 0), None);
     }
 
-    /// The bound alone is not enough. The row is addressed by the key's _low limb_, so a key whose
-    /// high limbs are set has to be rejected even when that low limb names a valid row — otherwise
-    /// `2^64 + 3` reads as row 3 of an 8-row table, and the lookup it cannot satisfy silently
-    /// succeeds against a row it does not name.
+    /// The row is addressed by the key's low limb, so a key with high limbs set must be rejected
+    /// even when its low limb names a row: otherwise `2^64 + 3` silently matches row 3.
     #[test]
     fn table_row_index_rejects_a_key_whose_high_limbs_are_set() {
         let low_limb_in_range = Field::from((1u128 << 64) + 3);
@@ -4870,9 +6428,7 @@ mod tests {
         assert_eq!(shift_amount(7, 8), 7);
         assert_eq!(shift_amount(63, 64), 63);
 
-        // Out of range: reduced modulo the width, which is what LLVM does with the same operands
-        // (`llssa_to_llvm::reduce_shift_count`). Every shift opcode routes its amount through here
-        // rather than using it raw, which is what keeps the two backends agreeing.
+        // Out of range: reduced modulo the width, as `llssa_to_llvm::reduce_shift_count` does.
         assert_eq!(shift_amount(8, 8), 0);
         assert_eq!(shift_amount(9, 8), 1);
         assert_eq!(shift_amount(64, 64), 0);
@@ -5003,9 +6559,8 @@ mod tests {
             }
         }
 
-        // Below the lane's top width the reduction is a real modulo, and the high limb carries
-        // bits the modulus can see. The top width is the exhaustive block above, where it is a
-        // mask instead, so it is the one width this loop drops.
+        // Below the top width the reduction is a true modulo that reads the high limb. The top
+        // width, where it is a mask, is covered above.
         let top = *double_lane_widths().last().expect("the lane holds a width");
         for bits in double_lane_widths().into_iter().filter(|bits| *bits < top) {
             for lo in [0u64, 1, 63, 64, 95, 96, 1 << 32, u64::MAX] {
@@ -5048,9 +6603,8 @@ mod tests {
             Int128::default()
         );
 
-        // `INT_MIN / -1` is the other input the host aborts on, and only at the host's own width:
-        // below 64 the `i64` division succeeds and the mask brings it back, and the 64-bit case
-        // is held to that same wrapping rather than to the host's abort.
+        // `INT_MIN / -1` aborts the host only at 64 bits; below, the `i64` division succeeds and
+        // the mask wraps it. The 64-bit case is held to the same wrap.
         assert_eq!(
             cell_sdiv(0x80, 0xFF, 8),
             0x80,
@@ -5166,13 +6720,9 @@ mod int_semantics_conformance {
 
     use super::*;
 
-    /// Every width the `_int` lane can hold, including the non-powers of two.
-    ///
-    /// The odd widths are here because these bodies are width-generic in both the VM and the
-    /// model: they take `bits` and mask by it, so nothing about them is specific to the five
-    /// widths Noir can name. Shifts share the set: `shift_amount` reduces the amount modulo the
-    /// width rather than masking it by `bits - 1`, which is the model's reduction at every width
-    /// and not only at a power of two.
+    /// Every width the `_int` lane can hold, including the non-powers of two: the bodies and the
+    /// model take `bits` and mask by it, and `shift_amount` reduces modulo the width, so nothing
+    /// ties them to Noir's five widths.
     fn lane_widths() -> Vec<u64> {
         corners::widths()
             .iter()
@@ -5189,10 +6739,8 @@ mod int_semantics_conformance {
     /// through the dispatch loop.
     fn int_lane(op: IntOp, bits: u64, a: u64, b: u64) -> u64 {
         match op {
-            // Add, sub and mul come in a signed pair in the model because they differ in _when they
-            // fail_. By the time an opcode runs the guard IR has already decided. So both members
-            // map to one body here, which is the same reason `residue` and not `eval` is what this
-            // lane is held to.
+            // The signed and unsigned add, sub and mul differ only in when they fail, which guard
+            // IR decides, so both map to one body; hence this lane is held to `residue`.
             IntOp::UAdd | IntOp::SAdd => cell_add(a, b, bits),
             IntOp::USub | IntOp::SSub => cell_sub(a, b, bits),
             IntOp::UMul | IntOp::SMul => cell_mul(a, b, bits),
@@ -5203,9 +6751,8 @@ mod int_semantics_conformance {
             IntOp::And => cell_and(a, b),
             IntOp::Or => cell_or(a, b),
             IntOp::Xor => cell_xor(a, b),
-            // A left shift is one map on the bit pattern, so there is no signed form to dispatch
-            // to; what a signed `<<` additionally rejects is a negative amount, and that rejection
-            // is guard IR's rather than an opcode's. The model has one `Shl` for the same reason.
+            // Both readings shift left alike, so there is one opcode; a signed `<<`'s rejection of
+            // a negative amount is guard IR. The model likewise has one `Shl`.
             IntOp::Shl => cell_shl(a, b, bits),
             IntOp::UShr => cell_ushr(a, b, bits),
             IntOp::SShr => cell_ashr(a, b, bits),
@@ -5248,7 +6795,7 @@ mod int_semantics_conformance {
     /// distinguish.
     fn operand_pairs(op: IntOp, bits: usize) -> Vec<(u128, u128)> {
         let rhs = if op.is_shift() {
-            corners::shift_amounts(bits, bits)
+            corners::shift_amounts(bits)
         } else {
             corners::values(bits)
         };
@@ -5260,19 +6807,18 @@ mod int_semantics_conformance {
 
     /// The host word a model answer denotes.
     ///
-    /// The VM holds its integers in `u64` frame cells and this sweep compares cells, so a pattern
-    /// exists only for the length of a call into the model. It is the one evaluator whose value
-    /// domain _is_ the machine's, which is why it carries no `IntBits` of its own.
+    /// The VM holds integers in `u64` frame cells and this sweep compares cells, so a pattern
+    /// exists only inside a call into the model.
     fn host(value: &IntBits) -> u128 {
         u128::try_from(value).expect("a pattern this sweep builds fits a host word")
     }
 
     /// `residue` on the host words either side of it.
-    fn model(op: IntOp, bits: usize, a: u128, rhs_bits: usize, b: u128) -> Option<u128> {
+    fn model(op: IntOp, bits: usize, a: u128, b: u128) -> Option<u128> {
         residue(
             op,
             &IntBits::from_u128(bits, a),
-            &IntBits::from_u128(rhs_bits, b),
+            &IntBits::from_u128(bits, b),
         )
         .map(|v| host(&v))
     }
@@ -5301,13 +6847,7 @@ mod int_semantics_conformance {
                     );
 
                     // Rule 1, where the model has an opinion.
-                    if let Some(want) = model(
-                        op,
-                        bits as usize,
-                        u128::from(a),
-                        bits as usize,
-                        u128::from(b),
-                    ) {
+                    if let Some(want) = model(op, bits as usize, u128::from(a), u128::from(b)) {
                         assert_eq!(
                             u128::from(got),
                             want,
@@ -5344,7 +6884,7 @@ mod int_semantics_conformance {
                         "{op:?} at {bits} bits left {a:#x} {b:#x} outside the width"
                     );
 
-                    if let Some(want) = model(op, bits as usize, a, bits as usize, b) {
+                    if let Some(want) = model(op, bits as usize, a, b) {
                         assert_eq!(
                             got.to_u128(),
                             want,
@@ -5459,8 +6999,8 @@ mod int_semantics_conformance {
         }
     }
 
-    /// The wide lane's spread and unspread, over buffers of exactly the cells the frame gives each
-    /// operand, which is where a stream shorter than its operand's limbs runs out.
+    /// The bodies of `spread_intn` and `unspread_intn`, over buffers of exactly the cells the frame
+    /// gives each operand, which is where a stream shorter than its operand's limbs runs out.
     ///
     /// Every buffer starts as garbage, as a frame cell does, and every answer is compared limb for
     /// limb, so a cell the body failed to clear or a bit left above the result's width shows.
@@ -5477,7 +7017,11 @@ mod int_semantics_conformance {
                         let want = value.spread(read);
                         let mut res = vec![GARBAGE; want.limb_count()];
                         mavros_limb_arith::spread(&mut res, value.limbs(), read);
-                        assert_eq!(res, want.limbs(), "spread_intn of {read} bits of {value:?}");
+                        assert_eq!(
+                            res,
+                            want.limbs(),
+                            "limb_arith::spread of {read} bits of {value:?}"
+                        );
                     }
                 }
                 if bits >= 2 {
@@ -5489,7 +7033,7 @@ mod int_semantics_conformance {
                         assert_eq!(
                             (odd.as_slice(), even.as_slice()),
                             (want_odd.limbs(), want_even.limbs()),
-                            "unspread_intn of {read} bits of {value:?}"
+                            "limb_arith::unspread of {read} bits of {value:?}"
                         );
                     }
                 }

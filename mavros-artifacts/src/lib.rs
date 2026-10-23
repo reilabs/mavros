@@ -1,12 +1,17 @@
 pub mod field;
+pub mod manifest;
 
-use std::{collections::BTreeMap, fmt::Display};
+use std::{cell::OnceCell, collections::BTreeMap, fmt::Display, ops::Deref};
 
-use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest as _, Sha256};
 use tracing::error;
 
-pub use field::{Bn254Field, FieldConfig, FieldElement, FieldId, MavrosField};
+pub use field::{FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField};
+pub use manifest::{
+    ArtifactError, ManifestParam, ParamVisibility, R1CS_ARTIFACT_DIGEST_DOMAIN,
+    R1CS_ARTIFACT_FORMAT_VERSION, R1CS_ARTIFACT_MAGIC, R1CSArtifact, ReturnSlot, WitnessManifest,
+};
 
 // FIELD-ASSUMPTION: L1-alias
 pub type Field = ark_bn254::Fr;
@@ -316,37 +321,41 @@ mod flamegraph_profile_tests {
 // Linear constraint helpers
 // ---------------------------------------------------------------------------
 
-pub type LC = Vec<(usize, Field)>;
+pub type LC<F = Field> = Vec<(usize, F)>;
 
+// A coefficient is written as its `F::CANONICAL_LIMBS` canonical limbs, a fixed-size array, so the
+// encoding carries no length: four limbs for bn254, pinned by
+// `r1cs_coefficients_serialize_as_their_canonical_limbs`, and one for Goldilocks.
 mod lc_serde {
     use super::*;
 
-    // FIELD-ASSUMPTION: L1-serde
-    pub fn serialize<S>(lc: &[(usize, ark_bn254::Fr)], serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<F, S>(lc: &[(usize, F)], serializer: S) -> Result<S::Ok, S::Error>
     where
+        F: MavrosField,
         S: Serializer,
     {
-        let converted: Vec<(usize, [u64; 4])> = lc
+        let converted: Vec<(usize, F::Limbs)> = lc
             .iter()
-            .map(|(idx, coeff)| (*idx, coeff.into_bigint().0))
+            .map(|(idx, coeff)| (*idx, coeff.to_canonical_limbs()))
             .collect();
         converted.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<(usize, ark_bn254::Fr)>, D::Error>
+    pub fn deserialize<'de, F, D>(deserializer: D) -> Result<Vec<(usize, F)>, D::Error>
     where
+        F: MavrosField,
         D: Deserializer<'de>,
     {
-        let converted: Vec<(usize, [u64; 4])> = Deserialize::deserialize(deserializer)?;
-        Ok(converted
+        let converted: Vec<(usize, F::Limbs)> = Deserialize::deserialize(deserializer)?;
+        converted
             .into_iter()
             .map(|(idx, limbs)| {
-                (
-                    idx,
-                    ark_bn254::Fr::from_bigint(BigInt(limbs)).expect("Invalid field element"),
-                )
+                let coeff = F::from_canonical_limbs(limbs.as_ref()).ok_or_else(|| {
+                    serde::de::Error::custom("coefficient is not a canonical field element")
+                })?;
+                Ok((idx, coeff))
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -355,25 +364,27 @@ mod lc_serde {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct R1C {
+#[serde(bound = "F: MavrosField")]
+pub struct R1C<F = Field> {
     #[serde(with = "lc_serde")]
-    pub a: LC,
+    pub a: LC<F>,
     #[serde(with = "lc_serde")]
-    pub b: LC,
+    pub b: LC<F>,
     #[serde(with = "lc_serde")]
-    pub c: LC,
+    pub c: LC<F>,
 }
 
-// FIELD-ASSUMPTION: L4-sign
-fn field_to_string(c: ark_bn254::Fr) -> String {
-    if c.into_bigint() > Field::MODULUS_MINUS_ONE_DIV_TWO {
+/// `c` as a signed integer: negative when it is past `(p - 1) / 2`, which is when it exceeds
+/// `-c = p - c`.
+fn field_to_string<F: MavrosField>(c: F) -> String {
+    if c.canonical_cmp(-c) == std::cmp::Ordering::Greater {
         format!("-{}", -c)
     } else {
         c.to_string()
     }
 }
 
-impl Display for R1C {
+impl<F: MavrosField> Display for R1C<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let a_str = self
             .a
@@ -450,10 +461,9 @@ impl TableKind {
 // Witness & constraints layout
 // ---------------------------------------------------------------------------
 
+/// Witness section sizes. [`WitnessManifest`] records parameter and return positions.
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct WitnessLayout {
-    pub guard_index: Option<usize>,
-    pub return_len: usize,
     pub algebraic_size: usize,
     pub multiplicities_size: usize,
 
@@ -565,19 +575,86 @@ impl ConstraintsLayout {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct R1CS {
+#[serde(bound = "F: MavrosField")]
+pub struct R1CS<F = Field> {
     pub witness_layout: WitnessLayout,
     pub constraints_layout: ConstraintsLayout,
-    pub constraints: Vec<R1C>,
+    pub constraints: Vec<R1C<F>>,
 }
 
-impl R1CS {
+/// The value of the linear combination `terms` over `witness`.
+fn evaluate<F: MavrosField>(terms: &[(usize, F)], witness: &[F]) -> F {
+    terms
+        .iter()
+        .fold(F::ZERO, |sum, (i, coeff)| sum + *coeff * witness[*i])
+}
+
+/// Domain separator of [`R1CS::digest`]; bump it when the preimage encoding changes.
+pub const R1CS_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-digest-v1\0";
+
+/// The `u32` tag naming `field` in the artifact header and in digests.
+pub fn field_tag(field: FieldId) -> u32 {
+    u32::try_from(field.code()).expect("field codes fit in u32")
+}
+
+impl<F: MavrosField> R1CS<F> {
+    /// SHA-256 over [`R1CS_DIGEST_DOMAIN`], the field tag (`u32` LE) and the bincode encoding of
+    /// this system: every layout and every coefficient. The same system over another field hashes
+    /// differently.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(R1CS_DIGEST_DOMAIN);
+        hasher.update(field_tag(F::ID).to_le_bytes());
+        bincode::serialize_into(&mut hasher, self)
+            .expect("hashing an R1CS cannot fail: the hasher accepts every byte");
+        hasher.finalize().into()
+    }
+}
+
+/// An immutable constraint system; derefs to the [`R1CS`]. Its digest is computed on first use.
+#[derive(Clone, Debug)]
+pub struct SealedR1CS<F: MavrosField = Field> {
+    system: R1CS<F>,
+    digest: OnceCell<[u8; 32]>,
+}
+
+impl<F: MavrosField> Deref for SealedR1CS<F> {
+    type Target = R1CS<F>;
+
+    fn deref(&self) -> &R1CS<F> {
+        &self.system
+    }
+}
+
+impl<F: MavrosField> SealedR1CS<F> {
+    pub fn new(system: R1CS<F>) -> Self {
+        Self {
+            system,
+            digest: OnceCell::new(),
+        }
+    }
+
+    pub fn field(&self) -> FieldId {
+        F::ID
+    }
+
+    /// Use [`R1CSArtifact::digest`] to also bind the witness manifest.
+    pub fn digest(&self) -> [u8; 32] {
+        *self.digest.get_or_init(|| self.system.digest())
+    }
+
+    pub fn system(&self) -> &R1CS<F> {
+        &self.system
+    }
+}
+
+impl<F: MavrosField> R1CS<F> {
     pub fn compute_derivatives(
         &self,
-        coeffs: &[Field],
-        res_a: &mut [Field],
-        res_b: &mut [Field],
-        res_c: &mut [Field],
+        coeffs: &[F],
+        res_a: &mut [F],
+        res_b: &mut [F],
+        res_c: &mut [F],
     ) {
         for (r1c, coeff) in self.constraints.iter().zip(coeffs.iter()) {
             for (a_ix, a_coeff) in r1c.a.iter() {
@@ -595,32 +672,25 @@ impl R1CS {
     /// The index of the first constraint `witness` does not satisfy, or [`None`] if it satisfies
     /// them all.
     ///
-    /// Asks only whether the witness satisfies the system, taking no `a`/`b`/`c` vectors alongside
-    /// it: unlike [`Self::check_witgen_output`] it can judge a witness no witness generator
-    /// produced.
-    ///
-    /// `witness` is the two halves concatenated, pre-commitment first, exactly as
-    /// [`Self::check_witgen_output`] joins them.
+    /// Unlike [`Self::check_witgen_output`] it needs no `a`/`b`/`c` vectors, so it can judge a
+    /// witness no generator produced. `witness` is the pre-commitment half followed by the rest.
     ///
     /// # Panics
     ///
     /// If `witness` is shorter than the highest column index any constraint names.
-    pub fn unsatisfied_constraint(&self, witness: &[Field]) -> Option<usize> {
-        let evaluate = |terms: &[(usize, Field)]| -> Field {
-            terms.iter().map(|(i, coeff)| *coeff * witness[*i]).sum()
-        };
-        self.constraints
-            .iter()
-            .position(|r1c| evaluate(&r1c.a) * evaluate(&r1c.b) != evaluate(&r1c.c))
+    pub fn unsatisfied_constraint(&self, witness: &[F]) -> Option<usize> {
+        self.constraints.iter().position(|r1c| {
+            evaluate(&r1c.a, witness) * evaluate(&r1c.b, witness) != evaluate(&r1c.c, witness)
+        })
     }
 
     pub fn check_witgen_output(
         &self,
-        pre_comm_witness: &[Field],
-        post_comm_witness: &[Field],
-        a: &[Field],
-        b: &[Field],
-        c: &[Field],
+        pre_comm_witness: &[F],
+        post_comm_witness: &[F],
+        a: &[F],
+        b: &[F],
+        c: &[F],
     ) -> bool {
         let witness = [pre_comm_witness, post_comm_witness].concat();
         if a.len() != self.constraints_layout.size() {
@@ -636,23 +706,9 @@ impl R1CS {
             return false;
         }
         for (i, r1c) in self.constraints.iter().enumerate() {
-            let av = r1c
-                .a
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
-
-            let bv = r1c
-                .b
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
-
-            let cv = r1c
-                .c
-                .iter()
-                .map(|(i, c)| c * &witness[*i])
-                .sum::<ark_bn254::Fr>();
+            let av = evaluate(&r1c.a, &witness);
+            let bv = evaluate(&r1c.b, &witness);
+            let cv = evaluate(&r1c.c, &witness);
             let mut fail = false;
             if av * bv != cv {
                 error!(message = %"R1CS constraint failed to verify", index = i);
@@ -677,7 +733,7 @@ impl R1CS {
         true
     }
 
-    pub fn check_ad_output(&self, coeffs: &[Field], a: &[Field], b: &[Field], c: &[Field]) -> bool {
+    pub fn check_ad_output(&self, coeffs: &[F], a: &[F], b: &[F], c: &[F]) -> bool {
         let mut a = a.to_vec();
         let mut b = b.to_vec();
         let mut c = c.to_vec();
@@ -694,19 +750,19 @@ impl R1CS {
         }
         let mut wrongs = 0;
         for i in 0..a.len() {
-            if a[i] != Field::ZERO {
+            if a[i] != F::ZERO {
                 if wrongs == 0 {
                     error!(message = %"Wrong A deriv for witness", index = i);
                 }
                 wrongs += 1;
             }
-            if b[i] != Field::ZERO {
+            if b[i] != F::ZERO {
                 if wrongs == 0 {
                     error!(message = %"Wrong B deriv for witness", index = i);
                 }
                 wrongs += 1;
             }
-            if c[i] != Field::ZERO {
+            if c[i] != F::ZERO {
                 if wrongs == 0 {
                     error!(message = %"Wrong C deriv for witness", index = i);
                 }
@@ -726,18 +782,17 @@ impl R1CS {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputValueOrdered {
-    Field(Field),
+pub enum InputValueOrdered<F = Field> {
+    Field(F),
     String(String),
-    Vec(Vec<InputValueOrdered>),
-    Struct(Vec<(String, InputValueOrdered)>),
+    Vec(Vec<InputValueOrdered<F>>),
+    Struct(Vec<(String, InputValueOrdered<F>)>),
 }
 
-impl InputValueOrdered {
+impl<F: MavrosField> InputValueOrdered<F> {
     pub fn field_sizes(&self) -> Vec<usize> {
         match self {
-            // FIELD-ASSUMPTION: L1-serde
-            InputValueOrdered::Field(_) => vec![4],
+            InputValueOrdered::Field(_) => vec![F::STORAGE_CELLS],
             InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
             InputValueOrdered::Vec(_) => vec![1],
             InputValueOrdered::Struct(fields) => {
@@ -748,5 +803,47 @@ impl InputValueOrdered {
                 total_size
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod r1c_tests {
+    use super::*;
+
+    /// A coefficient past `(p - 1) / 2` displays as the negative integer it stands for, with `p`
+    /// the modulus of the coefficient's field.
+    #[test]
+    fn coefficients_display_signed_in_their_field() {
+        fn shown<F: MavrosField>(coeffs: [F; 3]) -> String {
+            R1C {
+                a: vec![(1, coeffs[0])],
+                b: vec![(2, coeffs[1])],
+                c: vec![(3, coeffs[2])],
+            }
+            .to_string()
+        }
+        let expected = "(-1 * v1) * (5 * v2) - (-2 * v3) = 0";
+        let bn254 = |n: i64| -> Field {
+            if n < 0 {
+                -Field::from(n.unsigned_abs())
+            } else {
+                Field::from(n as u64)
+            }
+        };
+        assert_eq!(shown([bn254(-1), bn254(5), bn254(-2)]), expected);
+        assert_eq!(
+            shown([
+                Goldilocks::from(-1i64),
+                Goldilocks::from(5u64),
+                Goldilocks::from(-2i64)
+            ]),
+            expected
+        );
+        // `(p - 1) / 2` is the largest positive value, and the next one is negative.
+        let half = Goldilocks::from((field::goldilocks::MODULUS - 1) / 2);
+        assert_eq!(
+            shown([half, half + Goldilocks::ONE, Goldilocks::ZERO]),
+            format!("({half} * v1) * (-{half} * v2) - (0 * v3) = 0")
+        );
     }
 }

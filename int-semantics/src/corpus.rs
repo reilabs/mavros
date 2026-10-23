@@ -340,10 +340,8 @@ fn rejecting_test(op: IntOp, sign: Sign, reason: Reject, case: Case) -> Option<G
     })
 }
 
-/// A `bits`-wide pattern from the host word this generator carries its values as.
-///
-/// The generator is host-typed throughout — it sorts, deduplicates and formats these as Noir
-/// literals — so an [`IntBits`] exists here only for the length of a call into the model.
+/// A `bits`-wide pattern from a host word. The generator works in host words (it sorts, dedups and
+/// formats them as Noir literals), so an [`IntBits`] exists only for a call into the model.
 fn pattern(bits: usize, value: u128) -> IntBits {
     IntBits::from_u128(bits, value)
 }
@@ -391,7 +389,7 @@ fn negative_amount_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(u
     }
 
     let bits = *widths_for(sign).last()?;
-    let amounts: Vec<u128> = corners::shift_amounts(bits, bits)
+    let amounts: Vec<u128> = corners::shift_amounts(bits)
         .into_iter()
         .filter(|&a| pattern(bits, a).to_signed() < SignedValue::from(0u8))
         .collect();
@@ -426,7 +424,7 @@ fn first_rejection(op: IntOp, sign: Sign, reason: Reject) -> Option<(usize, u128
 fn search_rejection(op: IntOp, reason: Reject, widths: &[usize]) -> Option<(usize, u128, u128)> {
     for &bits in widths {
         let rhs_values = if op.is_shift() {
-            corners::shift_amounts(bits, bits)
+            corners::shift_amounts(bits)
         } else {
             corners::values(bits)
         };
@@ -589,16 +587,15 @@ const fn reason_name(reason: Reject) -> &'static str {
 
 /// The Noir **types** worth declaring an operation's operands as.
 ///
-/// A `Sign` here is a fact about the generated _source_, not about the model: it picks `u8` over
-/// `i8` in a signature and how a literal is spelled, which is all `Pool` and [`literal`] use it
-/// for.
-/// An operation names its own reading, so the type and the reading coincide wherever there is one.
-/// Where there is not, both types are worth generating anyway, because a signed _type_ takes its
-/// own route through the lowering even when the operation cannot tell the difference. How many
-/// pairs that is worth is [`PAIRS_PER_READING_BLIND_CELL`].
+/// A `Sign` here describes the generated _source_, not the model: it chooses `u8` or `i8` in a
+/// signature and how a literal is spelled, which is all `Pool` and [`literal`] use it for.
 ///
-/// The result is twenty `(op, sign)` pairs: twelve operations that name a reading, once each, plus
-/// `And`/`Or`/`Xor`/`Shl` twice each.
+/// An operation that names a reading gets the matching type. One that does not gets both types,
+/// because a signed _type_ takes a different route through the lowering even when the operation
+/// cannot tell the difference; [`PAIRS_PER_READING_BLIND_CELL`] sets how many pairs each gets.
+///
+/// The result is twenty `(op, sign)` pairs: the twelve operations that name a reading once each,
+/// and `And`/`Or`/`Xor`/`Shl` twice each.
 fn renderings(op: IntOp) -> Vec<Sign> {
     op.sign()
         .map_or_else(|| Sign::ALL.to_vec(), |sign| vec![sign])
@@ -620,7 +617,7 @@ fn widths_for(sign: Sign) -> &'static [usize] {
 /// The corners are where the boundary bugs live: `bits - 1` is the largest legal amount and
 /// `bits / 2` sits where a decomposition changes shape.
 fn in_range_amounts(bits: usize) -> Vec<u128> {
-    corners::shift_amounts(bits, bits)
+    corners::shift_amounts(bits)
         .into_iter()
         .filter(|&a| a < bits as u128)
         .collect()
@@ -819,8 +816,9 @@ mod tests {
             let (bits, _, rhs) = negative_amount_rejection(op, Sign::Signed, Reject::ShiftAmount)
                 .unwrap_or_else(|| panic!("{op:?} generates no negative-amount program"));
             // `shift_guard` compares at no fewer than 64 bits, and a narrower amount's widening
-            // clears the sign bit that the conjunct reads.
-            assert!(bits >= 64, "the conjunct is dead below 64 bits");
+            // clears the sign bit that the conjunct reads. So the case is live only at `i64`, the
+            // widest signed type Noir names.
+            assert_eq!(bits, 64, "the conjunct is dead below 64 bits");
             assert!(
                 pattern(bits, rhs).to_signed() < SignedValue::from(0u8),
                 "the amount is not negative"
@@ -854,19 +852,33 @@ mod tests {
     /// No generated program names a width Noir does not have, or a signed width it cannot name.
     #[test]
     fn no_program_names_a_width_that_does_not_exist() {
-        for &op in &IntOp::ALL {
-            for sign in renderings(op) {
-                for &bits in widths_for(sign) {
-                    assert!(
-                        NOIR_WIDTHS.contains(&bits),
-                        "{bits} is not a Noir integer width"
-                    );
-                    if sign == Sign::Signed {
-                        assert!(bits != 128, "Noir has no i128");
-                    }
-                }
+        assert_eq!(NOIR_SIGNED_WIDTHS, [8, 16, 32, 64], "Noir has no i128");
+        let mut named = 0;
+        for test in accepting_tests().into_iter().chain(rejecting_tests()) {
+            let words = test
+                .main_nr
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+            for word in words {
+                let (widths, rest) = match word.split_at_checked(1) {
+                    Some(("u", rest)) => (&NOIR_WIDTHS[..], rest),
+                    Some(("i", rest)) => (&NOIR_SIGNED_WIDTHS[..], rest),
+                    _ => continue,
+                };
+                let Ok(bits) = rest.parse::<usize>() else {
+                    continue;
+                };
+                named += 1;
+                assert!(
+                    widths.contains(&bits),
+                    "{}: `{word}` is not an integer type Noir can name",
+                    test.name
+                );
             }
         }
+        assert!(
+            named > 0,
+            "no program names an integer type, so this checked nothing"
+        );
     }
 
     /// Every parameter a generated program declares is used by its body.

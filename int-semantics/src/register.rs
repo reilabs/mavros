@@ -13,7 +13,7 @@ pub struct Conformance {
 /// One evaluator, and everything that ties it to the model.
 #[derive(Clone, Copy, Debug)]
 pub struct Evaluator {
-    /// Its short name, which is also the heading it has in `docs/int-semantics.md`.
+    /// Its short name, which is also its row's tag in `docs/int-semantics.md`'s register table.
     pub tag: &'static str,
 
     /// What it is, in a few words.
@@ -168,6 +168,10 @@ pub const EVALUATORS: &[Evaluator] = &[
                 test: "the_spread_opcodes_survive_the_round_trip_through_dispatch",
             },
             Conformance {
+                path: "vm/src/bytecode.rs",
+                test: "every_wide_opcode_agrees_with_the_model_through_dispatch",
+            },
+            Conformance {
                 path: "vm/src/int_limbs.rs",
                 test: "the_intn_lane_agrees_with_the_model",
             },
@@ -190,7 +194,8 @@ pub const EVALUATORS: &[Evaluator] = &[
         what: "the LLVM backend, used for WASM",
         relation: "the VM's, read three ways because no one reading reaches the whole backend: \
                    LLVM's own constant folder for the instructions it emits, the runtime helpers' \
-                   bodies directly for the wide sum, difference, multiply, divisions and spreads \
+                   bodies directly for the wide sum, difference, multiply, divisions, shifts, \
+                   comparisons and spreads \
                    the folder cannot see through a call, and a wasm engine for the lowering built \
                    around those calls, which is the one shape the folder is deliberately never \
                    handed",
@@ -217,6 +222,10 @@ pub const EVALUATORS: &[Evaluator] = &[
                 test: "the_routed_lowering_agrees_with_the_model_through_wasm",
             },
             Conformance {
+                path: "compiler/src/compiler/codegen/llssa_to_llvm.rs",
+                test: "the_routed_shifts_and_comparisons_agree_with_the_model_through_wasm",
+            },
+            Conformance {
                 path: "wasm-runtime/src/lib.rs",
                 test: "the_helper_multiply_agrees_with_the_model",
             },
@@ -231,6 +240,10 @@ pub const EVALUATORS: &[Evaluator] = &[
             Conformance {
                 path: "wasm-runtime/src/lib.rs",
                 test: "the_helper_spreads_and_unspreads_agree_with_the_model",
+            },
+            Conformance {
+                path: "wasm-runtime/src/lib.rs",
+                test: "the_helper_shifts_and_orderings_agree_with_the_model",
             },
             Conformance {
                 path: "compiler/tests/bigints/main.rs",
@@ -279,6 +292,7 @@ pub const EVALUATORS: &[Evaluator] = &[
             "compiler/src/compiler/passes/shared/shift_guard.rs",
             "compiler/src/compiler/passes/instruction_lowering/witness_bitwise.rs",
             "compiler/src/compiler/passes/instruction_lowering/witness_integer_arith.rs",
+            "compiler/src/compiler/passes/wide_witness_ints/mod.rs",
         ],
         conformance: &[
             // The one predicate here that _deletes_ a check rather than building one, and so the
@@ -299,6 +313,30 @@ pub const EVALUATORS: &[Evaluator] = &[
             Conformance {
                 path: "int-semantics/tests/generated_corpus.rs",
                 test: "the_generated_corpus_matches_the_model",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "limbed_sums_differences_and_orderings_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "limbed_products_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "limbed_quotients_and_remainders_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "limbed_shifts_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "a_signed_sum_difference_or_ordering_agrees_with_the_model_either_side_of_the_chain",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "a_signed_product_quotient_or_right_shift_agrees_with_the_model_past_the_host_word",
             },
         ],
     },

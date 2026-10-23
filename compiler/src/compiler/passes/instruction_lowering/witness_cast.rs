@@ -12,22 +12,19 @@ use super::{InstructionLoweringRule, LoweringContext};
 
 /// Puts the bit window that truncates in front of a narrowing `Cast` of a witnessed operand.
 ///
-/// A witnessed integer **is** a field element, and a `Cast` carries it through unchanged, as
-/// `hlssa_to_r1cs::Value::cast` passes a linear combination through as it is. Narrowing one
-/// therefore discards nothing, while the result is declared at a width that excludes bits still in
-/// that field element. This means that the honest value fails a range-check that it should have
-/// passed, and results in a circuit that no witness satisfies, so we use a bit window to truncate
-/// it ahead of time.
+/// A witnessed integer **is** a field element, and a `Cast` passes it through unchanged (as
+/// `hlssa_to_r1cs::Value::cast` passes a linear combination through). So a narrowing cast discards
+/// nothing, yet its result is declared at a width that excludes bits still in the element. The
+/// honest value would then fail a range check it should pass, leaving a circuit no witness
+/// satisfies, so a bit window truncates it first.
 ///
-/// The window is emitted **in front of** the cast rather than in place of it, because a `BitRange`
-/// takes its result's type from its _source_: a window of the low 32 bits of an `int200` is an
-/// `int200` carrying a value below `2^32`. Replacing the cast with one would retype the cast's
-/// result and break every consumer.
+/// The window goes **in front of** the cast rather than replacing it, because a `BitRange` takes
+/// its result type from its _source_: the low 32 bits of an `int200` are an `int200` below `2^32`.
+/// Replacing the cast would retype its result and break every consumer.
 ///
-/// It reads a value range, but run inside `witness_integer_ops` it would also meet the pairs that
-/// phase mints for itself whose results postdate the analysis snapshot and so carry no range at
-/// all. Every one of those would be wrapped in a second, redundant window. A phase of its own gets
-/// a fresh analysis.
+/// This rule reads value ranges. Inside `witness_integer_ops` it would also meet the pairs that
+/// phase creates, whose results postdate the analysis snapshot and so have no range; each would
+/// get a second, redundant window. A separate phase gets a fresh analysis.
 pub struct LowerWitnessNarrowingCast {}
 
 impl LowerWitnessNarrowingCast {
@@ -70,17 +67,18 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
         }
 
         // A value already inside the target width has nothing to discard, so the cast is a relabel
-        // and the window would be constraints for nothing. This is the shape every program
-        // compiled from Noir takes: the frontend emits `bit_range(v, 0, n)` and then the cast, and
-        // the window's own transfer bounds the result by `2^n`.
+        // and the window would be constraints for nothing. A preceding bit window, for example,
+        // bounds its result by `2^n`. Wide integer casts have already been lowered into limb
+        // casts before this rule runs.
+        //
+        // The range domain stops tracking above `HOST_WORD_BITS`, so there a window is never
+        // discharged and a program that already narrowed by hand pays for a second one. Sound but
+        // not minimal.
         //
         // `proves_` rather than the bare predicate: a bottom range means "no execution reaches
         // here", and eliding a truncation on the strength of that is circular: the only reason the
         // value cannot occur would be the very check being skipped.
-        //
-        // Above `HOST_WORD_BITS` the range domain deliberately stops tracking, so a window there
-        // is never discharged and a program that already narrowed by hand pays for a second one.
-        // Sound but not minimal, and invisible to any width Noir can name.
+
         if context
             .urange(*value)
             .proves_fits_in_unsigned_bits(*to_bits)
@@ -98,15 +96,16 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
     }
 }
 
+// FIELD-ASSUMPTION: L1-noir-frontend
+// A witnessed `Field` source is left alone: the frontend puts `bit_range(v, 0, n)` before its cast.
 /// The declared width of `value` where it is a witnessed integer, and [`None`] otherwise.
 ///
-/// Only the witness domain is rewritten. A pure value is computed rather than constrained, and
+/// Only the witness domain is rewritten: a pure value is computed rather than constrained, and
 /// both backends truncate a narrowing cast at every width.
 ///
-/// Asked of the snapshot with `try_`, which is what makes this rule **idempotent**: a value it
-/// minted itself has no entry there, so meeting its own output declines rather than wrapping it in
-/// a second window. The driver does not re-offer an emitted instruction today, and this is what
-/// keeps that from being load-bearing.
+/// Looked up in the snapshot with `try_`, which makes this rule **idempotent**: a value this rule
+/// created has no entry there, so the rule declines it rather than wrapping it in a second window.
+/// The driver does not re-offer emitted instructions, but this keeps the rule correct if it did.
 fn witnessed_int_width(context: &LoweringContext<'_>, value: ValueId) -> Option<usize> {
     let ty = context.types().try_get_value_type(value)?;
     if !ty.is_witness_of() {

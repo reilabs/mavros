@@ -1,122 +1,136 @@
-# Integer Semantics in Mavros
+# Integers in Mavros
 
-Mavros compiles Noir, so the semantics of any given integer operation is up to Noir and not us. This
-document explains how we handle this distinction.
+While Mavros compiles Noir, the frontend it is integrated with goes beyond the standard Noir
+integers to instead support big integers natively. Integer types (and values) can be written for
+integers with anywhere from two bits to 16384 bits, and can be used without restriction in Noir
+code.
 
-We have one centralized [record](../int-semantics/) of the semantics, and every evaluator has to
-demonstrate a _relation_ to that model that can be checked in a test. This document is the
-human-readable counterpart to [`register.rs`](../int-semantics/src/register.rs), which is a
-best-effort check that this holds.
+An integer type `intN` is an `N`-bits-wide integer (created in Noir using `iN` or `uN` depending on
+the semantics you want), represented as a 2's compliment bit pattern. Every operation is supported
+on every integer size, allowing:
 
-## Noir as the Reference
+- arithmetic: `+`, `-`, `*`, `/`, `%`, under both readings;
+- comparisons: `==`, `<` (unsigned and signed), and assertions of each;
+- bitwise: `&`, `|`, `^`, `!`;
+- shifts: `<<`, logical `>>`, arithmetic `>>`;
+- casts: narrowing, widening, sign extension, `Field` to integer and integer to `Field`;
+- bit windows, and decompositions into bits or bytes (`to_bits`, `to_radix`);
+- spread and unspread, the bit-interleaving primitives behind lookup-based bitwise operations.
 
-The exact semantics of these operations are required to match the currently-pinned version of Noir,
-which is the one `compiler/Cargo.toml` names: tag `v1.0.0-beta.22`, commit
-`c57152f91260ecdb9faad4efc20abb14b6d2ece7`. Every citation below was read in that tree, so the table
-is re-checkable rather than merely plausible; a Noir bump is the point at which to read it again.
-Paths are relative to `noir/compiler/`.
+There is no distinction in ability or functionality between the integers that Noir supports
+upstream, and the expanded integer types allowed by the frontend Mavros is paired with. Arrays,
+slices, tuples, references, globals, function arguments, and so on are all supported just as for the
+native integers.
 
-| Rule                                      | Where                                                                 |
-| ----------------------------------------- | --------------------------------------------------------------------- |
-| what folds, and what counts as a failure  | `ir/instruction/binary.rs::eval_constant_binary_op`                   |
-| shift lowering and the amount bound       | `opt/remove_bit_shifts.rs::enforce_bitshift_rhs_lt_bit_size`          |
-| signed `div`/`mod`/`lt`                   | `opt/expand_signed_math.rs`                                           |
-| cast semantics                            | `ssa_gen/context.rs::insert_safe_cast`                                |
-| what may be dead-code eliminated          | `opt/die.rs` + `ir/instruction.rs::requires_acir_gen_predicate`       |
-| a rejection is a runtime failure          | `opt/remove_unreachable_instructions.rs`                              |
-| `iN as Field` is a type error, not a cast | `noirc_frontend/src/hir/type_check/errors.rs`                         |
-| unconstrained code gets the same checks   | `noirc_evaluator/src/brillig/…/brillig_binary.rs::add_overflow_check` |
+That said, there are currently a few small limits, most of which we hope to lift in future:
 
-The rules themselves:
+- **Parameters to and Returns from `main`:** The frontend permits only the standard integer types
+  (`u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, and `i64`) at this boundary, including
+  inside arrays and structs. Wider values can be assembled from arrays of these types inside a
+  program.
+- **Field Casts:** Casting an integer wider than the field modulus to a `Field` is a compile-time
+  error, because this would admit two integer values that produce the same field element (a
+  soundness hole).
+- **Wide Integers and WASM:** Currently the WASM runner places limits on the number of locals that a
+  function can host, as well as the stack size, so functions using extremely wide integers may fail
+  to compile at the moment.
 
-- **`+`, `-`, `*` reject on overflow**, in both constrained and unconstrained code. Noir's
-  `unchecked` flag is an internal SSA optimization that never reaches the monomorphized AST mavros
-  builds from, and `wrapping_add` and friends are stdlib functions that route through `Field` and
-  cast back.
-- **`/` and `%` reject a zero divisor**, and signed `INT_MIN / -1`. Signed division truncates toward
-  zero and the remainder takes the dividend's sign.
-- **`<<` rejects when the amount is at or past the operand's width**, and otherwise **wraps**:
-  `200u8 << 1` is `144`. Losing bits off the top is permissible. `>>` rejects on the same condition,
-  and is arithmetic for a signed operand and logical for an unsigned one.
-- **A shift's amount is typed as the left operand's own type.** Noir's elaborator unifies the two,
-  which is what makes checking the amount against `rhs_type.bit_size()` correct.
-- **An amount the guard IR failed to reject is reduced modulo the width**, not masked. The two
-  coincide at a power-of-two width. `reduced_shift_amount`, `vm::shift_amount` and
-  `llssa_to_llvm::reduce_shift_count` all reduce, which is what lets an integer be shifted at any
-  width rather than only a power of two.
-- **Casts** truncate the low bits when narrowing and sign-extend when widening a signed source.
-  `iN as Field` is not a cast at all: the frontend rejects it with "Only unsigned integer types may
-  be casted to Field".
-- **`uN as Field` carries the pattern's magnitude**, which is `BigUint::from(&IntBits)` and the same
-  number an unsigned reading of the same bits gives. There is no separate model operation for it
-  because there is nothing to decide: the cast is a raw-bits conversion. The embedding is partial as
-  the compiler admits integer widths only for which it is total. A magnitude >= `p` cannot be
-  represented injectively in the Field, so the compiler rejects a cast for any integer width that
-  could have a value with such a magnitude statically at compile time.
-- **A failing operation is not dead.** `die.rs` makes a `Binary` eliminable only when it does not
-  require an ACIR-gen predicate, and a checked `Add`/`Sub`/`Mul` — or a shift whose amount is
-  non-constant or out of range — does.
-- **A rejection is a runtime failure, not a compile error.** This is why the out-of-range tests live
-  in `noir_failure_tests/` and not in a compile-failure corpus. Mavros makes it happen in one of two
-  shapes: an unsatisfiable constraint, or (where the rejection is carried by a lookup's membership)
-  a witness-generation trap. Both reject the program; neither is a compile error.
-- **Unconstrained code follows the same rules.** Brillig's VM happens to answer `0` for an
-  over-shift, but `brillig_gen` emits the check ahead of the operation, so that fallback is
-  unreachable in generated code.
+## Semantics
 
-## The Model
+The semantics of integers in Mavros match those of upstream Noir, extended to the additional integer
+widths. In particular, the following all hold.
 
-`mavros-int-semantics` states the semantics as two functions, because "Noir rejects this" and "a
-total backend must still produce a bit pattern" are both crucial questions, but ones that have
-potentially different answers.
+- **`+`, `-` and `*` reject on overflow**, under the operation's reading. `wrapping_add` and its
+  relatives are stdlib functions that go through `Field` and cast back.
+- **`/` and `%` reject a zero divisor**, and signed `INT_MIN / -1` and `INT_MIN % -1`. Signed
+  division truncates toward zero, and the remainder takes the dividend's sign.
+- **`<<` and `>>` reject an amount at or past the width.** Otherwise `<<` wraps (`200u8 << 1` is
+  `144`), and `>>` is arithmetic for a signed reading and logical for an unsigned one. The amount
+  has the shifted value's type.
+- **Casts** keep the low bits when narrowing and sign-extend a signed source when widening.
+  `uN as Field` is the unsigned value; `iN as Field` is a type error in Noir.
+- **A witnessed `Field` to integer cast is a relabel.** Noir's `as` truncates with a bit window
+  first, so it truncates everywhere. The bare cast, as `mavros_stdlib`'s `unsafe_cast` uses it,
+  carries the element through unchanged and leaves the program to bound it with a later range check
+  or lookup. That bound is required: the compiler treats the result as within its width and drops
+  checks on that basis. On known values the cast reads the low bits, so the two agree whenever the
+  value fits.
+- **A rejection is a runtime failure**, not a compile error: an unsatisfiable constraint or a
+  witness-generation trap. A failing operation is never removed as dead code, and unconstrained code
+  follows the same rules.
+
+## For Developers
+
+The following sections are designed to be read by developers interacting with the way Mavros handles
+integers, and is not needed to simply use them.
+
+The frontend is pinned in `compiler/Cargo.toml` to `worldfnd/noir`'s `provekit-v2`. The fork extends
+integer widths and retains `BigInt` literals through monomorphization where Mavros subsequently
+lowers them directly to `IntBits`. The existing SSA oracle tests remain the arithmetic reference for
+these extended widths, while `compiler/tests/frontend_bigints.rs` also exercises the source and ABI
+boundaries.
+
+### Representation
+
+An integer known at compile time is stored as a bit pattern at its full width, and is computed by
+the VM or by WASM as needed. Witnessed integers are held in the constraint system as either:
+
+- **a single field element** if they are narrow enough to fit below the field modulus, or;
+- **a series of limbs** if they exceed the field modulus, where each limb is small enough to _not_
+  exceed the field modulus.
+
+The bit pattern representation is identical regardless of whether the source carried a signed or
+unsigned integer type. Internally to Mavros, the signedness is a property of the _operation_ rather
+than of the type, so the SSA types integers simply as `intN`.
+
+Operations are lowered to constraints depending on their representation, and those constraints
+ensure that the semantics match regardless of the underlying representation. The following are worth
+understanding:
+
+- **Overflow:** This is handled using a range check. A sum's top limb takes no carry out, so an
+  overflowing sum fails the range check on that limb. A subtraction that underflows leaves it
+  negative, which fails the same check. A product also holds every partial product past the top limb
+  to be zero in addition to the range-check on the top limb.
+- **Power of Two:** A shift multiplies or divides a value by a value in a lookup table of
+  `(n, 2^n)`. At a power-of-two width the tables keys are exactly the legal amounts, so the lookup
+  also rejects an amount past the width.
+- **Signed Operations:** These reuse the unsigned ones, and then apply additional checks as needed.
+  A signed sum or difference checks the sign bits and its answer against the carry out of the top
+  limb. Signed products, quotients and remainders check that the magnitude fits the signed range for
+  its sign. Arithmetic shifts are simply the logical shift with any vacated bits filled from the
+  sign.
+- **Witnessed Branches:** Inside a branch on a witness, an operation's checks are multiplied by the
+  branch condition, so the answer is zero where the branch is not taken (and hence a non-taken
+  branch cannot fail).
+- **Rejections:** These take one of two forms: an operation on a witness rejects through an
+  unsatisfiable constraint, and one on known values traps during witness generation.
+
+### Conformance
+
+The `mavros-int-semantics` crate states the expected semantics of Mavros' integers using two
+functions:
 
 ```rust
 pub fn eval(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Outcome; // Value(v) | Rejected(reason)
 pub fn residue(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits>;
 ```
 
-`eval` is **the Noir contract**: what an execution of this operation must do. Its four rejection
-reasons, `Overflow`, `DivByZero`, `DivOverflow`, `ShiftAmount`, are the list of ways an integer
-operation can fail, and each of them is enforced by a specific module of guard IR.
+- `eval` is **what Noir expects**. Its rejection reasons, `Overflow`, `DivByZero`, `DivOverflow` and
+  `ShiftAmount`, are every way an integer operation can fail.
+- `residue` is **what the backends' should do**: the pattern a total evaluator produces, including
+  on inputs `eval` rejects, so that no two backends disagree about a witness. `None` marks a zero
+  divisor and signed `INT_MIN / -1`, which LLVM leaves undefined; there, only the checks stand
+  between the program and an answer.
 
-`residue` is **the backend contract**: the deterministic pattern that a _total_ evaluator produces,
-including on inputs `eval` rejects. The VM cannot decline and nor can LLVM. What they must not do is
-answer _differently_ from each other, because differing can mean disagreeing about a witness, not
-only about a value. `residue` returning `None` means _deliberately unspecified_ — it says so for a
-zero divisor and for signed `INT_MIN / -1`, because LLVM calls those undefined and hence there is
-genuinely no shared answer. At an unspecified point the obligation sits solely on the guard IR, and
-an evaluator that reaches such a point is entitled to treat it as a compiler bug.
+`eval(p) == Value(v)` implies `residue(p) == Some(v)`. An `IntBits` carries its width and an `IntOp`
+its reading, so neither function takes either as a parameter, and both operands must have one width.
 
-The two are tied together inside the crate: `eval(p) == Value(v)` implies `residue(p) == Some(v)`.
-So conforming to `residue` on accepted inputs is conforming to Noir.
+Locations that implement the evaluation of integer semantics are checked for conformance using the
+`int-semantics/src/register.rs` which names each evaluator, the relation it owes the model, its
+files, and the tests that check the relation. Its tests fail if a registered file or test
+disappears, or if the sections below stop matching the register.
 
-Everything an operation needs is carried by the values it is given, which is why neither function
-takes a width or a signedness beside them. An `IntBits` is a `bits`-wide two's-complement pattern
-that knows its own width, so there is no width parameter for a caller to disagree with; and an
-`IntOp` names its own reading, so `UAdd` and `SAdd` are two operations rather than one operation and
-a flag. The reading is part of the operation because it changes the answer: `eval` rejects
-`200u8 + 100u8` and accepts the same two patterns read as `-56i8 + 100i8`.
-
-What remains is the rule that the operands must agree, and the model enforces it rather than
-assuming it: both operands must be one width for every operation except a shift. A shift's amount
-can legitimately be declared narrower than the value it shifts, and an amount's own width is the
-only thing that says what its bit pattern means.
-
-## What We Check
-
-The register in `int-semantics/src/register.rs` names each evaluator, the relation that holds for
-it, the files it lives in and the tests that check said relation. It asserts that every registered
-file still exists, that every registered relation still has a test of that name in the file that
-claims it, and that this document has exactly the registered tags as sections in the register's
-order. So a renamed test, a moved evaluator or a section added here without an entry there is a
-failing test rather than a document that has quietly stopped being true.
-
-None of that can catch a site nobody thought to register, so it also includes a best-effort sweep:
-every crate outside `int-semantics/` is searched for a `.wrapping_*` or `.overflowing_*` call, and
-any that is neither inside a registered evaluator nor on a short, reasoned waiver list fails the
-test.
-
-## The Register
+The following are the currently-registered evaluators.
 
 | Tag           | What                                    | Relation                            |
 | ------------- | --------------------------------------- | ----------------------------------- |
@@ -130,191 +144,15 @@ test.
 | `totality`    | the PRE totality oracle                 | total exactly where nothing rejects |
 | `guard-ir`    | the checks that make a rejection happen | rejects exactly what `eval` rejects |
 
-### `const-fold`: the SCCP Lattice's Constant Folder
+`int-semantics/src/corpus.rs` creates a Noir program from the model for every tuple of operation,
+reading, and rejection reason. Its operands are `main` parameters, so they are witnesses, which
+keeps constant folding out and drives each value through the checks, the witness lowering, R1CS, the
+VM and WASM.
 
-`analysis/click_cooper/lattice.rs`. The compiler's speculative folder: it runs long before the guard
-IR exists, on whatever constants the analysis happens to have proved.
+Each rejecting program asserts the `residue` answer, so deleting a check makes it pass, which its
+expect-failure run reports. Each reason is rendered at the narrowest rejecting width and, where the
+width decides the bound (`Overflow`, `ShiftAmount`, `DivOverflow`), at the widest too. The accepting
+programs check every width's values with `assert_eq`.
 
-The relation is **refinement** in both directions. It may answer `None` as declining to fold is
-always safe, but it may never answer a value the model does not give, and it may never fold an input
-the model **rejects**. That second half is the one that is easy to get wrong: folding an overflowing
-`2 + 254` at `u8` to `0` does not merely give a wrong answer, it _deletes a rejection_ the program
-was required to have, because the operation disappears along with it.
-
-The width discipline stays here rather than moving into the model. HLSSA types an `IntArith` result
-as `int{max(s1, s2)}`, so a fold that changed a constant's width would change the program's types;
-that is a rule about this IR, and the model has no opinion on it.
-
-### `specializer`: the Specializer's Fold at a Call Site
-
-`passes/specializer.rs`. It folds a callee body against one call site's arguments, and so mints
-constants the lattice never saw; "the lattice would have folded it correctly first" was never a
-defence for a second implementation here. The relation is therefore **delegation**: it evaluates no
-integer of its own. Its `cmp`, `arith`, `sext`, `bit_range`, `cast` and `not` are all calls into
-`const-fold`.
-
-### `r1cs-fold`: the R1CS Symbolic Executor
-
-`codegen/hlssa_to_r1cs.rs`. The **final** evaluator. It runs _after_ the guard IR, so an operation
-reaching it has already had its rejection enforced or proved unnecessary, and something has to be
-written into the constraint system. It must not decline.
-
-That makes `residue` its obligation rather than `eval`:
-
-- an accepted input produces Noir's value;
-- a rejected input the model still specifies produces the pattern every other backend produces, so
-  that a program mavros wrongly accepted is at least wrong the same way everywhere;
-- an input the model leaves unspecified is an ICE, because reaching one means the guard IR did not
-  run first, which is an ordering bug in the compiler rather than an error in the program.
-
-### `cost-model`: the Cost Interpreter
-
-`analysis/instrumenter.rs`. It estimates the circuit a specialization decision would produce, over
-dummy signature values. A wrong value here picks a different branch and changes the emitted program,
-so it **must be exact** on accepted inputs.
-
-The relation is **delegation to `residue`**, with `unwrap_or(0)` where the model declines.
-Everywhere the intended semantics _has_ an opinion, this agrees with it.
-
-### `vm`: the Bytecode Interpreter's Opcodes
-
-`vm/src/bytecode.rs` and `vm/src/int_limbs.rs`, with the wide lane's sum, difference, product,
-divisions, spread and unspread in `limb-arith/src/lib.rs`, which the WASM runtime's helpers share.
-
-This one does **not** delegate because it's a hot dispatch loop over `u64` cells, while the model
-computes over heap-backed limbs. Delegating would mean an allocation per opcode to compute an `eval`
-that is then discarded, which is not great for performance. That argument holds for the `_intn` lane
-too as a wide value is a run of frame cells computed over in place, so delegating would allocate an
-`IntBits` for each operand and one more for the result, on every opcode, and also prevent optimizing
-for performance due to `IntBits`' focus on readability.
-
-The relation is thus checked instead of enforced: **total, and equal to `residue` wherever the model
-specifies a pattern**. Total means no panic, no undefined behavior and no process abort — a witness
-generator that aborts reports nothing, where one that answers reports a failed execution. Every
-answer must also sit inside the operand width, which is the masked-cell invariant the rest of the
-interpreter relies on.
-
-### `llvm`: the LLVM Backend
-
-`codegen/llssa_to_llvm.rs` and `wasm-runtime/src/lib.rs`, with the wide helpers' bodies in
-`limb-arith/src/lib.rs`, which the VM shares. It emits instructions and never computes a value, so a
-Rust mirror of its choices would only be checking a copy. Instead the lowering itself is called with
-constant operands and we use LLVM's constant folder to check the answer.
-
-Above 128 bits LLVM expands a multiply into quadratic straight-line code -- 7.2 MB at 16384 bits,
-and past around 5700 bits a module no WASM engine will load. It expands a division into a bit-serial
-loop, which is linear but still about 20 000 WASM locals for one unoptimised `udiv` at 16384 bits,
-against an engine cap of 50 000 per function, and even an `add` or `sub` costs 3 500 to 4 400. To
-that end, the WASM runtime provides limb-based helpers: `__int_add`, `__int_sub` and `__int_mul` for
-the wrapping operations, and `__int_udivrem` and `__int_sdivrem`, which provide a quotient and a
-remainder together, for the four divisions. Above 128 bits each of those seven operations is emitted
-around a call to its helper, unless both operands are constants. A spread whose result, or an
-unspread whose operand, is wider than 128 bits calls `__int_spread` or `__int_unspread`, because the
-mask ladder that computes a narrower one runs in 128-bit masks.
-
-### `value-range`: the Interval Domain's Arithmetic
-
-`analysis/value_range_analysis.rs`. It answers a range rather than a value, so equality is not
-expressible. What it needs to provide is **soundness**: every value a model-_accepted_ execution can
-produce lies inside the range it answers.
-
-A rejected execution produces no value at all, so the analysis owes it nothing. That's what licenses
-the transfer to answer the non-wrapping interval for an operation that would overflow, rather than
-widening to the whole type.
-
-### `totality`: the PRE Totality Oracle
-
-`passes/partial_redundancy_elimination/totality.rs`. It decides whether an operation may be
-speculated to a point where it was not bound to execute. Speculating something that can reject would
-turn a program that succeeds into one that fails.
-
-The relation is a table check: a group may be answered an unconditional `true` **iff** the model
-rejects none of its inputs. The bitwise operations are the only ones that qualify. Driven off the
-model, so the day a rejection reason is added, this fails.
-
-### `guard-ir`: the Checks that Make a Rejection Happen
-
-`passes/shared/overflow_guard.rs`, `divmod_guard.rs` and `shift_guard.rs`, one per rejection reason
-plus `DivOverflow` sharing the division one. Every other entry in this register is about what an
-_accepted_ execution answers. This one is about which executions are accepted at all, and it is the
-only entry whose failure mode is a program Noir rejects producing a proof.
-
-Two of these rejections are stated twice, because a witness operand cannot be checked with a pure
-comparison: `witness_bitwise.rs` must provide the amount bound and `witness_integer_arith.rs`'s
-guarded rangechecks must overflow, both built out of constraints. Past `widest_cell_sum_bits`, the
-widest sum one field element holds, a sum or difference is rejected by the carry chain in
-`wide_witness_ints.rs` instead. An unsigned one lets no carry out of the top limb, so an overflow
-fails the range check on that limb of the answer. A signed one witnesses that carry and holds it to
-the sign bits of both operands and of the answer, `c + s_r == s_a + s_b` for a sum and
-`c + s_a == s_r + s_b` for a difference, which is exactly the answer's signed reading being the true
-result. Past the single cell's product, a signed product, quotient or remainder runs the unsigned
-gadgets on the operands' magnitudes: the schoolbook rejects a product of magnitudes past `2^N`, the
-division rejects a zero divisor, and one constraint on the top bit of the product's or quotient's
-magnitude holds it to `2^(N - 1) - 1 + s` for the sign `s` it takes, which rejects every other
-overflow and `INT_MIN / -1` with it, for the remainder too.
-
-A division by a witness is stated by its lowering: `divmod_guard.rs` builds it no check, because the
-`r < d` check of the unsigned division rejects a zero divisor and the range check on the signed
-quotient's magnitude rejects `INT_MIN / -1`, at every width. `DCE` keeps a dead one until that
-lowering has run, as until then the division is its own check.
-
-A **witness** shift amount at a power-of-two width gets no check as the powers-of-two table's keys
-are exactly the legal amounts, so `emit_pow2_factor`'s lookup rejects an out-of-range one as a side
-effect of reading the factor. At any other width the table has more rows than amounts, and the
-amount pays the explicit check as well.
-
-Every other case pays the explicit `emit_shift_amount_check`, which is a comparison for a pure
-amount and `bits - 1 - amount` range-checked at `ceil(log2(bits))` for a witnessed one. A **pure**
-amount pays it on either lowering (as the constant-amount one when the left-hand side is unsigned,
-the general one when it is signed) which is the common case. So does a witness amount the range
-domain has **pinned** to a literal, when the left-hand side is unsigned: there the check is emitted
-and then discharges itself against the same range that pinned the amount.
-
-Past the single cell, which is from 128 bits for a `<<` and 127 for a `>>` on bn254, every shift is
-`wide_witness_ints.rs`' instead. A witnessed amount is decomposed into whole limbs and a remainder
-the table bounds below a limb, and that decomposition is the amount's bound where it reaches exactly
-the width; elsewhere `bits - 1 - amount` is range-checked there. A pure amount is compared, as the
-guard IR compares one, under the shift's guard where it has one, and a known amount past the width
-is an assertion that cannot hold.
-
-Those restated rejections are registered alongside the `shared/` modules for that reason, and the
-pairs are held together by the corpus below, which renders every rejecting program with **witness**
-operands, and by the hand-written `pure_shift_amount_oob_fails` / `witness_shift_amount_oob_fails`
-pair that exercises one rejection down both routes.
-
-Mavros builds HLSSA straight from the monomorphized AST and never runs Noir's own SSA pipeline, so
-nothing upstream has already attached a failure to a failable operation. Every rejection in a
-compiled program is one of these modules having planted it. Each has three consumers that must not
-drift — the guarded lowering, the unguarded lowering, and DCE, which must keep the check when it
-deletes the operation, because Noir keeps a dead overflowing add.
-
-The relation is ensured end to end rather than by a unit test using the **generated rejection
-corpus**: `int-semantics/src/corpus.rs` renders one Noir program per `(operation, reading, reason)`
-from `eval` itself, each asserting the answer a total backend produces — `residue`, not `eval` — so
-that deleting the guard makes the program _pass_, which an expect-failure row reports as a failure.
-
-That corpus renders each cell at the **narrowest** width the model rejects at. On its own that is
-coverage of the _reasons_ and not of the arithmetic each check is built from, so an off-by-one in a
-width-dependent bound would be invisible to it. It therefore renders a second program at the
-**widest** rejecting width for the reasons whose bound the width actually decides — `Overflow`'s
-magnitude limits, `ShiftAmount`'s `amount < bits`, and `DivOverflow`'s `INT_MIN`. `DivByZero` gets
-no second program: its check is `rhs == 0`, the same test at every width. The accepting corpus is
-what checks every width for the operations themselves, and it is `assert_eq` on values rather than
-on whether the program ran.
-
-One predicate is outside both corpora by construction. `overflow_provably_impossible` **deletes** a
-check where the range domain proves nothing can fail, and a check that was wrongly deleted leaves no
-program behind to be rejected.
-
-## The Generated Corpus
-
-Every conformance test above calls an evaluator directly, which only ever reaches the _folding_
-path: a constant in, a constant out. The generated corpus checks the other one. Every operand is a
-`main` parameter and therefore a witness, which defeats constant folding outright and pushes the
-value through guard emission, the witness lowering, R1CS construction, the VM and the WASM backend,
-with an `assert_eq` that makes the answer visible to the existing R1CS-satisfaction oracle in every
-lane.
-
-It is generated from the model rather than written by hand.
-`MAVROS_BLESS=1 cargo test -p mavros-int-semantics --test generated_corpus` rewrites it, so a
-semantic change arrives as a reviewable diff of Noir programs.
+`MAVROS_BLESS=1 cargo test -p mavros-int-semantics --test generated_corpus` regenerates it, so a
+change to the rules arrives as a reviewable diff of Noir programs.

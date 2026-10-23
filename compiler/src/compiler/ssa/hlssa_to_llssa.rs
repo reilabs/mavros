@@ -172,8 +172,9 @@ impl<Kind> TypeFnEntry<Kind> {
 type DropFnEntry = TypeFnEntry<DropFn>;
 type ArrayLookupFnEntry<Kind> = TypeFnEntry<Kind>;
 
-/// Get or create a drop function for a type that needs dropping (currently Array or WitnessOf).
-/// For arrays, recursively creates drop functions for inner elements that need dropping.
+/// Get or create a drop function for a type that needs dropping (an Array, Slice, Ref or
+/// WitnessOf). For arrays, recursively creates drop functions for inner elements that need
+/// dropping.
 fn get_or_create_drop_fn(
     ty: &HLType,
     llssa: &mut LLSSA,
@@ -506,10 +507,10 @@ fn lower_inner(
     layout: Option<(WitnessLayout, ConstraintsLayout)>,
     options: CodeGenOptions,
 ) -> LLSSA {
-    // The lowered program preserves the HLSSA's entry-point set. This runs on the merged program,
-    // which may have several entry points, so it treats them uniformly rather than singling one
+    // The lowered program preserves the HLSSA's field and entry-point set. This runs on the merged
+    // program, which may have several entry points, so it treats them uniformly and singles none
     // out as "main".
-    let mut llssa = LLSSA::empty();
+    let mut llssa = LLSSA::with_field(hlssa.field());
     let mut fn_map: HashMap<FunctionId, FunctionId> = HashMap::default();
     let mut drop_fns: Vec<DropFnEntry> = Vec::new();
     let mut ad_fns = AdFunctions::new();
@@ -682,7 +683,7 @@ fn lower_constant_to_ll_constant(constant: &Constant) -> LLConstant {
         // FIELD-ASSUMPTION: L2-lower
         Constant::Field(fr) => {
             let values = fr
-                .montgomery_limbs()
+                .storage_cells()
                 .iter()
                 .map(|&limb| LLConstant::int(64, limb as u128))
                 .collect();
@@ -827,14 +828,10 @@ fn add_vm_parameter(func: &mut LLFunction, llssa: &mut LLSSA) -> ValueId {
 // Instruction lowering
 // =============================================================================
 
-/// The LLSSA integer operation for an HLSSA arithmetic group read at a given signedness.
+/// The LLSSA integer operation for an HLSSA arithmetic group at a given signedness.
 ///
-/// One table rather than one per integer type variant: they differ only in the three groups where
-/// the sign selects a different machine operation, which is what the `signed` parameter carries.
-///
-/// `Shl` has no signed form: a left shift is the same map on the bits either way, which is why
-/// HLSSA still distinguishes `UShl` from `SShl` (they differ in their overflow contract, not in
-/// their result) but LLSSA does not.
+/// `signed` picks the machine operation in the three groups where the sign matters. `Shl` has no
+/// signed form: `UShl` and `SShl` differ only in their overflow contract, and agree on the result.
 pub(crate) fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
     match group {
         ArithGroup::Add => IntArithOp::Add,
@@ -844,7 +841,7 @@ pub(crate) fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
         ArithGroup::Or => IntArithOp::Or,
         ArithGroup::Xor => IntArithOp::Xor,
         ArithGroup::Shl => IntArithOp::Shl,
-        // Arithmetic, not logical: Noir specifies sign-fill for a signed `>>`, and the cost
+        // The arithmetic shift: Noir specifies sign-fill for a signed `>>`, and the cost
         // interpreter (`instrumenter.rs`) agrees. Emitting `UShr` here would make the backends
         // disagree with both.
         ArithGroup::Shr if signed => IntArithOp::AShr,
@@ -859,9 +856,9 @@ pub(crate) fn int_arith_op(group: ArithGroup, signed: bool) -> IntArithOp {
 /// Check that an integer `BinaryArithOp`'s operands are exactly as wide as its result.
 ///
 /// HLSSA intentionally does not enforce this. [`HLType`]'s arithmetic rule makes a result as wide
-/// as the _wider_ operand, so a mismatched pair is representable. LLSSA's `IntArith` carries no
-/// widths of its own, and both backends read them off the operands. The LLVM one would then hand
-/// arithmetic builders differently-typed values, which results in invalid LLVM IR.
+/// as the _wider_ operand, so a mismatched pair is representable. LLSSA's `IntArith` records no
+/// widths, and both backends read them off the operands. The LLVM one would then hand arithmetic
+/// builders differently-typed values, which results in invalid LLVM IR.
 fn assert_int_arith_widths(
     fn_type_info: &FunctionTypeInfo,
     kind: &BinaryArithOpKind,
@@ -972,10 +969,10 @@ fn lower_instruction(
                     HLTypeExpr::Int(rhs_bits),
                 ) if lhs_bits == rhs_bits => e.int_cmp(lt, ll_lhs, ll_rhs),
                 (CmpKind::Eq, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_eq(ll_lhs, ll_rhs),
-                // `ULt` alone: a field element has no two's complement reading, so an `SLt`
-                // over one is a compiler bug rather than a comparison to lower. It falls to the
-                // panic below, agreeing with `symbolic_executor::cmp_operand_bits`, which rejects
-                // the same combination on the path that does go through the executor.
+                // `ULt` alone: a field element has no two's complement reading, so an `SLt` over
+                // one is a compiler bug, with nothing to lower. It falls to the panic below,
+                // agreeing with `symbolic_executor::cmp_operand_bits`, which rejects the same
+                // combination on the path that does go through the executor.
                 (CmpKind::ULt, HLTypeExpr::Field, HLTypeExpr::Field) => e.field_lt(ll_lhs, ll_rhs),
                 _ => ice!("unsupported args {} {}", lhs_type, rhs_type),
             };
@@ -1399,23 +1396,33 @@ fn lower_instruction(
                 value_type.is_field(),
                 "HLSSA->LLSSA Rangecheck expects a Field, got {value_type}"
             );
+            // Below the bit size of an odd prime modulus, `2^max_bits` is less than the modulus.
+            let field_bits = e.ssa.field().field_bit_size() as usize;
             assert!(
-                *max_bits < 254,
-                "HLSSA->LLSSA Rangecheck width {max_bits} is outside the bn254 field"
+                *max_bits < field_bits,
+                "HLSSA->LLSSA Rangecheck width {max_bits} is outside the {field_bits}-bit field"
+            );
+            // FIELD-ASSUMPTION: L3-llstruct
+            // The limit sets one bit of the limbs, so the field's canonical integer must fit them.
+            assert!(
+                field_bits <= INT_TO_FIELD_MAX_BITS,
+                "a {field_bits}-bit field does not fit {} raw limbs",
+                LLStruct::FIELD_LIMBS
             );
 
             // A canonical field value fits in `max_bits` exactly when it is less than 2^max_bits.
-            let mut limbs = Vec::with_capacity(4);
             let active_limb = max_bits / FIELD_LIMB_BITS;
             let active_bit = max_bits % FIELD_LIMB_BITS;
-            for limb in 0..4 {
-                let value = if limb == active_limb {
-                    1_u64 << active_bit
-                } else {
-                    0
-                };
-                limbs.push(e.emit_int_const(FIELD_LIMB_BITS as u32, value));
-            }
+            let limbs = (0..LLStruct::FIELD_LIMBS)
+                .map(|limb| {
+                    let value = if limb == active_limb {
+                        1_u64 << active_bit
+                    } else {
+                        0
+                    };
+                    e.emit_int_const(FIELD_LIMB_BITS as u32, value)
+                })
+                .collect();
             let limit_limbs = e.mk_struct(LLStruct::limbs(), limbs);
             let limit = e.field_from_limbs(limit_limbs);
             let in_range = e.field_lt(val_map[value], limit);
@@ -1849,33 +1856,27 @@ fn lower_to_bytes(
 ) {
     let ll_value = val_map[&value];
 
-    // Decompose field → 4 × u64 limbs (little-endian: limb 0 = least significant)
-    let limbs_val = e.field_to_limbs(ll_value);
-    let limb = [
-        e.extract_field(limbs_val, LLStruct::limbs(), 0),
-        e.extract_field(limbs_val, LLStruct::limbs(), 1),
-        e.extract_field(limbs_val, LLStruct::limbs(), 2),
-        e.extract_field(limbs_val, LLStruct::limbs(), 3),
-    ];
+    // The canonical integer's little-endian limbs: limb 0 is the least significant.
+    let limb = field_limbs(e, ll_value);
 
-    // Extract `count` bytes in little-endian order (byte 0 = LSB).
-    // Byte i lives in limb[i/8] at bit offset (i%8)*8 for i < 32.
-    // Byte positions i >= 32 are structurally zero: the field representation
-    // is only 32 bytes, so any higher byte is definitionally 0. Matches the
-    // old VM `to_bytes_be` behavior of zero-padding past the field width.
+    // Extract `count` bytes in little-endian order (byte 0 = LSB). Byte i lives in limb
+    // `i / bytes_per_limb` at bit offset `(i % bytes_per_limb) * 8`, and a byte past the limbs is
+    // zero, as the integer has no bits there.
+    let bytes_per_limb = FIELD_LIMB_BITS / 8;
     let zero_byte = e.emit_int_const(8, 0);
     let mut bytes_le = Vec::with_capacity(count);
     for i in 0..count {
-        if i >= 32 {
+        if i >= INT_TO_FIELD_MAX_BITS / 8 {
             bytes_le.push(zero_byte);
             continue;
         }
-        let limb_idx = i / 8;
-        let byte_offset = (i % 8) * 8;
+        let limb_idx = i / bytes_per_limb;
+        let byte_offset = (i % bytes_per_limb) * 8;
         let shifted = if byte_offset == 0 {
             limb[limb_idx]
         } else {
-            let shift = e.emit_int_const(64, byte_offset as u64);
+            // The amount is at the limb's width, as both operands of a shift must be.
+            let shift = e.emit_int_const(FIELD_LIMB_BITS as u32, byte_offset as u64);
             e.int_arith(IntArithOp::UShr, limb[limb_idx], shift)
         };
         let byte_val = e.truncate(shifted, 8);
@@ -1915,18 +1916,12 @@ fn lower_to_bits(
     count: usize,
 ) {
     let ll_value = val_map[&value];
-    let limbs_val = e.field_to_limbs(ll_value);
-    let limbs = [
-        e.extract_field(limbs_val, LLStruct::limbs(), 0),
-        e.extract_field(limbs_val, LLStruct::limbs(), 1),
-        e.extract_field(limbs_val, LLStruct::limbs(), 2),
-        e.extract_field(limbs_val, LLStruct::limbs(), 3),
-    ];
+    let limbs = field_limbs(e, ll_value);
 
     let zero_bit = e.emit_int_const(1, 0);
     let mut bits_le = Vec::with_capacity(count);
     for i in 0..count {
-        if i >= 256 {
+        if i >= INT_TO_FIELD_MAX_BITS {
             bits_le.push(zero_bit);
             continue;
         }
@@ -1935,7 +1930,7 @@ fn lower_to_bits(
         let shifted = if bit_offset == 0 {
             limbs[limb_idx]
         } else {
-            // The shift shares the limb's own width, so it is the field limb.
+            // The amount is at the limb's width, as both operands of a shift must be.
             let shift = e.emit_int_const(FIELD_LIMB_BITS as u32, bit_offset as u64);
             e.int_arith(IntArithOp::UShr, limbs[limb_idx], shift)
         };
@@ -2337,18 +2332,16 @@ fn lower_rc_drop(
 // AD LOWERING HELPERS
 // ================================================================================================
 
-/// The widest integer the raw-limb packing below carries.
+/// The widest integer the raw-limb packing below carries: the capacity of [`LLStruct::limbs`], not
+/// a bound on which integers one or more field elements can represent.
 ///
-/// This is specifically about how much [`LLStruct::limbs`] holds, not about which integers can be
-/// represented in terms of one or more field elements.
-///
-/// The limb it counts is the **field's** and not the host's.
+/// The limb it counts is the **field's** limb, whatever the host's word.
 pub const INT_TO_FIELD_MAX_BITS: usize = LLStruct::FIELD_LIMBS * FIELD_LIMB_BITS;
 
 /// The raw little-endian limbs of a `bits`-wide integer, one per cell of [`LLStruct::limbs`].
 ///
-/// A limb the width cannot reach is the zero constant rather than a shift yielding zero, so an
-/// integer narrow enough to sit in one limb packs into exactly one instruction.
+/// A limb the width cannot reach is the zero constant, with no shift to compute it, so an integer
+/// narrow enough to sit in one limb packs into exactly one instruction.
 fn int_to_raw_limbs(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> Vec<ValueId> {
     assert!(
         bits <= INT_TO_FIELD_MAX_BITS,
@@ -2377,11 +2370,8 @@ fn int_to_raw_limbs(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> 
         .collect()
 }
 
-/// A `bits`-wide integer read out of the raw little-endian limbs of a field element.
-///
-/// Only the limbs the target has room for are read, and only as many as the element has: a target
-/// wider than [`INT_TO_FIELD_MAX_BITS`] is zero-filled above them, which is the whole value because
-/// an element has no bits up there.
+/// A `bits`-wide integer read out of the raw little-endian limbs of a field element. A target
+/// wider than [`INT_TO_FIELD_MAX_BITS`] is zero-filled above them; the element has no bits there.
 fn int_from_raw_limbs(e: &mut LLBlockEmitter<'_>, limbs: ValueId, bits: usize) -> ValueId {
     let used = LLStruct::FIELD_LIMBS.min(bits.div_ceil(FIELD_LIMB_BITS));
     let raw: Vec<ValueId> = (0..used)
@@ -3201,14 +3191,12 @@ fn generate_all_lookup_functions(
     }
 }
 
-/// Extract the four raw limbs of a Field value.
-fn field_limbs(e: &mut LLBlockEmitter<'_>, val: ValueId) -> (ValueId, ValueId, ValueId, ValueId) {
+/// The raw little-endian limbs of a Field value, one per cell of [`LLStruct::limbs`].
+fn field_limbs(e: &mut LLBlockEmitter<'_>, val: ValueId) -> Vec<ValueId> {
     let limbs = e.field_to_limbs(val);
-    let l0 = e.extract_field(limbs, LLStruct::limbs(), 0);
-    let l1 = e.extract_field(limbs, LLStruct::limbs(), 1);
-    let l2 = e.extract_field(limbs, LLStruct::limbs(), 2);
-    let l3 = e.extract_field(limbs, LLStruct::limbs(), 3);
-    (l0, l1, l2, l3)
+    (0..LLStruct::FIELD_LIMBS)
+        .map(|index| e.extract_field(limbs, LLStruct::limbs(), index))
+        .collect()
 }
 
 /// Assert that `ok` is true.
@@ -3487,7 +3475,7 @@ fn emit_forward_lookup_key_entry(
     mults_base: ValueId,
     key_field: ValueId,
     key: ValueId,
-    key_high_limbs: [ValueId; 3],
+    key_high_limbs: &[ValueId],
     flag_u64: ValueId,
     zero_i64: ValueId,
     lookup: LookupTableSpec,
@@ -3504,7 +3492,7 @@ fn emit_forward_lookup_key_entry(
             let table_len_i64 = e.emit_int_const(64, lookup.length as u64);
             let in_range = e.int_ult(key, table_len_i64);
             assert(e, in_range);
-            for high in key_high_limbs {
+            for &high in key_high_limbs {
                 let ok = e.int_eq(high, zero_i64);
                 assert(e, ok);
             }
@@ -3525,7 +3513,7 @@ fn emit_forward_key_value_lookup(
     table_idx_i32: ValueId,
     key_field: ValueId,
     key: ValueId,
-    key_high_limbs: [ValueId; 3],
+    key_high_limbs: &[ValueId],
     result_field: ValueId,
     flag_u64: ValueId,
     zero_i64: ValueId,
@@ -3714,13 +3702,13 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
     let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let flag_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
-    let (key_l0, key_l1, key_l2, key_l3) = field_limbs(&mut e, key_field);
-    let (flag_l0, flag_l1, flag_l2, flag_l3) = field_limbs(&mut e, flag_field);
-    let key = key_l0;
-    let flag_u64 = flag_l0;
+    let key_limbs = field_limbs(&mut e, key_field);
+    let flag_limbs = field_limbs(&mut e, flag_field);
+    let key = key_limbs[0];
+    let flag_u64 = flag_limbs[0];
 
     let zero_i64 = e.emit_int_const(64, 0);
-    for high in [flag_l1, flag_l2, flag_l3] {
+    for &high in &flag_limbs[1..] {
         let ok = e.int_eq(high, zero_i64);
         assert(&mut e, ok);
     }
@@ -3745,7 +3733,7 @@ fn generate_array_lookup_function(llssa: &mut LLSSA, array_type: &HLType) -> LLF
         table_idx_i32,
         key_field,
         key,
-        [key_l1, key_l2, key_l3],
+        &key_limbs[1..],
         result_field,
         flag_u64,
         zero_i64,
@@ -3778,17 +3766,17 @@ fn generate_spread_lookup_function(
     let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let flag_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
-    let (key_l0, key_l1, key_l2, key_l3) = field_limbs(&mut e, key_field);
-    let (flag_l0, flag_l1, flag_l2, flag_l3) = field_limbs(&mut e, flag_field);
-    let key = key_l0;
-    let flag_u64 = flag_l0;
+    let key_limbs = field_limbs(&mut e, key_field);
+    let flag_limbs = field_limbs(&mut e, flag_field);
+    let key = key_limbs[0];
+    let flag_u64 = flag_limbs[0];
 
     let zero_i64 = e.emit_int_const(64, 0);
     // flag is 0 or 1 by construction; sanity-check its high BigInt limbs.
     // `key`'s high limbs and `key < length` are validated only when
     // `flag != 0` (see post-merge tape emission below), matching the VM's
     // `forward_kv_lookup_emit` shape and `__rngchk_<bits>`.
-    for high in [flag_l1, flag_l2, flag_l3] {
+    for &high in &flag_limbs[1..] {
         let ok = e.int_eq(high, zero_i64);
         assert(&mut e, ok);
     }
@@ -3811,7 +3799,7 @@ fn generate_spread_lookup_function(
         table_idx_i32,
         key_field,
         key,
-        [key_l1, key_l2, key_l3],
+        &key_limbs[1..],
         result_field,
         flag_u64,
         zero_i64,
@@ -3844,13 +3832,13 @@ fn generate_pow2_lookup_function(
     let result_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
     let flag_field = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
-    let (key_l0, key_l1, key_l2, key_l3) = field_limbs(&mut e, key_field);
-    let (flag_l0, flag_l1, flag_l2, flag_l3) = field_limbs(&mut e, flag_field);
-    let key = key_l0;
-    let flag_u64 = flag_l0;
+    let key_limbs = field_limbs(&mut e, key_field);
+    let flag_limbs = field_limbs(&mut e, flag_field);
+    let key = key_limbs[0];
+    let flag_u64 = flag_limbs[0];
 
     let zero_i64 = e.emit_int_const(64, 0);
-    for high in [flag_l1, flag_l2, flag_l3] {
+    for &high in &flag_limbs[1..] {
         let ok = e.int_eq(high, zero_i64);
         assert(&mut e, ok);
     }
@@ -3868,7 +3856,7 @@ fn generate_pow2_lookup_function(
         table_idx_i32,
         key_field,
         key,
-        [key_l1, key_l2, key_l3],
+        &key_limbs[1..],
         result_field,
         flag_u64,
         zero_i64,
@@ -3892,11 +3880,9 @@ fn generate_pow2_lookup_function(
 /// slot at `mults_base[key]` and writes `(table_id, key, flag)` into the
 /// forward lookup tape.
 ///
-/// Mirrors `rngchk_field` in `vm/src/bytecode.rs`: the table id and
-/// multiplicities-base pointer come from runtime cursors, not compile-time
-/// constants, so adding other lookup kinds (which will allocate their own
-/// table regions before or after this one) doesn't break the rangecheck
-/// path.
+/// Mirrors `rngchk_field` in `vm/src/bytecode.rs`: the table id and multiplicities-base pointer
+/// come from runtime cursors, so adding other lookup kinds (which allocate separate table regions
+/// before or after this one) doesn't break the rangecheck path.
 ///
 /// Phase 2 — which runs on the host after WASM returns — fixes the raw-u64
 /// multiplicity slots into Montgomery form and materializes the per-slot
@@ -3911,14 +3897,14 @@ fn generate_rngchk_function(llssa: &mut LLSSA, bits: u8, table_idx_global: usize
     let flag = e.add_parameter(LLType::Struct(LLStruct::field_elem()));
 
     // BigInt limbs (Montgomery → BigInt) for index/u64 uses.
-    let (val_l0, val_l1, val_l2, val_l3) = field_limbs(&mut e, val);
-    let (flag_l0, flag_l1, flag_l2, flag_l3) = field_limbs(&mut e, flag);
-    let flag_u64 = flag_l0;
-    let key = val_l0;
+    let key_limbs = field_limbs(&mut e, val);
+    let flag_limbs = field_limbs(&mut e, flag);
+    let flag_u64 = flag_limbs[0];
+    let key = key_limbs[0];
 
     // flag is 0 or 1 by construction; sanity-check its high BigInt limbs.
     let zero_i64 = e.emit_int_const(64, 0);
-    for high in [flag_l1, flag_l2, flag_l3] {
+    for &high in &flag_limbs[1..] {
         let ok = e.int_eq(high, zero_i64);
         assert(&mut e, ok);
     }
@@ -3937,7 +3923,7 @@ fn generate_rngchk_function(llssa: &mut LLSSA, bits: u8, table_idx_global: usize
         mults_base,
         val,
         key,
-        [val_l1, val_l2, val_l3],
+        &key_limbs[1..],
         flag_u64,
         zero_i64,
         lookup,
@@ -3961,9 +3947,9 @@ fn ad_next_lookup_wit_off(e: &mut LLBlockEmitter<'_>) -> ValueId {
     idx
 }
 
-/// Emit SSA to read `ad_coeffs[offset_i32]` via random access (GEP on
-/// AdCoeffsBase; no cursor advance). Used when we need a coefficient whose
-/// absolute index is determined by R1CS layout, not by the main AD cursor.
+/// Emit SSA to read `ad_coeffs[offset_i32]` via random access (GEP on AdCoeffsBase; no cursor
+/// advance). Used when we need a coefficient whose absolute index the R1CS layout determines,
+/// independent of the main AD cursor.
 fn ad_read_coeff_at_dyn(e: &mut LLBlockEmitter<'_>, offset_i32: ValueId) -> ValueId {
     let base_slot = e.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS_BASE);
     let base = e.ll_load(base_slot, LLType::Ptr);
@@ -4108,9 +4094,8 @@ fn emit_key_value_ad_lookup_call_body(
 /// so the caller can immediately read `inv_sum_coeff` from it without
 /// reloading.
 ///
-/// Reads `logup_challenge_off` from `witness_layout` because it's a structural
-/// constant of the layout (always at `challenges_start`), not a
-/// dynamically-allocated region.
+/// Reads `logup_challenge_off` from `witness_layout` because it's a structural constant of the
+/// layout (always at `challenges_start`) that no runtime allocation moves.
 fn emit_rngchk_ad_init_body(
     e: &mut LLBlockEmitter<'_>,
     bits: u8,
@@ -4254,7 +4239,7 @@ fn emit_pow2_ad_init_body(
 
     // Folded allocation, one constraint per entry:
     //   y · (α - n + β·2^n) = m_n
-    // so this is the spread AD init with `2^n` in the B-term instead of `spread(n)`.
+    // so this is the spread AD init with `2^n` in the B-term where spread has `spread(n)`.
     let (inv_cnst_off, inv_wit_off, mults_wit_off) = claim_ad_lookup_table_region(e, lookup);
     store_ad_global_snapshot(e, inv_cnst_off_global, inv_cnst_off);
 
@@ -4266,9 +4251,9 @@ fn emit_pow2_ad_init_body(
     let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
 
     let length = e.emit_int_const(64, lookup.length as u64);
-    // `2^n` is carried rather than recomputed: a `u64` shift would cap the table at 64 rows, and
-    // repeated squaring per row would be quadratic. Doubling one accumulator is exact at every
-    // row and costs one field add.
+    // `2^n` is carried from row to row: a `u64` shift would cap the table at 64 rows, and repeated
+    // squaring per row would be quadratic. Doubling one accumulator is exact at every row and costs
+    // one field add.
     let one_i64_seed = e.emit_int_const(64, 1);
     let pow_seed = u64_as_field(e, one_i64_seed);
     let field_ty = LLType::Struct(LLStruct::field_elem());
@@ -4549,20 +4534,18 @@ fn generate_dspread_ad_call(
 
 /// Generate __drngchk_<bits>_ad_call(val: AdNode*, flag: AdNode*):
 ///
-/// On first call (private zero-initialized helper state still 0) allocates
-/// the rangecheck table region from the AD VM cursors and runs the
-/// per-element init bumps. On every call (first and subsequent) does the
-/// per-lookup AD work: reads `inv_sum_coeff` and `inv_coeff`, allocates the
-/// next lookup-witness offset via `AdCurrentLookupWitOff`, and bumps:
+/// On first call (private zero-initialized helper state is 0) allocates the rangecheck table region
+/// from the AD VM cursors and runs the per-element init bumps. On every call (first and subsequent)
+/// does the per-lookup AD work: reads `inv_sum_coeff` and `inv_coeff`, allocates the next
+/// lookup-witness offset via `AdCurrentLookupWitOff`, and bumps:
 ///   out_dc[inv_wit_off] += inv_sum_coeff
 ///   out_da[inv_wit_off] += inv_coeff
 ///   out_db[logup_challenge_off] += inv_coeff
 ///   val.bump_db(-inv_coeff)
 ///   flag.bump_dc(inv_coeff)
 ///
-/// Matches `drngchk_field` in `vm/src/bytecode.rs` end-to-end. The init
-/// branch reads the table region's start from runtime cursors rather than
-/// baking `tables_data_start` constants.
+/// Matches `drngchk_field` in `vm/src/bytecode.rs` end-to-end. The init branch reads the table
+/// region's start from runtime cursors; no `tables_data_start` constant is baked in.
 fn generate_drngchk_ad_call(
     llssa: &mut LLSSA,
     bits: u8,
@@ -4580,8 +4563,8 @@ fn generate_drngchk_ad_call(
     let val_ptr = e.add_parameter(LLType::Ptr);
     let flag_ptr = e.add_parameter(LLType::Ptr);
 
-    // First-use check: the helper's private zero-initialized global
-    // stores `inv_cnst_off + 1`. Zero means "not yet allocated".
+    // First-use check: the helper's private zero-initialized global stores `inv_cnst_off + 1`. Zero
+    // means "unallocated".
     let snap_slot = e.global_addr(inv_cnst_off_global);
     let snap = e.ll_load(snap_slot, LLType::i32());
     let zero_i32 = e.emit_int_const(32, 0);
@@ -4655,10 +4638,7 @@ fn generate_drngchk_ad_call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{
-        Field,
-        ssa::{DefaultSSAAnnotator, llssa::builder::LLSSABuilder},
-    };
+    use crate::compiler::ssa::{DefaultSSAAnnotator, llssa::builder::LLSSABuilder};
     use mavros_int_semantics::IntBits;
 
     /// Exercise the backend backstop directly, without the earlier guard-insertion passes.
@@ -4669,7 +4649,7 @@ mod tests {
             analysis::types::Types,
             codegen::llssa_to_llvm::{LLVMCodeGen, WasmCompileOpts},
             ssa::hlssa::{
-                SequenceTargetType,
+                CastTarget, SequenceTargetType,
                 builder::{HLEmitter, HLSSABuilder},
             },
         };
@@ -4691,8 +4671,9 @@ mod tests {
                 let entry = fb.function.get_entry_id();
                 let mut e = fb.test_block(entry);
                 let inputs = e.add_parameter(HLType::blob(HLType::int(64), 3));
-                let zero = e.int_const(IntBits::from(0u64));
+                let zero = e.int_const(IntBits::from(0u32));
                 let index = e.array_get(inputs, zero);
+                let index = e.cast_to(CastTarget::Int(32), index);
                 let array = if let Some(kind) = sequence {
                     let a = e.int_const(IntBits::from(10u64));
                     let b = e.int_const(IntBits::from(20u64));
@@ -4708,7 +4689,7 @@ mod tests {
                 };
                 // A valid read after ArraySet must not mask a missing write-side guard.
                 let read_index = if write {
-                    e.int_const(IntBits::from(1u64))
+                    e.int_const(IntBits::from(1u32))
                 } else {
                     index
                 };
@@ -4719,7 +4700,7 @@ mod tests {
             let types = Types::new().run(&hlssa, &flow);
             let llssa = lower_inner(&hlssa, &flow, &types, None, CodeGenOptions::default());
             let context = inkwell::context::Context::create();
-            let mut codegen = LLVMCodeGen::new(&context, name);
+            let mut codegen = LLVMCodeGen::new(&context, name, llssa.field());
             codegen.compile(&llssa, &FlowAnalysis::run(&llssa));
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("bounds.wasm");
@@ -4729,7 +4710,7 @@ mod tests {
             let len = if name == "blob_get" { 3 } else { 2 };
             // The large index wraps an eight-byte offset to zero; it must trap even though
             // that wrapped address lies inside linear memory and names an allocated element.
-            for index in [1u64, len, 1 << 61, u64::MAX] {
+            for index in [1u64, len, 1 << 29, u64::from(u32::MAX)] {
                 let mut store = wasmtime::Store::new(&engine, ());
                 let memory =
                     wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(8, None)).unwrap();
@@ -4798,8 +4779,8 @@ mod tests {
                 let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
                 let _ = e.field_from_limbs(limbs);
             } else {
-                // An element built from a 64-bit constant, which packs with no shift of its own
-                // and so leaves the `int.shl` count below to the unpacking alone.
+                // An element built from a 64-bit constant, which packs without a shift and so
+                // leaves the `int.shl` count below to the unpacking alone.
                 let seed = e.emit_int_const(64, 7);
                 let seed_limbs = int_to_raw_limbs(&mut e, seed, 64);
                 let packed = e.mk_struct(LLStruct::limbs(), seed_limbs);
@@ -4818,11 +4799,8 @@ mod tests {
         dump.matches(mnemonic).count()
     }
 
-    /// The packing fills exactly the limbs the width reaches.
-    ///
-    /// A limb the width cannot reach is the zero constant, so the instruction count is what says
-    /// how far the value was read. This is the thing an off-by-one limb could get wrong while the
-    /// narrow widths, which the corpus does cover, stay byte-identical.
+    /// The packing fills exactly the limbs the width reaches, and the rest are the zero constant,
+    /// so the instruction count shows an off-by-one limb the narrow corpus widths would not.
     #[test]
     fn the_packing_reaches_every_limb_the_width_does() {
         for (bits, shifts) in [(64usize, 0usize), (128, 1), (129, 2), (200, 3), (256, 3)] {
@@ -4838,8 +4816,8 @@ mod tests {
     /// The unpacking reads exactly the limbs the target has room for, and no more than the element
     /// has.
     ///
-    /// A target past [`INT_TO_FIELD_MAX_BITS`] stops at the element's own limbs rather than
-    /// shifting in zeros it already has, which is why 256 and 320 agree.
+    /// A target past [`INT_TO_FIELD_MAX_BITS`] stops at the element's limbs and shifts in no zeros
+    /// it already has, which is why 256 and 320 agree.
     #[test]
     fn the_unpacking_reads_every_limb_the_target_has_room_for() {
         for (bits, shifts) in [
@@ -4895,7 +4873,7 @@ mod tests {
             dump.contains("icmp.eq"),
             "expected immortal equality check in dump:\n{dump}"
         );
-        // The guarded decrement still emits a subtraction on the mortal path.
+        // The guarded decrement emits a subtraction on the mortal path.
         assert!(
             dump.contains("sub"),
             "expected guarded decrement in dump:\n{dump}"
@@ -4903,19 +4881,19 @@ mod tests {
     }
 
     /// A felt constant must be interned as an aggregate `Struct` constant (the four-limb
-    /// `field_elem` layout), not materialized as an `MkStruct` instruction.
+    /// `field_elem` layout), with no `MkStruct` instruction to build it.
     #[test]
     fn felt_constant_lowers_to_struct_constant() {
         use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
 
         let mut hlssa = HLSSA::with_main("felt_test".to_string());
         let main_id = hlssa.get_unique_entrypoint_id();
+        let seven = hlssa.field().constant(7u64);
         let mut hb = HLSSABuilder::new(&mut hlssa);
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.test_block(entry);
-            // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
-            let c = e.field_const(ark_bn254::Fr::from(7u64));
+            let c = e.field_const(seven);
             e.terminate_return(vec![c]);
         });
 
@@ -4946,9 +4924,171 @@ mod tests {
         assert_eq!(val_map.len(), 1, "the felt constant should be mapped");
     }
 
+    /// Lowers `hlssa`, whose main takes a blob of `inputs.len()` words and returns one `int(64)`,
+    /// to WASM, and runs `mavros_main` on `inputs`.
+    fn run_main_in_wasm(hlssa: &HLSSA, inputs: &[u64]) -> wasmtime::Result<i64> {
+        use crate::compiler::{
+            analysis::types::Types,
+            codegen::llssa_to_llvm::{LLVMCodeGen, WasmCompileOpts},
+        };
+        use mavros_wasm_layout::{WITGEN_INPUTS_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE};
+
+        let flow = FlowAnalysis::run(hlssa);
+        let types = Types::new().run(hlssa, &flow);
+        let llssa = lower_inner(hlssa, &flow, &types, None, CodeGenOptions::default());
+        let context = inkwell::context::Context::create();
+        let mut codegen = LLVMCodeGen::new(&context, "subject", llssa.field());
+        codegen.compile(&llssa, &FlowAnalysis::run(&llssa));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subject.wasm");
+        let runtime = crate::wasm_runtime::locate_or_build();
+        codegen.compile_to_wasm(&path, WasmCompileOpts::fast(runtime));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::from_file(&engine, &path).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let memory = wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(8, None)).unwrap();
+        let mut linker = wasmtime::Linker::new(&engine);
+        linker.define(&store, "env", "memory", memory).unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+        let data_end = instance
+            .get_global(&mut store, "__data_end")
+            .unwrap()
+            .get(&mut store)
+            .i32()
+            .unwrap() as u32;
+        let vm = (data_end + 15) & !15;
+        let blob = (vm + WITGEN_VM_STRUCT_SIZE + 7) & !7;
+        memory
+            .write(
+                &mut store,
+                (vm + WITGEN_INPUTS_PTR_OFFSET) as usize,
+                &blob.to_le_bytes(),
+            )
+            .unwrap();
+        for (i, value) in inputs.iter().enumerate() {
+            memory
+                .write(&mut store, blob as usize + 8 * i, &value.to_le_bytes())
+                .unwrap();
+        }
+        instance
+            .get_typed_func::<i32, i64>(&mut store, "mavros_main")
+            .unwrap()
+            .call(&mut store, vm as i32)
+    }
+
+    /// Bytes and bits read the canonical integer limb by limb: in every limb, at a byte offset in
+    /// the upper half of a limb, and as zero past the limbs.
+    #[test]
+    fn a_field_decomposes_into_its_bytes_and_bits_through_wasm() {
+        use crate::compiler::ssa::hlssa::{
+            CastTarget, Radix,
+            builder::{HLEmitter, HLSSABuilder},
+        };
+
+        let mut hlssa = HLSSA::with_main("decompose".to_string());
+        let main = hlssa.get_unique_entrypoint_id();
+        hlssa
+            .get_function_mut(main)
+            .add_return_type(HLType::int(64));
+        let field = hlssa.field();
+        let value = field.two_pow(200)
+            + field.two_pow(130)
+            + field.two_pow(70)
+            + field.constant((3u64 << 40) | 0x0102);
+        HLSSABuilder::new(&mut hlssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            e.add_parameter(HLType::blob(HLType::int(64), 1));
+            let value = e.field_const(value);
+            let bytes = e.to_radix(value, Radix::Bytes, Endianness::Little, 40);
+            let bits = e.to_bits(value, Endianness::Little, 260);
+            let mut digest = e.int_const(IntBits::from(0u64));
+            let mut position = 0u64;
+            let picks = [0, 1, 5, 8, 16, 25, 33].map(|index| (bytes, index, 8));
+            let picks = picks
+                .into_iter()
+                .chain([70, 130, 200, 257].map(|index| (bits, index, 1)));
+            for (digits, index, width) in picks {
+                let index = e.int_const(IntBits::from(index as u32));
+                let digit = e.array_get(digits, index);
+                let digit = e.cast_to(CastTarget::Int(64), digit);
+                let shift = e.int_const(IntBits::from(position));
+                let placed = e.ushl(digit, shift);
+                digest = e.or(digest, placed);
+                position += width;
+            }
+            e.terminate_return(vec![digest]);
+        });
+
+        let want_bytes = [0x02u64, 0x01, 0x03, 0x40, 0x04, 0x01, 0x00];
+        let want_bits = [1u64, 1, 1, 0];
+        let want = want_bytes
+            .iter()
+            .enumerate()
+            .map(|(i, byte)| byte << (8 * i))
+            .chain(want_bits.iter().enumerate().map(|(i, bit)| bit << (56 + i)))
+            .fold(0, |digest, digit| digest | digit);
+        assert_eq!(run_main_in_wasm(&hlssa, &[0]).unwrap() as u64, want);
+    }
+
+    /// The limit `2^130` is bit 2 of limb 2: `3·2^128` fits in 130 bits and `2^130` does not.
+    #[test]
+    fn a_field_rangecheck_traps_exactly_at_its_limit_through_wasm() {
+        use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
+
+        let mut hlssa = HLSSA::with_main("rangecheck".to_string());
+        let main = hlssa.get_unique_entrypoint_id();
+        hlssa
+            .get_function_mut(main)
+            .add_return_type(HLType::int(64));
+        let scale = hlssa.field().two_pow(128);
+        HLSSABuilder::new(&mut hlssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let inputs = e.add_parameter(HLType::blob(HLType::int(64), 1));
+            let zero = e.int_const(IntBits::from(0u32));
+            let x = e.array_get(inputs, zero);
+            let x = e.cast_to_field(x);
+            let scale = e.field_const(scale);
+            let scaled = e.umul(x, scale);
+            e.rangecheck(scaled, 130);
+            let one = e.int_const(IntBits::from(1u64));
+            e.terminate_return(vec![one]);
+        });
+
+        assert_eq!(run_main_in_wasm(&hlssa, &[3]).unwrap(), 1);
+        assert!(run_main_in_wasm(&hlssa, &[4]).is_err());
+    }
+
+    /// `2^max_bits` is below the modulus only under the field's bit size, so a rangecheck as wide
+    /// as the field has no limit to compare against.
+    #[test]
+    #[should_panic(expected = "outside the 254-bit field")]
+    fn a_rangecheck_as_wide_as_the_field_is_refused() {
+        use crate::compiler::{
+            analysis::types::Types,
+            ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
+        };
+
+        let mut hlssa = HLSSA::with_main("wide_rangecheck".to_string());
+        let main = hlssa.get_unique_entrypoint_id();
+        let one = hlssa.field().one();
+        HLSSABuilder::new(&mut hlssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            let mut e = fb.test_block(entry);
+            let value = e.field_const(one);
+            e.rangecheck(value, 254);
+            e.terminate_return(vec![]);
+        });
+        let flow = FlowAnalysis::run(&hlssa);
+        let types = Types::new().run(&hlssa, &flow);
+        lower_inner(&hlssa, &flow, &types, None, CodeGenOptions::default());
+    }
+
     /// A width-mismatched integer arithmetic op is representable in HLSSA — its result takes the
-    /// _wider_ operand's width — and must be caught here rather than in the LLVM builder, which
-    /// would be handed two differently-typed operands. See [`assert_int_arith_widths`].
+    /// _wider_ operand's width — and must be caught here: the LLVM builder would be handed two
+    /// differently-typed operands. See [`assert_int_arith_widths`].
     #[test]
     #[should_panic(expected = "its result is")]
     fn a_width_mismatched_int_arith_is_rejected_before_llvm() {
@@ -5046,7 +5186,7 @@ mod tests {
         hb.modify_function(main_id, |fb| {
             let entry = fb.function.get_entry_id();
             let mut e = fb.test_block(entry);
-            let value = e.field_const(Field::from(13));
+            let value = e.field_const(13u64);
             let bits = e.to_bits(value, Endianness::Big, 5);
             e.terminate_return(vec![bits]);
         });

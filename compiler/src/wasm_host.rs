@@ -1,20 +1,20 @@
 //! Running a compiled WASM artifact on the host, and reading its results back out of linear memory.
 //!
-//! The witgen and AD entry points of a compiled module take pointers into the module's own linear
+//! The witgen and AD entry points of a compiled module take pointers into the module's linear
 //! memory, so calling one means laying out the buffers it writes into, placing them past the
 //! module's static data, and reading the results back field element by field element.
 
 use std::path::Path;
 
-use mavros_artifacts::Field as RawField;
+use mavros_artifacts::{Field as RawField, MavrosField};
 use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
     AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
     AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
     TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_KIND_OFFSET, TABLE_INFO_LENGTH_OFFSET,
-    TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_NUM_INDICES_OFFSET, TABLE_INFO_SLOT_SIZE,
-    WITGEN_A_BASE_PTR_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
+    TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_SLOT_SIZE, WITGEN_A_BASE_PTR_OFFSET,
+    WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
     WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
     WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
     WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_CAP_OFFSET,
@@ -24,8 +24,11 @@ use mavros_wasm_layout::{
 use wasmtime::{Config, Engine, Linker, Memory, Store, WasmBacktraceDetails};
 
 use crate::{
-    compiler::codegen::hlssa_to_r1cs::R1CS,
-    vm::{TableKind, bytecode::TableInfo, interpreter},
+    compiler::{codegen::hlssa_to_r1cs::R1CS, ssa::llssa::LLStruct},
+    vm::{
+        TableKind,
+        interpreter::{self, Phase2Table},
+    },
     wasm_runtime,
 };
 
@@ -37,8 +40,18 @@ pub fn wasm_engine() -> wasmtime::Result<Engine> {
     Engine::new(&config)
 }
 
-// FIELD-ASSUMPTION: L3-field-size
-const FIELD_SIZE: usize = 32; // 4 x i64 = 32 bytes
+/// The bytes an element of `F` occupies in linear memory: its storage cells, as the VM holds them.
+/// The WASM runtime computes on elements of `LLStruct::FIELD_LIMBS` cells, so `F` must have that
+/// many.
+fn field_size<F: MavrosField>() -> usize {
+    assert_eq!(
+        F::STORAGE_CELLS,
+        LLStruct::FIELD_LIMBS,
+        "the WASM runtime holds an element in {} cells",
+        LLStruct::FIELD_LIMBS
+    );
+    F::STORAGE_CELLS * size_of::<u64>()
+}
 
 /// The `env::memory` type the module imports. Its minimum covers the module's stack and data.
 fn imported_memory_type(
@@ -55,25 +68,24 @@ fn imported_memory_type(
 }
 
 /// What one witgen run of a compiled module produced.
-pub struct WasmResult {
-    pub out_wit_pre_comm: Vec<RawField>,
-    pub out_wit_post_comm: Vec<RawField>,
-    pub out_a: Vec<RawField>,
-    pub out_b: Vec<RawField>,
-    pub out_c: Vec<RawField>,
+pub struct WasmResult<F> {
+    pub out_wit_pre_comm: Vec<F>,
+    pub out_wit_post_comm: Vec<F>,
+    pub out_a: Vec<F>,
+    pub out_b: Vec<F>,
+    pub out_c: Vec<F>,
     pub live_bytes: usize,
 }
 
-/// Read a `TableInfo` record back from one slot of the witgen VM struct's table registry in WASM
-/// linear memory. Slot `i` is runtime table id `i`, matching the VM's `Vec<TableInfo>` order.
-fn read_table_info_slot(
+/// Read a table record back from one slot of the witgen VM struct's table registry in WASM linear
+/// memory. Slot `i` is runtime table id `i`, matching the VM's `Vec<TableInfo>` order.
+fn read_table_info_slot<F: MavrosField>(
     memory: &Memory,
     store: impl wasmtime::AsContext,
     tables_ptr: u32,
     wasm_witness_ptr: u32,
-    host_witness_base: *mut RawField,
     table_idx: u32,
-) -> (usize, TableInfo) {
+) -> Phase2Table {
     let slot_base = tables_ptr + table_idx * TABLE_INFO_SLOT_SIZE;
     let mults_base =
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_MULTS_BASE_PTR_OFFSET);
@@ -81,26 +93,20 @@ fn read_table_info_slot(
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_CNST_OFF_OFFSET);
     let inv_wit_off =
         read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_INV_WIT_OFF_OFFSET);
-    let num_indices =
-        read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_NUM_INDICES_OFFSET);
     let kind_code = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_KIND_OFFSET);
     let length = read_u32_from_memory(memory, &store, slot_base + TABLE_INFO_LENGTH_OFFSET);
 
     let mults_off = mults_base
         .checked_sub(wasm_witness_ptr)
         .expect("table multiplicities pointer is before witness base")
-        / FIELD_SIZE as u32; // FIELD-ASSUMPTION: L3-field-size
-    (
-        mults_off as usize,
-        TableInfo {
-            multiplicities_wit: host_witness_base.wrapping_add(mults_off as usize),
-            num_indices: num_indices as usize,
-            kind: TableKind::from_code(kind_code),
-            length: length as usize,
-            elem_inverses_witness_section_offset: inv_wit_off as usize,
-            elem_inverses_constraint_section_offset: inv_cnst_off as usize,
-        },
-    )
+        / field_size::<F>() as u32;
+    Phase2Table {
+        kind: TableKind::from_code(kind_code),
+        length: length as usize,
+        multiplicities_offset: mults_off as usize,
+        elem_inverses_witness_section_offset: inv_wit_off as usize,
+        elem_inverses_constraint_section_offset: inv_cnst_off as usize,
+    }
 }
 
 fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> u32 {
@@ -109,21 +115,26 @@ fn read_u32_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
 }
 
-/// Read a field element from WASM memory
-fn read_field_from_memory(memory: &Memory, store: impl wasmtime::AsContext, ptr: u32) -> RawField {
-    // FIELD-ASSUMPTION: L3-frame
-    use ark_ff::BigInt;
-    let data = memory.data(&store);
-    let offset = ptr as usize;
-    let l0 = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-    let l1 = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
-    let l2 = u64::from_le_bytes(data[offset + 16..offset + 24].try_into().unwrap());
-    let l3 = u64::from_le_bytes(data[offset + 24..offset + 32].try_into().unwrap());
-    ark_bn254::Fr::new_unchecked(BigInt::new([l0, l1, l2, l3]))
+/// The `count` consecutive elements of `F` at `ptr` in linear memory.
+fn read_fields_from_memory<F: MavrosField>(
+    memory: &Memory,
+    store: impl wasmtime::AsContext,
+    ptr: u32,
+    count: usize,
+) -> Vec<F> {
+    let start = ptr as usize;
+    let bytes = &memory.data(&store)[start..start + count * field_size::<F>()];
+    let cells = bytes
+        .chunks_exact(size_of::<u64>())
+        .map(|cell| u64::from_le_bytes(cell.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    cells
+        .chunks_exact(F::STORAGE_CELLS)
+        .map(F::from_frame_cells)
+        .collect()
 }
 
-/// A compiled artifact, retained so a module run many times is handed to the engine once as
-/// compilation is expensive.
+/// A compiled artifact, kept so a module run many times is compiled once.
 pub struct LoadedModule {
     engine: Engine,
     module: wasmtime::Module,
@@ -140,12 +151,26 @@ impl LoadedModule {
 }
 
 /// Run a compiled module's witgen entry point and read its outputs back out of linear memory.
+///
+/// `entry_blob_field_count` is the number of flattened input fields the module's entry reads, as
+/// the program header of the same compilation records it.
+///
+/// # Panics
+///
+/// If `params` flatten to any other number of fields: the module reads its inputs at fixed
+/// offsets, so a short blob reads the table region that follows it, and a long one is ignored.
 pub fn run_witgen(
     wasm_path: &Path,
     r1cs: &R1CS,
     params: &[interpreter::InputValueOrdered],
-) -> Result<WasmResult, Box<dyn std::error::Error>> {
-    run_witgen_loaded(&LoadedModule::load(wasm_path)?, r1cs, params)
+    entry_blob_field_count: usize,
+) -> Result<WasmResult<RawField>, Box<dyn std::error::Error>> {
+    run_witgen_loaded(
+        &LoadedModule::load(wasm_path)?,
+        r1cs,
+        params,
+        entry_blob_field_count,
+    )
 }
 
 /// [`run_witgen`] on a module that is already compiled.
@@ -153,16 +178,39 @@ pub fn run_witgen_loaded(
     loaded: &LoadedModule,
     r1cs: &R1CS,
     params: &[interpreter::InputValueOrdered],
-) -> Result<WasmResult, Box<dyn std::error::Error>> {
+    entry_blob_field_count: usize,
+) -> Result<WasmResult<RawField>, Box<dyn std::error::Error>> {
+    run_witgen_on(
+        loaded,
+        r1cs,
+        &interpreter::flatten_param_vec(params),
+        entry_blob_field_count,
+    )
+}
+
+/// [`run_witgen_loaded`] over `F`, with the entry blob's elements already flattened. Its one caller
+/// passes bn254, the field the WASM runtime computes over.
+fn run_witgen_on<F: MavrosField>(
+    loaded: &LoadedModule,
+    r1cs: &R1CS,
+    input_fields: &[F],
+    entry_blob_field_count: usize,
+) -> Result<WasmResult<F>, Box<dyn std::error::Error>> {
+    assert_eq!(
+        input_fields.len(),
+        entry_blob_field_count,
+        "{} flattened input fields supplied but the entry has {}",
+        input_fields.len(),
+        entry_blob_field_count,
+    );
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
-    let input_fields: Vec<RawField> = interpreter::flatten_param_vec(params);
+    let field_size = field_size::<F>();
 
     let vm_struct_size: u32 = WITGEN_VM_STRUCT_SIZE;
-    // FIELD-ASSUMPTION: L3-field-size
-    let witness_bytes = (witness_count * FIELD_SIZE) as u32;
-    let constraint_bytes = (constraint_count * FIELD_SIZE) as u32;
-    let input_bytes = (input_fields.len() * FIELD_SIZE) as u32;
+    let witness_bytes = (witness_count * field_size) as u32;
+    let constraint_bytes = (constraint_count * field_size) as u32;
+    let input_bytes = (input_fields.len() * field_size) as u32;
     let tables_cap = r1cs.constraints_layout.tables_data_size as u32;
     let table_info_bytes = tables_cap * TABLE_INFO_SLOT_SIZE;
 
@@ -205,19 +253,19 @@ pub fn run_witgen_loaded(
         memory.grow(&mut store, (needed_pages - current_pages) as u64)?;
     }
 
-    // Cursors the host needs to seed. The table registry is written by first-use lookup helpers.
-    // The two table-region cursors (cnst/wit) are seeded at the structural starts of those regions.
+    // Cursors the host must seed: the table registry is written by the first-use lookup helpers,
+    // and the two table-region cursors (cnst/wit) start at their regions' structural starts.
     //
-    // `current_wit_tables_off` is stored _relative to_ `challenges_start` (matches how Phase 2 uses
-    // it: `out_wit_post_comm[wit_base + i]`, where `out_wit_post_comm` starts at challenges_start).
+    // `current_wit_tables_off` is relative to `challenges_start`, as Phase 2 reads
+    // `out_wit_post_comm[wit_base + i]` with `out_wit_post_comm` starting there.
     let mults_cursor_ptr =
-        witness_ptr + (r1cs.witness_layout.multiplicities_start() * FIELD_SIZE) as u32; // FIELD-ASSUMPTION: L3-field-size
+        witness_ptr + (r1cs.witness_layout.multiplicities_start() * field_size) as u32;
     let lookups_a_cursor =
-        a_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+        a_ptr + (r1cs.constraints_layout.lookups_data_start() * field_size) as u32;
     let lookups_b_cursor =
-        b_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+        b_ptr + (r1cs.constraints_layout.lookups_data_start() * field_size) as u32;
     let lookups_c_cursor =
-        c_ptr + (r1cs.constraints_layout.lookups_data_start() * FIELD_SIZE) as u32;
+        c_ptr + (r1cs.constraints_layout.lookups_data_start() * field_size) as u32;
     let current_cnst_tables_off = r1cs.constraints_layout.tables_data_start() as u32;
     let current_wit_tables_off =
         (r1cs.witness_layout.tables_data_start() - r1cs.witness_layout.challenges_start()) as u32;
@@ -256,14 +304,7 @@ pub fn run_witgen_loaded(
         data[off + cwt..off + cwt + 4].copy_from_slice(&current_wit_tables_off.to_le_bytes());
     }
 
-    for (i, field) in input_fields.iter().enumerate() {
-        write_field_to_memory(
-            &memory,
-            &mut store,
-            inputs_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
-            field,
-        );
-    }
+    write_fields_to_memory(&memory, &mut store, inputs_ptr, input_fields);
 
     let func = instance
         .get_func(&mut store, "mavros_main")
@@ -286,43 +327,18 @@ pub fn run_witgen_loaded(
         .i32()
         .ok_or("__live_bytes did not return i32")? as usize;
 
-    // Read outputs from memory
-    let mut out_witness = Vec::with_capacity(witness_count);
-    let mut out_a = Vec::with_capacity(constraint_count);
-    let mut out_b = Vec::with_capacity(constraint_count);
-    let mut out_c = Vec::with_capacity(constraint_count);
-
-    for i in 0..witness_count {
-        // FIELD-ASSUMPTION: L3-field-size
-        let ptr = witness_ptr + (i * FIELD_SIZE) as u32;
-        out_witness.push(read_field_from_memory(&memory, &store, ptr));
-    }
-    for i in 0..constraint_count {
-        out_a.push(read_field_from_memory(
-            &memory,
-            &store,
-            a_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
-        ));
-        out_b.push(read_field_from_memory(
-            &memory,
-            &store,
-            b_ptr + (i * FIELD_SIZE) as u32,
-        ));
-        out_c.push(read_field_from_memory(
-            &memory,
-            &store,
-            c_ptr + (i * FIELD_SIZE) as u32,
-        ));
-    }
+    let out_witness = read_fields_from_memory::<F>(&memory, &store, witness_ptr, witness_count);
+    let out_a = read_fields_from_memory(&memory, &store, a_ptr, constraint_count);
+    let out_b = read_fields_from_memory(&memory, &store, b_ptr, constraint_count);
+    let out_c = read_fields_from_memory(&memory, &store, c_ptr, constraint_count);
 
     // Split witness into pre-commit and post-commit sections
     let pre_comm_count = r1cs.witness_layout.pre_commitment_size();
-    let mut out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
+    let out_wit_pre_comm = out_witness[..pre_comm_count].to_vec();
     let out_wit_post_comm = out_witness[pre_comm_count..].to_vec();
 
     // Walk the registry in table-id order. The host does not name any specific lookup kind; each
-    // runtime-claimed slot describes itself fully via its `TableInfoSlot` fields. `TableInfo`
-    // stores a host pointer, so build it only after `out_wit_pre_comm` exists.
+    // runtime-claimed slot describes itself fully via its `TableInfoSlot` fields.
     let tables_len =
         read_u32_from_memory(&memory, &store, vm_struct_ptr + WITGEN_TABLES_LEN_OFFSET) as usize;
     assert!(
@@ -331,18 +347,11 @@ pub fn run_witgen_loaded(
         tables_len,
         tables_cap
     );
-    let host_witness_base = out_wit_pre_comm.as_mut_ptr();
-    let mut runtime_tables: Vec<(usize, TableInfo)> = Vec::with_capacity(tables_len);
-    for table_idx in 0..tables_len as u32 {
-        runtime_tables.push(read_table_info_slot(
-            &memory,
-            &store,
-            tables_ptr,
-            witness_ptr,
-            host_witness_base,
-            table_idx,
-        ));
-    }
+    let runtime_tables = (0..tables_len as u32)
+        .map(|table_idx| {
+            read_table_info_slot::<F>(&memory, &store, tables_ptr, witness_ptr, table_idx)
+        })
+        .collect();
 
     let (out_wit_pre_comm, out_wit_post_comm, out_a, out_b, out_c) =
         if r1cs.witness_layout.challenges_size > 0 {
@@ -376,27 +385,24 @@ pub fn run_witgen_loaded(
     })
 }
 
-fn witgen_phase2(
+fn witgen_phase2<F: MavrosField>(
     r1cs: &R1CS,
-    mut out_wit_pre_comm: Vec<RawField>,
-    out_wit_post_comm: Vec<RawField>,
-    out_a: Vec<RawField>,
-    out_b: Vec<RawField>,
-    out_c: Vec<RawField>,
-    runtime_tables: Vec<(usize, TableInfo)>,
-) -> interpreter::WitgenResult {
+    mut out_wit_pre_comm: Vec<F>,
+    out_wit_post_comm: Vec<F>,
+    out_a: Vec<F>,
+    out_b: Vec<F>,
+    out_c: Vec<F>,
+    runtime_tables: Vec<Phase2Table>,
+) -> interpreter::WitgenResult<F> {
     use crate::vm::bytecode::AllocationInstrumenter;
 
-    // Re-encode raw-u64 multiplicity slots as Montgomery field elements. Walk the runtime-claimed
-    // table list rather than scanning the entire multiplicities region: the host doesn't know each
-    // table's length statically, only that the runtime registry recorded `length` for every claimed
-    // slot.
-    for (multiplicities_wit_off, tbl) in &runtime_tables {
-        let lo = *multiplicities_wit_off;
+    // Re-encode the raw-`u64` multiplicity slots as elements of `F`, walking the tables the runtime
+    // registry claimed: the host does not know each table's length statically.
+    for tbl in &runtime_tables {
+        let lo = tbl.multiplicities_offset;
         let hi = lo + tbl.length;
         for i in lo..hi {
-            // FIELD-ASSUMPTION: L4-low-limb
-            out_wit_pre_comm[i] = RawField::from(out_wit_pre_comm[i].0.0[0]);
+            out_wit_pre_comm[i] = F::from(out_wit_pre_comm[i].storage_cell0());
         }
     }
 
@@ -408,7 +414,7 @@ fn witgen_phase2(
             "WASM emitted lookup constraints but no tables were claimed at runtime"
         );
 
-        runtime_tables.into_iter().map(|(_, table)| table).collect()
+        runtime_tables
     };
 
     let phase1 = interpreter::Phase1Result {
@@ -431,27 +437,29 @@ fn witgen_phase2(
 // ── AD WASM Runner ───────────────────────────────────────────────────
 
 /// Output from running AD WASM
-pub struct AdWasmResult {
-    pub out_da: Vec<RawField>,
-    pub out_db: Vec<RawField>,
-    pub out_dc: Vec<RawField>,
+pub struct AdWasmResult<F> {
+    pub out_da: Vec<F>,
+    pub out_db: Vec<F>,
+    pub out_dc: Vec<F>,
     pub live_bytes: usize,
 }
 
-/// Write a field element to WASM memory at ptr
-fn write_field_to_memory(
+/// Writes `values` as consecutive elements at `ptr` in linear memory.
+fn write_fields_to_memory<F: MavrosField>(
     memory: &Memory,
     mut store: impl wasmtime::AsContextMut,
     ptr: u32,
-    field: &RawField,
+    values: &[F],
 ) {
-    let limbs = field.0.0;
-    let offset = ptr as usize;
-    let data = memory.data_mut(&mut store);
-    data[offset..offset + 8].copy_from_slice(&limbs[0].to_le_bytes());
-    data[offset + 8..offset + 16].copy_from_slice(&limbs[1].to_le_bytes());
-    data[offset + 16..offset + 24].copy_from_slice(&limbs[2].to_le_bytes());
-    data[offset + 24..offset + 32].copy_from_slice(&limbs[3].to_le_bytes());
+    let mut cells = vec![0u64; values.len() * F::STORAGE_CELLS];
+    for (value, slot) in values.iter().zip(cells.chunks_exact_mut(F::STORAGE_CELLS)) {
+        value.to_frame_cells(slot);
+    }
+    let start = ptr as usize;
+    let bytes = &mut memory.data_mut(&mut store)[start..start + values.len() * field_size::<F>()];
+    for (cell, out) in cells.iter().zip(bytes.chunks_exact_mut(size_of::<u64>())) {
+        out.copy_from_slice(&cell.to_le_bytes());
+    }
 }
 
 /// Run a compiled module's AD entry point against `ad_coeffs`.
@@ -459,7 +467,7 @@ pub fn run_ad(
     wasm_path: &Path,
     r1cs: &R1CS,
     coeffs: &[RawField],
-) -> Result<AdWasmResult, Box<dyn std::error::Error>> {
+) -> Result<AdWasmResult<RawField>, Box<dyn std::error::Error>> {
     run_ad_loaded(&LoadedModule::load(wasm_path)?, r1cs, coeffs)
 }
 
@@ -468,17 +476,31 @@ pub fn run_ad_loaded(
     loaded: &LoadedModule,
     r1cs: &R1CS,
     coeffs: &[RawField],
-) -> Result<AdWasmResult, Box<dyn std::error::Error>> {
+) -> Result<AdWasmResult<RawField>, Box<dyn std::error::Error>> {
+    run_ad_on(loaded, r1cs, coeffs)
+}
+
+/// [`run_ad_loaded`] over `F`. Its one caller passes bn254, the field the WASM runtime computes
+/// over.
+fn run_ad_on<F: MavrosField>(
+    loaded: &LoadedModule,
+    r1cs: &R1CS,
+    coeffs: &[F],
+) -> Result<AdWasmResult<F>, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
     let constraint_count = r1cs.constraints.len();
+    let field_size = field_size::<F>();
+    assert_eq!(
+        coeffs.len(),
+        constraint_count,
+        "the AD run reads one coefficient per constraint"
+    );
 
     let vm_struct_size: u32 = AD_VM_STRUCT_SIZE;
-    // FIELD-ASSUMPTION: L3-field-size
-    let da_bytes = (witness_count * FIELD_SIZE) as u32;
+    let da_bytes = (witness_count * field_size) as u32;
     let db_bytes = da_bytes;
     let dc_bytes = da_bytes;
-    // FIELD-ASSUMPTION: L3-field-size
-    let coeffs_bytes = (constraint_count * FIELD_SIZE) as u32;
+    let coeffs_bytes = (constraint_count * field_size) as u32;
 
     let LoadedModule { engine, module } = loaded;
     let mut store = Store::new(engine, ());
@@ -523,20 +545,12 @@ pub fn run_ad_loaded(
         }
     }
 
-    // Write coefficients into WASM memory
-    for (i, coeff) in coeffs.iter().enumerate() {
-        write_field_to_memory(
-            &memory,
-            &mut store,
-            coeffs_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
-            coeff,
-        );
-    }
+    write_fields_to_memory(&memory, &mut store, coeffs_ptr, coeffs);
 
     // AD lookups need an absolute base for random-access coefficient reads and a fresh-witness
     // counter seeded at the lookups-section start. The three table-allocation cursors
     // (`current_*_tables_off`, `current_wit_multiplicities_off`) are seeded at structural layout
-    // starts; first-use lookup helpers snapshot them and then bump by their own table footprint.
+    // starts; first-use lookup helpers snapshot them and then bump by the footprint of their table.
     let lookups_wit_start = r1cs.witness_layout.lookups_data_start() as u32;
     let cnst_tables_start = r1cs.constraints_layout.tables_data_start() as u32;
     let wit_tables_start = r1cs.witness_layout.tables_data_start() as u32;
@@ -587,28 +601,9 @@ pub fn run_ad_loaded(
         .i32()
         .ok_or("__live_bytes did not return i32")? as usize;
 
-    // Read dA, dB, dC from memory
-    let mut out_da = Vec::with_capacity(witness_count);
-    let mut out_db = Vec::with_capacity(witness_count);
-    let mut out_dc = Vec::with_capacity(witness_count);
-
-    for i in 0..witness_count {
-        out_da.push(read_field_from_memory(
-            &memory,
-            &store,
-            da_ptr + (i * FIELD_SIZE) as u32, // FIELD-ASSUMPTION: L3-field-size
-        ));
-        out_db.push(read_field_from_memory(
-            &memory,
-            &store,
-            db_ptr + (i * FIELD_SIZE) as u32,
-        ));
-        out_dc.push(read_field_from_memory(
-            &memory,
-            &store,
-            dc_ptr + (i * FIELD_SIZE) as u32,
-        ));
-    }
+    let out_da = read_fields_from_memory(&memory, &store, da_ptr, witness_count);
+    let out_db = read_fields_from_memory(&memory, &store, db_ptr, witness_count);
+    let out_dc = read_fields_from_memory(&memory, &store, dc_ptr, witness_count);
 
     Ok(AdWasmResult {
         out_da,
@@ -616,4 +611,48 @@ pub fn run_ad_loaded(
         out_dc,
         live_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
+
+    use super::*;
+
+    /// An empty module and system: both checks run before the module is instantiated.
+    fn empty_module_and_system() -> (LoadedModule, R1CS) {
+        let engine = wasm_engine().unwrap();
+        let module = wasmtime::Module::new(&engine, b"\0asm\x01\0\0\0").unwrap();
+        let r1cs = R1CS {
+            witness_layout: WitnessLayout {
+                algebraic_size: 0,
+                multiplicities_size: 0,
+                challenges_size: 0,
+                tables_data_size: 0,
+                lookups_data_size: 0,
+            },
+            constraints_layout: ConstraintsLayout {
+                algebraic_size: 0,
+                tables_data_size: 0,
+                lookups_data_size: 0,
+            },
+            constraints: Vec::new(),
+        };
+        (LoadedModule { engine, module }, r1cs)
+    }
+
+    #[test]
+    #[should_panic(expected = "the AD run reads one coefficient per constraint")]
+    fn an_ad_run_needs_one_coefficient_per_constraint() {
+        let (loaded, r1cs) = empty_module_and_system();
+        let _ = run_ad_loaded(&loaded, &r1cs, &[RawField::from(1u64)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "1 flattened input fields supplied but the entry has 2")]
+    fn a_witgen_run_needs_the_entry_blob_field_count() {
+        let (loaded, r1cs) = empty_module_and_system();
+        let inputs = [interpreter::InputValueOrdered::Field(RawField::from(1u64))];
+        let _ = run_witgen_loaded(&loaded, &r1cs, &inputs, 2);
+    }
 }

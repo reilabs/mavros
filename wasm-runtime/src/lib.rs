@@ -1,21 +1,16 @@
 //! Runtime Library for Mavros WASM
 //!
-//! Provides BN254 field arithmetic and heap allocation called by
-//! LLVM-generated WASM. Field elements are 4 x i64 limbs in Montgomery form.
+//! Provides field arithmetic and heap allocation called by LLVM-generated WASM. Field elements are
+//! 4 x i64 limbs in Montgomery form.
 //!
 //! ABI (matching LLVM's wasm32 lowering of [4 x i64]):
 //!   __field_mul(result_ptr, a0, a1, a2, a3, b0, b1, b2, b3)
 //!
-//! VM struct access (forward-pass writes, AD accumulators, AD witness/coeff
-//! counters) is emitted inline in the generated LLVM module as GEP/load/store
-//! against the vm_ptr — see `codegen/llssa_llvm_codegen.rs`.
+//! VM struct access (forward-pass writes, AD accumulators, AD witness/coeff counters) is emitted
+//! inline in the generated LLVM module as GEP/load/store against the vm_ptr — see
+//! `compiler/src/compiler/codegen/llssa_to_llvm.rs`.
 
-// FIELD-ASSUMPTION: L1-direct-ref (1 sites)
 use core::mem::MaybeUninit;
-
-use ark_bn254::Fr;
-use ark_ff::BigInt;
-use mavros_limb_arith::{divide_by_limb, knuth_divide, negate, significant_limbs};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Heap allocation (delegates to Rust's global allocator, dlmalloc on wasm32)
@@ -23,7 +18,7 @@ use mavros_limb_arith::{divide_by_limb, knuth_divide, negate, significant_limbs}
 // Each allocation prepends an 8-byte header storing the requested size so that
 // free() can reconstruct the Layout needed by dealloc().
 //
-// LIVE_BYTES tracks the bytes currently held by malloc.
+// LIVE_BYTES tracks the bytes held by malloc.
 // The host can read it via __live_bytes()
 //
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -83,196 +78,226 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Field arithmetic
+//
+// `field_runtime!` defines one field's seven entry points on a four-limb arkworks `Fp` type, under
+// the symbol names `FieldRuntimeSymbols` (`compiler/src/compiler/codegen/llssa_to_llvm.rs`) gives
+// that field, passed positionally in the matcher's order, which is the order it defines them in. An
+// operand is the type's Montgomery storage, four limbs by value; a field result comes back through
+// `result_ptr`. The helpers expand at the call site beside the entry points, so a second field's
+// instance needs a separate module.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[inline]
-fn limbs_to_fr(l0: i64, l1: i64, l2: i64, l3: i64) -> Fr {
-    Fr::new_unchecked(BigInt::new([l0 as u64, l1 as u64, l2 as u64, l3 as u64]))
+macro_rules! field_runtime {
+    (
+        $field:ty,
+        $mul:ident,
+        $from_limbs:ident,
+        $to_limbs:ident,
+        $sub:ident,
+        $add:ident,
+        $div:ident,
+        $lt:ident,
+    ) => {
+        #[inline]
+        fn limbs_to_fr(l0: i64, l1: i64, l2: i64, l3: i64) -> $field {
+            <$field>::new_unchecked(ark_ff::BigInt::new([
+                l0 as u64, l1 as u64, l2 as u64, l3 as u64,
+            ]))
+        }
+
+        #[inline]
+        unsafe fn write_field(ptr: *mut u64, fr: $field) {
+            let limbs = fr.0.0;
+            unsafe {
+                *ptr = limbs[0];
+                *ptr.add(1) = limbs[1];
+                *ptr.add(2) = limbs[2];
+                *ptr.add(3) = limbs[3];
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $mul(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            unsafe { write_field(result_ptr, a * b) };
+        }
+
+        /// Canonical limbs to Montgomery storage. Panics on limbs not less than the modulus.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $from_limbs(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+        ) {
+            use ark_ff::PrimeField;
+            let bigint = ark_ff::BigInt::new([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
+            let fr = <$field>::from_bigint(bigint).expect("Constructing a field from limbs failed");
+            unsafe { write_field(result_ptr, fr) };
+        }
+
+        /// Montgomery storage to canonical limbs.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $to_limbs(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+        ) {
+            use ark_ff::PrimeField;
+            let fr = limbs_to_fr(a0, a1, a2, a3);
+            let bigint = fr.into_bigint();
+            unsafe {
+                *result_ptr = bigint.0[0];
+                *result_ptr.add(1) = bigint.0[1];
+                *result_ptr.add(2) = bigint.0[2];
+                *result_ptr.add(3) = bigint.0[3];
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $sub(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            unsafe { write_field(result_ptr, a - b) };
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $add(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            unsafe { write_field(result_ptr, a + b) };
+        }
+
+        /// `a / b`, and zero when `b` is zero.
+        // FIELD-ASSUMPTION: L4-inverse
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $div(
+            result_ptr: *mut u64,
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) {
+            use ark_ff::AdditiveGroup;
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            let result = if b == <$field>::ZERO {
+                <$field>::ZERO
+            } else {
+                a / b
+            };
+            unsafe { write_field(result_ptr, result) };
+        }
+
+        /// Whether `a < b` as canonical integers.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $lt(
+            a0: i64,
+            a1: i64,
+            a2: i64,
+            a3: i64,
+            b0: i64,
+            b1: i64,
+            b2: i64,
+            b3: i64,
+        ) -> bool {
+            use ark_ff::PrimeField;
+            let a = limbs_to_fr(a0, a1, a2, a3);
+            let b = limbs_to_fr(b0, b1, b2, b3);
+            a.into_bigint() < b.into_bigint()
+        }
+    };
 }
 
-#[inline]
-unsafe fn write_field(ptr: *mut u64, fr: Fr) {
-    let limbs = fr.0.0;
-    unsafe {
-        *ptr = limbs[0];
-        *ptr.add(1) = limbs[1];
-        *ptr.add(2) = limbs[2];
-        *ptr.add(3) = limbs[3];
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_mul(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    unsafe { write_field(result_ptr, a * b) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field conversion
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_from_limbs(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-) {
-    use ark_ff::PrimeField;
-    let bigint = BigInt::new([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
-    let fr = Fr::from_bigint(bigint).expect("Constructing a field from limbs failed");
-    unsafe { write_field(result_ptr, fr) };
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_to_limbs(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-) {
-    use ark_ff::PrimeField;
-    let fr = limbs_to_fr(a0, a1, a2, a3);
-    let bigint = fr.into_bigint();
-    unsafe {
-        *result_ptr = bigint.0[0];
-        *result_ptr.add(1) = bigint.0[1];
-        *result_ptr.add(2) = bigint.0[2];
-        *result_ptr.add(3) = bigint.0[3];
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field subtraction
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_sub(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    unsafe { write_field(result_ptr, a - b) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field addition
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_add(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    unsafe { write_field(result_ptr, a + b) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field division
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// FIELD-ASSUMPTION: L4-inverse
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_div(
-    result_ptr: *mut u64,
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) {
-    use ark_ff::AdditiveGroup;
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    let result = if b == Fr::ZERO { Fr::ZERO } else { a / b };
-    unsafe { write_field(result_ptr, result) };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Field less-than
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __field_lt(
-    a0: i64,
-    a1: i64,
-    a2: i64,
-    a3: i64,
-    b0: i64,
-    b1: i64,
-    b2: i64,
-    b3: i64,
-) -> bool {
-    use ark_ff::PrimeField;
-    let a = limbs_to_fr(a0, a1, a2, a3);
-    let b = limbs_to_fr(b0, b1, b2, b3);
-    a.into_bigint() < b.into_bigint()
+// FIELD-ASSUMPTION: L1-direct-ref (1 sites)
+field_runtime! {
+    ark_bn254::Fr,
+    __field_mul,
+    __field_from_limbs,
+    __field_to_limbs,
+    __field_sub,
+    __field_add,
+    __field_div,
+    __field_lt,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Wide integer helpers
 //
-// ABI, following the convention above: the result comes back through a pointer,
-// and the operands are pointers too because a width-generic helper cannot take
-// an `iN` by value — one body serves every width, so the width arrives as the
-// limb count `limbs` instead of in the type.
+// ABI, following the convention above: the operands are pointers, because one
+// body serves every width and so cannot take an `iN` by value, and an integer
+// result comes back through a pointer too. A comparison returns its answer as a
+// `u32`, `1` or `0`.
 //
 //   __int_add(result_ptr, a_ptr, b_ptr, limbs)
 //   __int_sub(result_ptr, a_ptr, b_ptr, limbs)
 //   __int_mul(result_ptr, a_ptr, b_ptr, limbs)
 //   __int_udivrem(quotient_ptr, remainder_ptr, a_ptr, b_ptr, limbs)
 //   __int_sdivrem(quotient_ptr, remainder_ptr, a_ptr, b_ptr, limbs)
+//   __int_shl(result_ptr, a_ptr, b_ptr, limbs, bits)
+//   __int_lshr(result_ptr, a_ptr, b_ptr, limbs, bits)
+//   __int_ashr(result_ptr, a_ptr, b_ptr, limbs, bits)
 //   __int_spread(result_ptr, a_ptr, limbs, bits)
 //   __int_unspread(odd_ptr, even_ptr, a_ptr, limbs, bits)
+//   __int_eq(a_ptr, b_ptr, limbs) -> u32
+//   __int_ult(a_ptr, b_ptr, limbs) -> u32
+//   __int_slt(a_ptr, b_ptr, limbs, bits) -> u32
 //
-// Every buffer is `limbs` little-endian `u64`s, which is exactly how LLVM lays
-// an `iN` out in memory on this little-endian target: the caller stores an
-// `i64*limbs` value into the slot and loads the answer back out of it. The
-// signed division reads its operands at that whole width, so the caller
-// sign-extends them into the slot where the unsigned ones zero-extend.
+// Every buffer is `limbs` little-endian `u64`s, which is how LLVM lays out an `iN`
+// on this target: the caller stores an `i64*limbs` value into the slot and loads
+// the answer back. A helper that also takes `bits` reads its operand at that
+// width: a shift wraps and reduces its amount there, `__int_slt` and `__int_ashr`
+// take the sign from bit `bits - 1`, and a spread or unspread reads only the low
+// `bits` bits. The signed division takes no `bits` and reads its operands at the
+// whole `64 * limbs` bits, so the caller sign-extends them where the unsigned ones
+// zero-extend.
 //
-// LLVM's own expansion of a wide `mul` is straight-line code quadratic in the
-// width -- 7.2 MB at `i16384`, and past the wasm engine's function-size and
-// local-count caps from about `i5700` up -- where a loop over the limbs is one
-// small function serving every width. Its wide `udiv` and `sdiv` are linear but
-// not small: unoptimised codegen gives a bit-serial loop of about 20 000 wasm
-// locals for a `udiv` at `i16384`, and 28 000 to 36 000 for an `sdiv`, against
-// the engine's cap of 50 000 per function. Even its wide `add` and `sub`, linear
-// and branch-free, cost about 4 400 and 3 500 locals at `i16384` unoptimised,
-// where a call to a helper costs about 770: the store and load of its buffers.
+// Why helpers: LLVM expands a wide `mul` into straight-line code quadratic in the
+// width (7.2 MB at `i16384`, and past the wasm engine's function-size and
+// local-count caps from about `i5700`); a loop over the limbs is one small
+// function. Its wide `udiv` and `sdiv` are linear but large: unoptimized, about
+// 20 000 wasm locals for a `udiv` at `i16384` and 28 000 to 36 000 for an
+// `sdiv`, against the engine's cap of 50 000 per function. Even `add` and `sub`
+// cost about 4 400 and 3 500 locals at `i16384`, where a helper call costs about
+// 770 (the store and load of its buffers).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// The low `limbs` limbs of `a + b`.
@@ -315,8 +340,8 @@ pub unsafe extern "C" fn __int_sub(result: *mut u64, a: *const u64, b: *const u6
 /// # Safety
 ///
 /// `result` must be writable for `limbs` `u64`s, and `a` and `b` readable for `limbs` each.
-/// `result` must not overlap either operand; the backend gives each of the three its own scratch
-/// buffer, which is what `the_scratch_buffers_are_shared_and_sit_in_the_entry_block` counts.
+/// `result` must not overlap either operand; the backend gives each of the three a separate
+/// scratch buffer, as `the_scratch_buffers_are_shared_and_sit_in_the_entry_block` checks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __int_mul(result: *mut u64, a: *const u64, b: *const u64, limbs: u32) {
     let k = limbs as usize;
@@ -331,9 +356,9 @@ pub unsafe extern "C" fn __int_mul(result: *mut u64, a: *const u64, b: *const u6
 
 /// The widest operand any helper here is handed, in limbs.
 ///
-/// `MAX_BITS` in `mavros-int-semantics` caps every integer type at 16384 bits, so no division is
-/// wider than this, and the divisions keep their working copies in arrays of this size on their own
-/// stack rather than allocating. `the_limb_cap_is_the_type_cap` ties the two together.
+/// `MAX_BITS` in `mavros-int-semantics` caps every integer at 16384 bits, so the divisions keep
+/// their scratch in stack arrays sized from this, with no allocation.
+/// `the_limb_cap_is_the_type_cap` ties the two caps together.
 const MAX_LIMBS: usize = 256;
 
 /// The first `len` limbs of a stack buffer, zeroed, as a slice.
@@ -344,18 +369,17 @@ fn zeroed(store: &mut [MaybeUninit<u64>], len: usize) -> &mut [u64] {
     for limb in prefix.iter_mut() {
         limb.write(0);
     }
-    // SAFETY: every element of `prefix` was just initialised, and `MaybeUninit<u64>` has the
+    // SAFETY: every element of `prefix` was just initialized, and `MaybeUninit<u64>` has the
     // layout of `u64`.
     unsafe { &mut *(core::ptr::from_mut(prefix) as *mut [u64]) }
 }
 
 /// `a / b` and `a % b`, both read as unsigned, written into `quotient` and `remainder`.
 ///
-/// Total: a zero divisor answers zero for both results, as the VM's `int_limbs::udivrem` does. This
-/// holds for a call; a division by a constant zero that codegen folds instead of calling this is
-/// LLVM's poison. It is undefined behavior in LLVM's own `udiv`, and the model leaves it
-/// unspecified because the guard IR keeps it from any division: a guarded one branches around it
-/// and an unguarded one asserts first.
+/// Total: a zero divisor answers zero for both results, as the VM's `int_limbs::udivrem` does. A
+/// division by a constant zero that codegen folds, never calling this, is LLVM poison.
+/// The model leaves the case unspecified, because the guard IR never lets a division see a zero
+/// divisor: a guarded one branches around it and an unguarded one asserts first.
 ///
 /// # Safety
 ///
@@ -407,58 +431,18 @@ pub unsafe extern "C" fn __int_sdivrem(
     }
 }
 
-/// The body of [`__int_udivrem`], over slices of one length.
+/// The body of [`__int_udivrem`], over slices of one length, by [`mavros_limb_arith::udivrem`].
 fn udivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64]) {
-    quotient.fill(0);
-    remainder.fill(0);
-
-    match significant_limbs(b) {
-        0 => {}
-        1 => remainder[0] = divide_by_limb(quotient, a, b[0]),
-        n => {
-            let mut divisor_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS];
-            let mut dividend_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS + 1];
-            let divisor = zeroed(&mut divisor_store, n);
-            let dividend = zeroed(&mut dividend_store, a.len() + 1);
-            knuth_divide(quotient, remainder, a, &b[..n], divisor, dividend);
-        }
-    }
+    let mut store = [MaybeUninit::<u64>::uninit(); 2 * MAX_LIMBS + 1];
+    let scratch = zeroed(&mut store, 2 * a.len() + 1);
+    mavros_limb_arith::udivrem(quotient, remainder, a, b, scratch);
 }
 
-/// The body of [`__int_sdivrem`]: sign-magnitude around [`udivrem`].
-///
-/// The quotient takes the operands' xor and the remainder takes the dividend's sign, which is
-/// truncation toward zero.
+/// The body of [`__int_sdivrem`], by [`mavros_limb_arith::sdivrem`] at the buffer's whole width.
 fn sdivrem(quotient: &mut [u64], remainder: &mut [u64], a: &[u64], b: &[u64]) {
-    let k = a.len();
-    let mut a_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS];
-    let mut b_store = [MaybeUninit::<u64>::uninit(); MAX_LIMBS];
-    let a_magnitude = zeroed(&mut a_store, k);
-    let b_magnitude = zeroed(&mut b_store, k);
-    a_magnitude.copy_from_slice(a);
-    b_magnitude.copy_from_slice(b);
-
-    let (a_negative, b_negative) = (is_negative(a), is_negative(b));
-    if a_negative {
-        negate(a_magnitude);
-    }
-    if b_negative {
-        negate(b_magnitude);
-    }
-
-    udivrem(quotient, remainder, a_magnitude, b_magnitude);
-
-    if a_negative != b_negative {
-        negate(quotient);
-    }
-    if a_negative {
-        negate(remainder);
-    }
-}
-
-/// The top bit of the top limb, which is the sign of a value read at the buffer's whole width.
-fn is_negative(value: &[u64]) -> bool {
-    value.last().is_some_and(|&top| top >> 63 == 1)
+    let mut store = [MaybeUninit::<u64>::uninit(); 4 * MAX_LIMBS + 1];
+    let scratch = zeroed(&mut store, 4 * a.len() + 1);
+    mavros_limb_arith::sdivrem(quotient, remainder, a, b, 64 * a.len(), scratch);
 }
 
 /// The low `bits` bits of `a` spread into `result`, bit `i` to bit `2i`, by
@@ -508,27 +492,147 @@ pub unsafe extern "C" fn __int_unspread(
     }
 }
 
-/// The runtime helper's conformance relation to the normative model in `mavros-int-semantics`.
+/// `a` shifted by `b` at `bits`, by the [`mavros_limb_arith`] shift `shift` names, with `b` read as
+/// unsigned and reduced modulo `bits` first.
 ///
-/// The wide helpers are the only integer operations this crate evaluates, and they are reached only
-/// from the LLVM backend, so they conform under the `llvm` tag rather than one of their own. The
-/// relation is that backend's: equal to [`residue`](mavros_int_semantics::residue) wherever the
-/// model has an opinion, which for a sum, difference or product is everywhere and for a division is
-/// everywhere but a zero divisor and a signed `INT_MIN / -1`.
+/// # Safety
 ///
-/// The sweep runs at the narrow widths as well as the wide ones, though the backend routes only
-/// the wide ones here. A width-generic body is either right at a width or it is not, and one and
-/// two limbs are where a limb-count error is visible rather than averaged over.
+/// As [`__int_add`], and `bits` must be at least one and `limbs` must be `ceil(bits / 64)`. Every
+/// bit of `b` above `bits` must be clear, as its whole buffer is the amount reduced; `a`'s are
+/// masked off.
+unsafe fn shift_at_width(
+    shift: fn(&mut [u64], &[u64], usize, usize),
+    result: *mut u64,
+    a: *const u64,
+    b: *const u64,
+    limbs: u32,
+    bits: u32,
+) {
+    let (k, bits) = (limbs as usize, bits as usize);
+    unsafe {
+        let b = core::slice::from_raw_parts(b, k);
+        shift(
+            core::slice::from_raw_parts_mut(result, k),
+            core::slice::from_raw_parts(a, k),
+            mavros_limb_arith::shift_amount(b, bits),
+            bits,
+        );
+    }
+}
+
+/// `a << b` at `bits`, wrapping there, with `b` read as unsigned and reduced modulo `bits`.
+///
+/// # Safety
+///
+/// As [`shift_at_width`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_shl(
+    result: *mut u64,
+    a: *const u64,
+    b: *const u64,
+    limbs: u32,
+    bits: u32,
+) {
+    unsafe { shift_at_width(mavros_limb_arith::shl, result, a, b, limbs, bits) }
+}
+
+/// `a >> b` at `bits`, zero-filling, with `b` read as unsigned and reduced modulo `bits`.
+///
+/// # Safety
+///
+/// As [`shift_at_width`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_lshr(
+    result: *mut u64,
+    a: *const u64,
+    b: *const u64,
+    limbs: u32,
+    bits: u32,
+) {
+    unsafe { shift_at_width(mavros_limb_arith::ushr, result, a, b, limbs, bits) }
+}
+
+/// `a >> b` at `bits`, sign-filling under a two's complement reading there, with `b` read as
+/// unsigned and reduced modulo `bits`.
+///
+/// # Safety
+///
+/// As [`shift_at_width`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_ashr(
+    result: *mut u64,
+    a: *const u64,
+    b: *const u64,
+    limbs: u32,
+    bits: u32,
+) {
+    unsafe { shift_at_width(mavros_limb_arith::ashr, result, a, b, limbs, bits) }
+}
+
+/// Whether `a == b`, as `1` or `0`.
+///
+/// # Safety
+///
+/// `a` and `b` must be readable for `limbs` `u64`s each, with every bit above the width they are
+/// compared at clear, as the whole of both buffers is compared.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_eq(a: *const u64, b: *const u64, limbs: u32) -> u32 {
+    let k = limbs as usize;
+    unsafe { u32::from(core::slice::from_raw_parts(a, k) == core::slice::from_raw_parts(b, k)) }
+}
+
+/// Whether `a < b` reading both as unsigned, as `1` or `0`.
+///
+/// # Safety
+///
+/// As [`__int_eq`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_ult(a: *const u64, b: *const u64, limbs: u32) -> u32 {
+    let k = limbs as usize;
+    unsafe {
+        u32::from(mavros_limb_arith::ult(
+            core::slice::from_raw_parts(a, k),
+            core::slice::from_raw_parts(b, k),
+        ))
+    }
+}
+
+/// Whether `a < b` reading both as two's complement at `bits`, as `1` or `0`.
+///
+/// # Safety
+///
+/// As [`__int_eq`], and `bits` must be at least one and `limbs` must be `ceil(bits / 64)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __int_slt(a: *const u64, b: *const u64, limbs: u32, bits: u32) -> u32 {
+    let k = limbs as usize;
+    unsafe {
+        u32::from(mavros_limb_arith::slt(
+            core::slice::from_raw_parts(a, k),
+            core::slice::from_raw_parts(b, k),
+            bits as usize,
+        ))
+    }
+}
+
+/// The runtime helpers' conformance to the normative model in `mavros-int-semantics`.
+///
+/// Only the LLVM backend calls these helpers, so they conform under its `llvm` tag and its
+/// relation: equal to [`residue`](mavros_int_semantics::residue) wherever the model has an answer,
+/// which is everywhere except a division by zero and a signed `INT_MIN / -1`. A comparison is held
+/// to [`IntBits::compare`](mavros_int_semantics::IntBits::compare).
+///
+/// The sweep also covers narrow widths, which the backend never routes here: one and two limbs are
+/// where a limb-count error shows most plainly.
 #[cfg(test)]
 mod int_semantics_conformance {
     use mavros_int_semantics::{
-        IntBits, IntOp, MAX_BITS, corners, int_bits::HOST_LIMB_BITS, residue,
+        CmpOp, IntBits, IntOp, MAX_BITS, corners, int_bits::HOST_LIMB_BITS, residue,
     };
 
     /// [`super::__int_mul`] applied to two patterns of the same width.
     ///
-    /// The buffers are the pattern's own limbs, which is the caller's job in the backend: an
-    /// `iN` is stored into a slot of `ceil(N / 64)` limbs and the answer is read back out of one.
+    /// The buffers are the patterns' limbs, as in the backend, which stores an `iN` into a slot of
+    /// `ceil(N / 64)` limbs and reads the answer back out of one.
     fn helper_mul(a: &IntBits, b: &IntBits) -> IntBits {
         assert_eq!(a.bits(), b.bits());
         let limbs = a.limb_count();
@@ -633,12 +737,9 @@ mod int_semantics_conformance {
         );
     }
 
-    /// The inputs the model leaves unspecified still get an answer, and it is the VM's.
-    ///
-    /// A zero divisor answers zero for both quotient and remainder, and a signed `INT_MIN / -1`
-    /// wraps to `INT_MIN` with a zero remainder. The guard IR keeps both from any division, so this
-    /// is not conformance; it is the helper being total rather than trapping, which is what the
-    /// wasm engine would otherwise make of a Rust division by zero.
+    /// The inputs the model leaves unspecified get the VM's answer: a zero divisor gives zero for
+    /// both, and a signed `INT_MIN / -1` wraps to `INT_MIN` with remainder zero. Guard IR keeps
+    /// these from every division; the helper is total and never traps.
     #[test]
     fn the_helper_divisions_are_total() {
         for bits in [129, 1000, 16384] {
@@ -659,14 +760,9 @@ mod int_semantics_conformance {
         }
     }
 
-    /// The one input shape where Knuth D's first estimate survives its correction loop and is still
-    /// one too large, so the window goes negative and the divisor is added back.
-    ///
-    /// Hacker's Delight's `divmnu` vector, with its 32-bit digits scaled to 64-bit limbs:
-    /// `2^191 + 3` divided by `2^189 + 1`. Normalising shifts both left by two, the estimate from
-    /// the top two limbs is 4, and the true quotient is 3. The corner sweep reaches the add-back
-    /// too, but only through whichever corners the shared set happens to hold; this pins it to an
-    /// input whose path is known.
+    /// The add-back path of Knuth D, on Hacker's Delight's `divmnu` vector scaled to 64-bit limbs:
+    /// `(2^191 + 3) / (2^189 + 1)`, where the estimate is 4 and the true quotient 3. The corner
+    /// sweep reaches this path only by chance.
     #[test]
     fn a_quotient_limb_estimated_one_too_large_is_added_back() {
         let bits = 192;
@@ -758,6 +854,93 @@ mod int_semantics_conformance {
         );
     }
 
+    /// [`super::__int_shl`], [`super::__int_lshr`] or [`super::__int_ashr`] applied to a value and
+    /// an amount of the same width, the way the backend calls them: zero-extended to whole limbs,
+    /// which keeps both the amount's unsigned value and the value's sign bit where the helper reads
+    /// them.
+    fn helper_shift(op: IntOp, a: &IntBits, b: &IntBits) -> IntBits {
+        assert_eq!(a.bits(), b.bits());
+        let limbs = a.limb_count();
+        let mut out = vec![0u64; limbs];
+        let helper = match op {
+            IntOp::Shl => super::__int_shl,
+            IntOp::UShr => super::__int_lshr,
+            IntOp::SShr => super::__int_ashr,
+            other => unreachable!("{other:?} is not a shift"),
+        };
+        unsafe {
+            helper(
+                out.as_mut_ptr(),
+                a.limbs().as_ptr(),
+                b.limbs().as_ptr(),
+                limbs as u32,
+                a.bits() as u32,
+            );
+        }
+        IntBits::from_limbs(a.bits(), &out)
+    }
+
+    /// [`super::__int_eq`], [`super::__int_ult`] or [`super::__int_slt`] applied to two patterns of
+    /// the same width.
+    fn helper_compare(op: CmpOp, a: &IntBits, b: &IntBits) -> bool {
+        assert_eq!(a.bits(), b.bits());
+        let limbs = a.limb_count() as u32;
+        let (a_limbs, b_limbs) = (a.limbs().as_ptr(), b.limbs().as_ptr());
+        let answer = unsafe {
+            match op {
+                CmpOp::Eq => super::__int_eq(a_limbs, b_limbs, limbs),
+                CmpOp::ULt => super::__int_ult(a_limbs, b_limbs, limbs),
+                CmpOp::SLt => super::__int_slt(a_limbs, b_limbs, limbs, a.bits() as u32),
+            }
+        };
+        assert!(answer <= 1, "{op:?} answered {answer}, which is not a bit");
+        answer == 1
+    }
+
+    /// The three shifts over every amount the model sweeps, an over-wide one included since the
+    /// helper reduces it, and the three orderings over every corner pair.
+    #[test]
+    fn the_helper_shifts_and_orderings_agree_with_the_model() {
+        let (mut shifted, mut ordered) = (0usize, 0usize);
+        let mut widths = vec![1usize, 2, 7, 8, 63, 64, 65, 96, 127, 128];
+        widths.extend(corners::WIDE_WIDTHS);
+
+        for &bits in &widths {
+            for op in [IntOp::Shl, IntOp::UShr, IntOp::SShr] {
+                let values = corners::wide_values(bits);
+                for a in &values {
+                    for b in &corners::wide_shift_amounts(bits) {
+                        let want = residue(op, a, b).expect("a shift always has a residue");
+                        let got = helper_shift(op, a, b);
+                        assert_eq!(
+                            got, want,
+                            "{op:?} at {bits} bits: {a:?} by {b:?} gave {got:?}, model says {want:?}"
+                        );
+                        shifted += 1;
+                    }
+                }
+            }
+            let values = corners::wide_values(bits);
+            for a in &values {
+                for b in &values {
+                    for op in CmpOp::ALL {
+                        assert_eq!(
+                            helper_compare(op, a, b),
+                            a.compare(op, b),
+                            "{op:?} at {bits} bits: {a:?}, {b:?}"
+                        );
+                        ordered += 1;
+                    }
+                }
+            }
+        }
+        assert!(shifted > 10_000, "the shifts only reached {shifted} points");
+        assert!(
+            ordered > 10_000,
+            "the orderings only reached {ordered} points"
+        );
+    }
+
     #[test]
     fn the_helper_multiply_agrees_with_the_model() {
         let mut checked = 0usize;
@@ -772,10 +955,8 @@ mod int_semantics_conformance {
             .expect("the wide set is not empty");
 
         for bits in widths {
-            // Both sides of a multiply are values, so the two lists are the same; taking it from
-            // `wide_operands` is what ensures this remains a fact about the _operation_ rather than
-            // about this loop, and builds each 256-limb pattern once instead of once per left
-            // operand.
+            // A multiply's two operand lists are the same; `wide_operands` builds each 256-limb
+            // pattern once.
             let (lhs, rhs) = corners::wide_operands(IntOp::UMul, bits);
             for a in &lhs {
                 for b in &rhs {
@@ -800,20 +981,15 @@ mod int_semantics_conformance {
             "the sweep only reached {checked} specified points"
         );
 
-        // And without this the wide half could contribute nothing at all while the narrow half
-        // carried the count on its own.
+        // Without this, the narrow half alone could meet the count above.
         assert!(
             at_the_widest > 100,
             "the widest width contributed only {at_the_widest} points"
         );
     }
 
-    /// The truncation is the operation's, not an accident of the buffer being full.
-    ///
-    /// At a width that is not a limb multiple the product's top limb carries bits the answer does
-    /// not, and dropping them is [`IntBits`]'s normalisation rather than anything `__int_mul` does.
-    /// This pins the pair that would otherwise only be swept: a product whose true value overflows
-    /// the width, at a width that half-fills its top limb.
+    /// `__int_mul` itself truncates past the width, with no help from [`IntBits`]'s normalization:
+    /// a product that overflows a width half-filling its top limb.
     #[test]
     fn a_product_that_overflows_the_width_is_truncated_to_it() {
         let bits = 129;
@@ -840,7 +1016,7 @@ mod int_semantics_conformance {
         let mut widths = vec![1usize, 2, 7, 8, 63, 64, 65, 96, 127, 128];
         widths.extend(corners::WIDE_WIDTHS);
 
-        // A spread doubles its operand, so its widest is half the cap rather than the cap.
+        // A spread doubles its operand, so its widest is half the cap.
         let mut spread_widths: Vec<usize> = widths
             .iter()
             .copied()
@@ -901,5 +1077,79 @@ mod int_semantics_conformance {
 
         assert!(spread_widths.contains(&(MAX_BITS / 2)));
         assert!(unspread_widths.contains(&MAX_BITS) && unspread_widths.contains(&(MAX_BITS - 1)));
+    }
+}
+
+/// The bn254 field entry points against arkworks, through the storage-limb ABI codegen calls them
+/// with. A panic cannot unwind out of an `extern "C"` function, so `from_limbs`' refusal of an
+/// out-of-range integer aborts the process and has no `should_panic` test here.
+#[cfg(test)]
+mod field_entry_points {
+    use ark_bn254::Fr;
+    use ark_ff::{AdditiveGroup, BigInt, Field, PrimeField};
+
+    type Binary = unsafe extern "C" fn(*mut u64, i64, i64, i64, i64, i64, i64, i64, i64);
+    type Unary = unsafe extern "C" fn(*mut u64, i64, i64, i64, i64);
+
+    fn storage(x: Fr) -> [i64; 4] {
+        x.0.0.map(|limb| limb as i64)
+    }
+
+    fn binary(op: Binary, a: Fr, b: Fr) -> Fr {
+        let ([a0, a1, a2, a3], [b0, b1, b2, b3]) = (storage(a), storage(b));
+        let mut out = [0u64; 4];
+        unsafe { op(out.as_mut_ptr(), a0, a1, a2, a3, b0, b1, b2, b3) };
+        Fr::new_unchecked(BigInt::new(out))
+    }
+
+    fn unary(op: Unary, limbs: [u64; 4]) -> [u64; 4] {
+        let [l0, l1, l2, l3] = limbs.map(|limb| limb as i64);
+        let mut out = [0u64; 4];
+        unsafe { op(out.as_mut_ptr(), l0, l1, l2, l3) };
+        out
+    }
+
+    fn samples() -> Vec<Fr> {
+        let big = Fr::from(3u64).pow([200u64]) + Fr::from(11u64);
+        vec![Fr::ZERO, Fr::ONE, Fr::from(7u64), -Fr::ONE, big, -big]
+    }
+
+    #[test]
+    fn arithmetic_matches_the_field() {
+        for a in samples() {
+            for b in samples() {
+                assert_eq!(binary(super::__field_add, a, b), a + b);
+                assert_eq!(binary(super::__field_sub, a, b), a - b);
+                assert_eq!(binary(super::__field_mul, a, b), a * b);
+                let quotient = if b == Fr::ZERO { Fr::ZERO } else { a / b };
+                assert_eq!(binary(super::__field_div, a, b), quotient);
+            }
+        }
+    }
+
+    /// Ordered on the canonical integers. The samples include a pair whose Montgomery storage
+    /// orders the other way, so comparing storage fails this.
+    #[test]
+    fn less_than_compares_canonical_integers() {
+        let mut storage_disagrees = false;
+        for a in samples() {
+            for b in samples() {
+                let ([a0, a1, a2, a3], [b0, b1, b2, b3]) = (storage(a), storage(b));
+                let lt = unsafe { super::__field_lt(a0, a1, a2, a3, b0, b1, b2, b3) };
+                let canonical = a.into_bigint() < b.into_bigint();
+                assert_eq!(lt, canonical, "{a} < {b}");
+                storage_disagrees |= canonical != (a.0 < b.0);
+            }
+        }
+        assert!(storage_disagrees);
+    }
+
+    #[test]
+    fn limbs_are_the_canonical_integer() {
+        for x in samples() {
+            let canonical = x.into_bigint().0;
+            assert_eq!(unary(super::__field_to_limbs, x.0.0), canonical);
+            assert_eq!(unary(super::__field_from_limbs, canonical), x.0.0);
+        }
     }
 }

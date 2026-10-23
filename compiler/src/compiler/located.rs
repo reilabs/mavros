@@ -176,11 +176,14 @@ impl Display for SourceLocation {
 
 /// The synthetic source identifier [`SourceLocation::synthetic`] builds for `origin`.
 ///
-/// Exposed because a consumer downstream of codegen only ever sees the identifier: the VM's stack
-/// frames carry `<origin>` rather than the origin, so recognizing a particular synthetic site means
-/// rebuilding the identifier rather than comparing origins.
+/// Public because consumers after codegen see only the identifier: the VM's stack frames carry
+/// `<origin>`, not the origin, so recognizing a synthetic site means rebuilding its identifier.
 pub fn synthetic_file(origin: impl AsRef<str>) -> String {
     format!("<{}>", origin.as_ref())
+}
+
+pub fn synthetic_file_prefix(origin_prefix: impl AsRef<str>) -> String {
+    format!("<{}", origin_prefix.as_ref())
 }
 
 #[cfg(test)]

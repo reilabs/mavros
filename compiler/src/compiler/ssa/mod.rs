@@ -98,9 +98,8 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     constants: SSAConstants<C>,
 
     /// The field the program operates over. The middle-end mints and inspects field values through
-    /// this instance (see [`SSA::field`]) so no pass names a concrete prime; a future `--field`
-    /// selector will seed it from the [`Driver`](crate::driver::Driver) (mirroring `logup_soundness`),
-    /// but bn254 is the only field today so construction defaults to [`FieldConfig::bn254`].
+    /// this instance (see [`SSA::field`]) so no pass names a concrete prime. [`SSA::empty`] seeds
+    /// bn254, and a program lowered from another SSA takes that SSA's field ([`SSA::with_field`]).
     field: FieldConfig,
 
     /// Whether HLSSA slice lengths may represent physical capacity after purification.
@@ -127,10 +126,15 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
-    /// Constructs an empty SSA: no functions and no entry points. Functions are added with
-    /// [`Self::add_function`] / [`Self::insert_function`] and registered as entry points with
+    /// Constructs an empty SSA over bn254: no functions and no entry points. Functions are added
+    /// with [`Self::add_function`] / [`Self::insert_function`] and registered as entry points with
     /// [`Self::add_entry_point`].
     pub fn empty() -> Self {
+        Self::with_field(FieldConfig::bn254())
+    }
+
+    /// Constructs an empty SSA over `field`, as [`Self::empty`] does over bn254.
+    pub fn with_field(field: FieldConfig) -> Self {
         SSA {
             functions: HashMap::default(),
             global_types: Vec::new(),
@@ -140,13 +144,18 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
             next_function_id: 0,
             next_value_id: AtomicU64::new(0),
             constants: RwLock::new(BiHashMap::default()),
-            field: FieldConfig::bn254(),
+            field,
             witness_slices_purified: false,
         }
     }
 
     pub fn with_main(name: String) -> Self {
-        let mut ssa = Self::empty();
+        Self::with_main_in(FieldConfig::bn254(), name)
+    }
+
+    /// Constructs an SSA over `field` whose only function, `name`, is its entry point.
+    pub fn with_main_in(field: FieldConfig, name: String) -> Self {
+        let mut ssa = Self::with_field(field);
         let main_id = ssa.add_function(name);
         ssa.add_entry_point(main_id);
         ssa
@@ -155,8 +164,8 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     /// The field the program operates over.
     ///
     /// Field values are minted and inspected through this instance (e.g. `ssa.field().two_pow(k)`,
-    /// `ssa.field().zero()`) rather than static `Field::` associated items, so the middle-end names
-    /// no concrete prime. Returns by value as [`FieldConfig`] is `Copy`.
+    /// `ssa.field().zero()`), so the middle-end names no concrete prime. Returns by value as
+    /// [`FieldConfig`] is `Copy`.
     pub fn field(&self) -> FieldConfig {
         self.field
     }
@@ -295,7 +304,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     /// function identifier.
     ///
     /// The copy has been inserted into the SSA, and while it contains the same block identifiers,
-    /// all value identifiers barring those for constants are now unique to the new occurrences.
+    /// all value identifiers barring those for constants are unique to the new occurrences.
     pub fn duplicate_function(&mut self, function_id: FunctionId) -> FunctionId {
         self.duplicate_function_with_remap(function_id).0
     }
@@ -500,7 +509,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     /// Allocate a fresh `ValueId` from the SSA-wide counter.
     ///
     /// Takes `&self` so passes that hold a shared `&HLSSA` (e.g. the specializer, while the
-    /// symbolic executor borrows the SSA) can still mint ids. The counter is atomic.
+    /// symbolic executor borrows the SSA) can mint ids. The counter is atomic.
     ///
     /// For minting a known number of values, see [`Self::fresh_values`].
     pub fn fresh_value(&self) -> ValueId {
@@ -510,7 +519,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
     /// Allocate `n` fresh `ValueId`s from the SSA-wide counter.
     ///
     /// Takes `&self` so passes that hold a shared `&HLSSA` (e.g. the specializer, while the
-    /// symbolic executor borrows the SSA) can still mint ids. The counter is atomic.
+    /// symbolic executor borrows the SSA) can mint ids. The counter is atomic.
     ///
     /// For minting single values, see [`Self::fresh_value`].
     pub fn fresh_values(&self, n: usize) -> Vec<ValueId> {

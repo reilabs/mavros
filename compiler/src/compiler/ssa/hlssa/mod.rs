@@ -283,15 +283,27 @@ pub enum OpCode {
     DropGlobal {
         global: usize,
     },
+    /// Interleaves the low `value_bits` bits of `value` with zeros, into an integer twice as wide
+    /// as `value`'s type.
+    ///
+    /// A witnessed spread rejects a `value` with bits set above the read; pure evaluation masks
+    /// them off.
     Spread {
         result: ValueId,
         value: ValueId,
+        /// The low bits read, `1..=` the operand's width.
         value_bits: usize,
     },
+    /// Splits the low `value_bits` bits of an `int(m)` into its odd- and even-indexed bit streams,
+    /// `int(floor(m/2))` and `int(ceil(m/2))`.
+    ///
+    /// A witnessed unspread rejects a `value` with bits set above the read; pure evaluation masks
+    /// them off.
     Unspread {
         result_odd: ValueId,
         result_even: ValueId,
         value: ValueId,
+        /// The low bits read across both streams, `2..=m`: `2N` for Noir's `unspread::<N>`.
         value_bits: usize,
     },
     Guard {
@@ -1949,14 +1961,12 @@ pub enum ArithGroup {
 }
 
 impl From<BinaryArithOpKind> for mavros_int_semantics::IntOp {
-    /// The reference model names the same operations, so this is a many-to-one renaming
+    /// The model operation of the same name. Many-to-one: [`BinaryArithOpKind::UShl`] and
+    /// [`BinaryArithOpKind::SShl`] are both `IntOp::Shl`, as a left shift is one map on the bit
+    /// pattern under either reading, with an unsigned amount. Rejections belong to the guard IR,
+    /// not to `eval`.
     ///
-    /// [`BinaryArithOpKind::UShl`] and [`BinaryArithOpKind::SShl`] both land on `IntOp::Shl`. A
-    /// left shift is one map on the bit pattern under either reading, and its amount is read as an
-    /// unsigned magnitude either way, so the model has a single variant; rejections are handled by
-    /// the guard IR rather than part of `eval`.
-    ///
-    /// We avoid deriving it so that adding a variant to either side is a compile error here.
+    /// Written out rather than derived, so a new variant on either side is a compile error here.
     fn from(kind: BinaryArithOpKind) -> Self {
         use mavros_int_semantics::IntOp;
         match kind {
@@ -1981,8 +1991,7 @@ impl From<BinaryArithOpKind> for mavros_int_semantics::IntOp {
 }
 
 impl From<CmpKind> for mavros_int_semantics::CmpOp {
-    /// A true bijection, unlike the arithmetic conversion above: the model's `CmpOp` was given the
-    /// same three variants as [`CmpKind`] precisely so that it would be one.
+    /// A bijection: the model's `CmpOp` has the same three variants as [`CmpKind`].
     fn from(kind: CmpKind) -> Self {
         use mavros_int_semantics::CmpOp;
         match kind {
@@ -1996,9 +2005,8 @@ impl From<CmpKind> for mavros_int_semantics::CmpOp {
 impl BinaryArithOpKind {
     /// Every operation, so a new variant cannot be added without appearing here.
     ///
-    /// The counterpart of `IntOp::ALL`, and the list a conformance sweep must drive from when it
-    /// is checking a _lowering_: the two vocabularies are not in bijection, so sweeping the model's
-    /// sixteen would cover only one of `UShl`/`SShl`.
+    /// A conformance sweep of a _lowering_ drives from this, not from `IntOp::ALL`, whose sixteen
+    /// cover only one of `UShl`/`SShl`.
     pub const ALL: [BinaryArithOpKind; 17] = [
         Self::UAdd,
         Self::SAdd,
@@ -2056,33 +2064,24 @@ impl BinaryArithOpKind {
         }
     }
 
-    /// The sign this operation reads its operands with, or `None` where the question does not
-    /// arise — `And`, `Or` and `Xor` act on the bit pattern alone.
+    /// The sign this operation reads its operands with, or `None` for `And`, `Or` and `Xor`, which
+    /// act on the bit pattern alone.
     ///
     /// # The Value-Numbering Discriminator
     ///
-    /// Paired with [`BinaryArithOpKind::group`] this is the key the three value-numbering sites
-    /// use — `click_cooper::congruence::op_signature`, `CSE`'s `ExprNode`, and
-    /// `partial_redundancy_elimination::eliminate`'s `CanonNode`. Two `BinaryArithOp`s may share a
-    /// key only when they agree on **both**, so a signed and an unsigned form are never merged.
+    /// With [`BinaryArithOpKind::group`] this keys the three value-numbering sites
+    /// (`click_cooper::congruence::op_signature`, `CSE`'s `ExprNode`,
+    /// `partial_redundancy_elimination::eliminate`'s `CanonNode`), so a signed and an unsigned form
+    /// are never merged.
     ///
-    /// A narrower rule was tried and is wrong. It split only `Div`, `Rem` and `Shr` — the groups
-    /// whose two forms compute different values — and let `Add`/`Sub`/`Mul`/`Shl` share a key on
-    /// the grounds that their results agree bit for bit. What that overlooks is that the merge
-    /// picks a survivor, and the survivor's opcode is what `LowerWitnessIntegerArithOps` and
-    /// `LowerPureGuards` read to decide which _rejecting constraints_ to emit. Merging `UAdd` into
-    /// `SAdd` therefore deletes the unsigned overflow check outright: `noir_failure_tests/`
-    /// `signed_unsigned_vn_merge` is a program that must fail and did not.
+    /// That holds even where both forms compute the same bits (`Add`/`Sub`/`Mul`/`Shl`): a merge
+    /// keeps one opcode, and `LowerWitnessIntegerArithOps` and `LowerPureGuards` read it to choose
+    /// the rejecting constraints, so merging `UAdd` into `SAdd` deletes the unsigned overflow
+    /// check. `noir_failure_tests/signed_unsigned_vn_merge` fails on exactly that.
     ///
-    /// The argument for a narrower rule is that one operand pair cannot reach both a signed and an
-    /// unsigned opcode, because a `ValueId` has a single Noir-level origin and
-    /// `expression_converter::operand_is_signed` reads the sign off that origin. That is a claim
-    /// about `ValueId` **identity**, and value numbering does not key on identity but instead on
-    /// operand _congruence classes_.
-    ///
-    /// `x as u8` and `x as i8` are one class (both are `Cast(CastTarget::Int(8))` over the same
-    /// operand), as are `u8 200` and `i8 -56` (one [`Constant::Int`]), so a differently-signed pair
-    /// over congruent operands is ordinary rather than exotic. This allows us to separate the pair.
+    /// Operand identity does not keep them apart either: value numbering keys on congruence
+    /// classes, and `x as u8` and `x as i8` are one class, as are `u8 200` and `i8 -56` (one
+    /// [`Constant::Int`]).
     ///
     /// [`Constant::Int`]: Constant::Int
     pub fn signedness(self) -> Option<bool> {
@@ -2453,13 +2452,12 @@ impl Blob {
 pub enum Constant {
     /// Raw two's-complement bits at a declared width, with **no reading attached**.
     ///
-    /// There is no signed/unsigned pair here for the same reason [`TypeExpr::Int`] has no sign:
-    /// nothing about a bit pattern says how to read it, and every consumer that cares takes the
-    /// reading from the opcode applied to the value. That also makes interning exact — one pattern
-    /// is one constant, so `u32 0xFFFFFFFE` and `i32 -2` are the same `ValueId`.
+    /// There is no signed/unsigned pair, for the same reason [`TypeExpr::Int`] has no sign: a bit
+    /// pattern does not say how to read it, and every consumer that cares takes the reading from
+    /// the opcode. That also makes interning exact: one pattern is one constant, so
+    /// `u32 0xFFFFFFFE` and `i32 -2` are the same `ValueId`.
     ///
-    /// The width lives inside the [`IntBits`] rather than beside it, so there is no second copy of
-    /// it here that could disagree with the pattern's own normalisation.
+    /// The width lives inside the [`IntBits`], so no second copy here can disagree with it.
     ///
     /// [`TypeExpr::Int`]: crate::compiler::ssa::hlssa::TypeExpr::Int
     Int(IntBits),
@@ -2521,20 +2519,15 @@ pub enum DMatrix {
 
 /// The largest [`LookupTarget::Pow2`] payload any backend can build a table for.
 ///
-/// A **ceiling on the representation**, not the safety bound. Every backend indexes its table cache
-/// by size (see the assert below), so this is the widest a slot exists for whatever field is
-/// configured. It is `7` because bn254 needs exactly that and nothing needs more.
+/// A **ceiling on the representation**, not the safety bound: every backend indexes its table cache
+/// by size (see the assert below). It is `7` because bn254 needs exactly that.
 ///
-/// FIELD-ASSUMPTION: L4-decompose. The safety bound is a _field_ question and is derived rather
-/// than named: a size-`s` table holds the amounts `0..2^s`, so its widest row carries the value
-/// `2^(2^s - 1)`, and a row at or past the modulus wraps. Every evaluator builds its rows by
-/// doubling and so wraps the same way, which is the bad case — the two agree on values that are
-/// not powers of two, so `factor == 2^amount` quietly stops holding, and with it the
-/// `factor <= 2^(bits-1)` premise that `witness_bitwise::wrap_shifted_product` rests on. Nothing
-/// rejects that; it is a wrong answer, not a failure. `passes::shared::limbs::max_pow2_table_size`
-/// answers it per field, clamped to this ceiling: bn254 reaches `7` (widest row `2^127` against a
-/// 254-bit modulus), goldilocks only `6`. That is the same `L4-decompose` debt as `two_pow(bits)`
-/// in the shift lowering itself, and is discharged with it.
+/// FIELD-ASSUMPTION: L4-decompose. The safety bound is per field: a size-`s` table's widest row is
+/// `2^(2^s - 1)`, and a row at or past the modulus wraps identically in every evaluator, so
+/// `factor == 2^amount`, and with it `witness_bitwise::wrap_shifted_product`'s
+/// `factor <= 2^(bits-1)` premise, silently fails. `passes::shared::limbs::max_pow2_table_size`
+/// derives it, clamped to this ceiling: `7` on bn254 (widest row `2^127`), `6` on goldilocks. The
+/// same `L4-decompose` debt as `two_pow(bits)` in the shift lowering, discharged with it.
 pub const MAX_POW2_TABLE_SIZE: usize = 7;
 
 /// A `Pow2` table is indexed into the backends' fixed-size table caches (`vm::VM::pow2_tables`, and

@@ -3,8 +3,10 @@
 
 mod config;
 mod element;
+pub mod goldilocks;
 mod mavros_field;
 
-pub use config::FieldConfig;
+pub use config::{FieldConfig, IntoFieldElement};
 pub use element::FieldElement;
-pub use mavros_field::{Bn254Field, FieldId, MavrosField};
+pub use goldilocks::Goldilocks;
+pub use mavros_field::{FieldId, MavrosField};

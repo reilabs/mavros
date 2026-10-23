@@ -1,5 +1,5 @@
 use crate::compiler::{
-    passes::shared::limbs::widest_cell_sum_bits,
+    passes::shared::limbs::{widest_cell_sum_bits, widest_injective_int_bits},
     ssa::{
         ValueId,
         hlssa::{
@@ -134,6 +134,17 @@ impl LowerWitnessAssertOps {
     ) {
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
+        // A pure integer wider than the field carries has no field image, so two of them are
+        // compared as integers and the answer asserted. Only a guarded assertion reaches here with
+        // both operands pure. A witnessed one is limbs, which has already been lowered before this
+        // pass.
+        if !lhs_type.is_witness_of()
+            && !rhs_type.is_witness_of()
+            && matches!(lhs_type.expr, TypeExpr::Int(bits) if bits > widest_injective_int_bits(b.field()))
+        {
+            self.lower_assert_via_cmp(b, context, guard, CmpKind::Eq, lhs, rhs);
+            return;
+        }
         let lhs_field = b.ensure_field(lhs, &lhs_type.strip_witness());
         let rhs_field = b.ensure_field(rhs, &rhs_type.strip_witness());
         if let Some(condition) = guard {
@@ -159,12 +170,12 @@ impl LowerWitnessAssertOps {
         lhs_witness: bool,
         rhs_witness: bool,
     ) {
-        // The width is read from `rhs`, as it always has been here, while every other consumer
-        // reads `lhs` (`symbolic_executor::cmp_operand_bits`, `hlssa_to_llssa`). Nothing enforces
-        // that the two agree: `Types` looks at both operands of a comparison only to decide whether
-        // the `bool` result is witnessed, and never compares their widths. So the agreement is a
-        // property of what the frontend emits (Noir unifies the operands of a comparison) rather
-        // than a checked invariant, so we check it in debug builds.
+        // The width is read from `rhs`, while every other consumer reads `lhs`
+        // (`symbolic_executor::cmp_operand_bits`, `hlssa_to_llssa`). Nothing enforces that the two
+        // agree: `Types` looks at both operands of a comparison only to decide whether the `bool`
+        // result is witnessed, and never compares their widths. The agreement is a property of what
+        // the frontend emits (Noir unifies the operands of a comparison), so it is checked in debug
+        // builds.
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
         let signed = kind.is_signed();
@@ -181,20 +192,20 @@ impl LowerWitnessAssertOps {
         // the operands as two's complement. An unsigned one prefers the direct form, except behind
         // a guard on two pure operands, where the comparison is cheaper.
         if signed || (guard.is_some() && !lhs_witness && !rhs_witness) {
-            self.lower_assert_lt_via_cmp(b, context, guard, kind, lhs, rhs);
+            self.lower_assert_via_cmp(b, context, guard, kind, lhs, rhs);
         } else {
             self.lower_unsigned_assert_lt(b, context, guard, lhs, rhs, bits);
         }
     }
 
-    /// Re-express `assert(lhs < rhs)` as `assert(lhs < rhs == true)`, leaving the comparison for
-    /// `LowerWitnessCompareOps` to lower.
+    /// Re-express `assert(lhs op rhs)` as `assert((lhs op rhs) == true)`, leaving the comparison
+    /// for `LowerWitnessCompareOps` to lower.
     ///
-    /// The comparison it emits carries the assertion's own sign, as resolved by the caller. It
-    /// reaches here on the signed operands themselves — not on a raw-bit stand-in the way
-    /// `lower_unsigned_assert_lt` does — so emitting an unsigned comparison would be a genuinely
-    /// different test.
-    fn lower_assert_lt_via_cmp(
+    /// The comparison carries the assertion's sign, as resolved by the caller. It reaches here on
+    /// the signed operands themselves — not on a raw-bit stand-in the way
+    /// `lower_unsigned_assert_lt` does — so emitting an unsigned comparison would be a different
+    /// test.
+    fn lower_assert_via_cmp(
         &self,
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,

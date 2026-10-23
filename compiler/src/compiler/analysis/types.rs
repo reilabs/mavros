@@ -9,11 +9,12 @@ use crate::{
     compiler::{
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
+        passes::shared::limbs::widest_injective_int_bits,
         ssa::{
             FunctionId, SSAConstantsSnapshot, ValueId,
             hlssa::{
-                CallTarget, Constant, HLFunction, HLSSA, MAX_SPREAD_INPUT_BITS, OpCode, Type,
-                TypeExpr,
+                BinaryArithOpKind, CallTarget, CastTarget, Constant, HLFunction, HLSSA,
+                MAX_SPREAD_INPUT_BITS, OpCode, Type, TypeExpr,
             },
         },
     },
@@ -21,10 +22,10 @@ use crate::{
 
 /// The type of a constant, given the signatures of the program's functions.
 ///
-/// `function_returns` answers what a call to each function produces, which is the only part of a
-/// [`Constant::FnPtr`] that has a type: see [`TypeExpr::Function`]. Taking it from the callee's own
-/// SSA signature rather than from the Noir type it was lowered from is deliberate -- that is the
-/// signature `defunctionalize` builds its dispatcher against, so the two cannot drift apart.
+/// `function_returns` gives what a call to each function produces, the only typed part of a
+/// [`Constant::FnPtr`] (see [`TypeExpr::Function`]). It comes from the callee's SSA signature, not
+/// the Noir type, because `defunctionalize` builds its dispatcher against that signature, so the
+/// two cannot drift apart.
 pub fn const_value_type(
     value: &Constant,
     function_returns: &dyn Fn(FunctionId) -> Vec<Type>,
@@ -56,6 +57,54 @@ pub(crate) fn pool_constant_types(
             Some((*vid, typ))
         })
         .collect()
+}
+
+/// The width of every sequence index: Noir indexes with a `u32`, and every backend reads one.
+const INDEX_BITS: usize = 32;
+
+/// Refuse an index that is not an `int32`, witnessed or not. Nothing produces one, so meeting one
+/// is a compiler error.
+fn check_index(index_type: &Type) -> Result<(), String> {
+    match index_type.strip_witness().expr {
+        TypeExpr::Int(INDEX_BITS) => Ok(()),
+        _ => Err(format!(
+            "a sequence index must be an int{INDEX_BITS}, not {index_type}"
+        )),
+    }
+}
+
+/// Panic on a cast in `ssa` into `Field` of an integer wider than the field carries injectively:
+/// two integers differing by the modulus would share an element.
+///
+/// Only the program as written is checked, since `WideWitnessInts` emits such casts for the field
+/// image of a wide integer, one element per limb.
+pub(crate) fn check_casts_into_field(ssa: &HLSSA, type_info: &TypeInfo) {
+    let widest = widest_injective_int_bits(ssa.field());
+    for (function_id, function) in ssa.iter_functions() {
+        let types = type_info.get_function(*function_id);
+        for (_, block) in function.get_blocks() {
+            for instruction in block.get_instructions() {
+                let OpCode::Cast { value, target, .. } = instruction else {
+                    continue;
+                };
+                if *target != CastTarget::Field {
+                    continue;
+                }
+                // Untyped only in a block the dominator walk never reaches, which never runs.
+                let Some(source) = types.try_get_value_type(*value) else {
+                    continue;
+                };
+                if let TypeExpr::Int(bits) = source.strip_witness().expr
+                    && bits > widest
+                {
+                    ice!(
+                        "{instruction:?}: an int{bits} cannot be cast to Field, as this field \
+                         carries integers injectively only up to int{widest}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn push_witness_of_to_leaves(t: Type) -> Type {
@@ -191,9 +240,9 @@ impl Types {
 
     /// An unspread of an `int(m)` is `(int(floor(m/2)) odd, int(ceil(m/2)) even)`.
     ///
-    /// Forced by the bit indices: the even stream starts at bit zero, so at an odd width it is the
-    /// one with the extra bit. At an even width it is the same half twice. The odd stream needs a
-    /// bit of its own to have a type, so the operand is at least two bits wide.
+    /// The even stream starts at bit zero, so at an odd width it takes the extra bit; at an even
+    /// width the halves are equal. The odd stream needs at least one bit, so the operand is at
+    /// least two bits wide.
     fn unspread_result_types(value_type: &Type, value_bits: usize) -> Result<(Type, Type), String> {
         match &value_type.expr {
             TypeExpr::WitnessOf(inner) => {
@@ -283,7 +332,10 @@ impl Types {
                 Ok(())
             }
             OpCode::BinaryArithOp {
-                result, lhs, rhs, ..
+                kind,
+                result,
+                lhs,
+                rhs,
             } => {
                 let lhs_type = function_info.values.get(lhs).ok_or_else(|| {
                     format!(
@@ -297,6 +349,19 @@ impl Types {
                         rhs
                     )
                 })?;
+                if matches!(
+                    kind,
+                    BinaryArithOpKind::UShl
+                        | BinaryArithOpKind::SShl
+                        | BinaryArithOpKind::UShr
+                        | BinaryArithOpKind::SShr
+                ) && lhs_type.strip_witness().expr != rhs_type.strip_witness().expr
+                {
+                    // Noir unifies a shift's two operands, and no backend reads a mixed pair.
+                    return Err(format!(
+                        "a shift amount must have the shifted value's type {lhs_type}, not {rhs_type}"
+                    ));
+                }
                 // Width only: an operation's result is as wide as its wider operand, and how the
                 // operands are read is the opcode's business, not this rule's.
                 function_info
@@ -412,6 +477,7 @@ impl Types {
                 let index_type = function_info.values.get(index).ok_or_else(|| {
                     format!("Index value {:?} not found in type assignments", index)
                 })?;
+                check_index(index_type)?;
 
                 let element_type = array_type.get_array_element();
                 let result_type = if index_type.is_witness_of() {
@@ -438,6 +504,7 @@ impl Types {
                 let index_type = function_info.values.get(index).ok_or_else(|| {
                     format!("Index value {:?} not found in type assignments", index)
                 })?;
+                check_index(index_type)?;
 
                 let elem_type = array_type.get_array_element();
                 let result_elem_type = if index_type.is_witness_of() {
@@ -515,6 +582,7 @@ impl Types {
                 let index_type = function_info.values.get(index).ok_or_else(|| {
                     format!("Index value {:?} not found in type assignments", index)
                 })?;
+                check_index(index_type)?;
 
                 let elem_type = slice_type.get_array_element();
                 let result_elem_type = if index_type.is_witness_of() {
@@ -542,6 +610,7 @@ impl Types {
                 let index_type = function_info.values.get(index).ok_or_else(|| {
                     format!("Index value {:?} not found in type assignments", index)
                 })?;
+                check_index(index_type)?;
 
                 let elem_type = slice_type.get_array_element();
                 // A witness-index shift makes every surviving element (and the removed one) a
@@ -612,9 +681,10 @@ impl Types {
                 let witness_type = function_info.values.get(value).ok_or_else(|| {
                     format!("Witness value {:?} not found in type assignments", value)
                 })?;
+                // Computed return hints may already be witness-typed; avoid nesting WitnessOf.
                 function_info
                     .values
-                    .insert(*result, Type::witness_of(witness_type.clone()));
+                    .insert(*result, Type::witness_of_collapsed(witness_type.clone()));
                 Ok(())
             }
             OpCode::FreshWitness {
@@ -681,6 +751,14 @@ impl Types {
                     .get(value)
                     .ok_or_else(|| format!("Value {:?} not found in type assignments", value))?;
 
+                // A `Map` only adds or strips `WitnessOf`; nothing builds one that converts.
+                if let CastTarget::Map(inner) = target
+                    && !inner.is_witness_repr_only()
+                {
+                    return Err(format!(
+                        "a Map cast only adds or strips WitnessOf, not {target}"
+                    ));
+                }
                 let result_type = target.result_type(value_type);
 
                 function_info.values.insert(*result, result_type);
@@ -700,7 +778,15 @@ impl Types {
                 // Widen (signed) to the target width, keeping the witness wrapper.
                 let inner = value_type.strip_witness();
                 let widened = match &inner.expr {
-                    // `from_bits` is a second copy of the operand's own width.
+                    // `from_bits` repeats the operand's width. Nothing builds a sign extension that
+                    // does not widen.
+                    TypeExpr::Int(operand_bits)
+                        if operand_bits == from_bits && to_bits <= from_bits =>
+                    {
+                        return Err(format!(
+                            "SExt must widen, not go from int{from_bits} to int{to_bits}"
+                        ));
+                    }
                     TypeExpr::Int(operand_bits) if operand_bits == from_bits => Type::int(*to_bits),
                     TypeExpr::Int(operand_bits) => {
                         return Err(format!(
@@ -1101,7 +1187,7 @@ mod tests {
         (ssa, results)
     }
 
-    /// The results of a call through a function pointer are typed from the pointer's own type.
+    /// The results of a call through a function pointer are typed from the pointer's type.
     #[test]
     fn an_indirect_calls_results_take_the_callees_return_types() {
         let (ssa, results) = program_calling_indirectly(vec![Type::field()]);
@@ -1152,8 +1238,8 @@ mod tests {
         );
     }
 
-    /// A function pointer's type is read off the callee's own SSA signature, so a mismatch between
-    /// it and the call's result count is an error rather than a silently mistyped value.
+    /// A function pointer's type comes from the callee's SSA signature, so a call whose result
+    /// count disagrees is an error, not a silently mistyped value.
     #[test]
     #[should_panic(expected = "expects 1 return values, got 2")]
     fn an_indirect_call_taking_more_results_than_the_callee_returns_is_rejected() {

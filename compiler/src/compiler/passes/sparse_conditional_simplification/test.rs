@@ -1739,14 +1739,10 @@ fn congruence_dropped_assert_still_copy_propagates_soundly() {
     );
 }
 
-/// The integrated DCE runs in the same pass: dead code (here, an unused instruction) is removed
-/// without a separate cleanup pass. Fold-only would leave the operation (it is not constant); the
-/// full pass sweeps it.
+/// The integrated DCE removes an unused, non-constant instruction in the same pass.
 ///
-/// The dead instruction is a bitwise `And` rather than an add, because an add is a **partial op**:
-/// it can overflow, so DCE keeps a dead one rather than deleting it (see
-/// [`integrated_dce_keeps_a_dead_add_itself`] below). `And` has no failure mode at any width, so it
-/// is swept outright and still shows what this test is about.
+/// It is an `And`, which cannot fail; a dead add can overflow, so DCE keeps it (see
+/// [`integrated_dce_keeps_a_dead_add_itself`]).
 #[test]
 fn integrated_dce_removes_dead_code() {
     let mut ssa = HLSSA::with_main("main".to_string());

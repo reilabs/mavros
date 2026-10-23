@@ -6,7 +6,7 @@
 //!
 //! 1. every registered file still exists;
 //! 2. every registered conformance test still exists, by name, in the file that claims it;
-//! 3. `docs/int-semantics.md` has exactly the registered tags as sections, in the register's order;
+//! 3. the register table in `docs/int-semantics.md` lists exactly the registered tags, in order;
 //! 4. no **unregistered** file defines integer arithmetic of its own (on a best-effort basis).
 
 use mavros_int_semantics::register::EVALUATORS;
@@ -25,6 +25,33 @@ use std::{
 /// file is not waved through by the first.
 const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
     (
+        GOLDILOCKS,
+        "lo.wrapping_mul(MODULUS_INVERSE)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "hi.overflowing_sub(mp_hi)", GOLDILOCKS_WHY),
+    (
+        GOLDILOCKS,
+        "difference.wrapping_add(MODULUS)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "lo.overflowing_sub(hi_hi)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "sum.wrapping_sub(EPSILON)", GOLDILOCKS_WHY),
+    (
+        GOLDILOCKS,
+        "sum.overflowing_add(hi_lo * EPSILON)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "self.0.overflowing_add(rhs.0)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "sum.wrapping_add(EPSILON)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "self.0.overflowing_sub(rhs.0)", GOLDILOCKS_WHY),
+    (
+        GOLDILOCKS,
+        "difference.wrapping_sub(EPSILON)",
+        GOLDILOCKS_WHY,
+    ),
+    (GOLDILOCKS, "MODULUS.wrapping_sub(self.0)", GOLDILOCKS_WHY),
+    (
         "opcode-gen/src/lib.rs",
         "read_cycles().wrapping_sub(__prof_start)",
         "a cycle-counter delta, which wraps at the counter's width and not at any Noir type's",
@@ -34,12 +61,15 @@ const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
         "self.sampler_state.wrapping_mul(",
         "an LCG step; wrapping is the generator, not an overflow",
     ),
-    (
-        "compiler/src/wasm_host.rs",
-        "host_witness_base.wrapping_add(mults_off as usize)",
-        "host pointer arithmetic over a witness buffer",
-    ),
 ];
+
+/// The hand-written Goldilocks field.
+const GOLDILOCKS: &str = "mavros-artifacts/src/field/goldilocks.rs";
+
+/// Why its wrapping arithmetic is waived.
+const GOLDILOCKS_WHY: &str = "Goldilocks field arithmetic: host `u64` words reduced modulo the \
+     field prime (Montgomery reduction, the special-form 128-bit reduction, and the carries and \
+     borrows of addition, subtraction and negation), which no Noir integer type defines";
 
 /// The signature check 4 looks for.
 ///
@@ -211,12 +241,18 @@ fn the_document_and_the_register_describe_the_same_evaluators() {
     let doc = root.join("docs").join("int-semantics.md");
     let text = fs::read_to_string(&doc).expect("docs/int-semantics.md is missing");
 
-    // A section heading is ``### `tag` — ...``; the tag is what sits between the first backticks.
-    let documented: Vec<&str> = text
+    // The register table is the one whose header's first cell is `Tag`; each later row of it names
+    // an evaluator as `` `tag` `` in that first cell, and the table ends at the first non-row line.
+    let first_cell = |line: &str| -> Option<String> {
+        let row = line.trim().strip_prefix('|')?;
+        Some(row.split('|').next()?.trim().to_string())
+    };
+    let documented: Vec<String> = text
         .lines()
-        .filter_map(|line| line.strip_prefix("### `"))
-        .filter_map(|rest| rest.split_once('`'))
-        .map(|(tag, _)| tag)
+        .skip_while(|line| first_cell(line).as_deref() != Some("Tag"))
+        .skip(1)
+        .map_while(first_cell)
+        .filter_map(|cell| Some(cell.strip_prefix('`')?.strip_suffix('`')?.to_string()))
         .collect();
     let registered: Vec<&str> = EVALUATORS.iter().map(|e| e.tag).collect();
 

@@ -87,9 +87,9 @@ are described below.
 
 ### Stage 1: Noir Compilation
 
-Mavros uses the Noir [compiler](https://github.com/noir-lang/noir) to parse and type-check Noir
-source code. This provides familiar diagnostics to the user of Mavros, while ensuring that the input
-code is correct Noir.
+Mavros uses the [World Noir fork](https://github.com/worldfnd/noir/tree/provekit-v2) to parse and
+type-check Noir source code, including arbitrary-width integers. This provides familiar diagnostics
+to the user of Mavros, while ensuring that the input code is correct Noir.
 
 We use this to convert Noir's monomorphic AST this to our own SSA representation
 ([`compiler/lowering`](../compiler/src/compiler/lowering/)). This SSA relies mostly on immutable
@@ -210,6 +210,16 @@ This design allows DCE (dead code elimination) to automatically remove operation
 needed on one side of the pipeline. For example, the hint computation logic is removed from the
 R1CS/AD path, while witgen acquires additional opportunities for common-subexpression eliminiation
 (CSE).
+
+#### Entry point and witness layout
+
+The [`entry-point wrapper`](../compiler/src/compiler/passes/prepare_entry_point.rs) writes the
+constant one, public parameters, surviving private parameters, internal witnesses and computed
+returns in that order. The constant, public parameters and all returns are pinned. Private
+parameters may be elided only as a whole; integer range checks keep otherwise unused parameters
+live. Synthetic source origins let the R1CS generator recover the surviving columns for the
+`r1cs.bin` witness manifest. Return columns are constrained to the computation; an expected `return`
+in `Prover.toml` is checked by the host after witness generation.
 
 ### Stage 6: R1CS Generation and Further Optimization
 

@@ -1,0 +1,6 @@
+[package]
+name = "assert_max_bit_size_past_the_field_fails"
+type = "bin"
+authors = [""]
+
+[dependencies]

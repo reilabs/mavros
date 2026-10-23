@@ -1,4 +1,4 @@
-use mavros_artifacts::FieldConfig;
+use mavros_artifacts::{FieldConfig, IntoFieldElement};
 use mavros_int_semantics::IntBits;
 
 use crate::compiler::ssa::{
@@ -12,11 +12,10 @@ use crate::compiler::ssa::{
 
 /// The `bits`-wide pattern carrying `2^exponent`.
 ///
-/// [`IntBits`] reaches a power of two by shifting rather than by a constructor of its own, so
-/// this gives the composition and its bound — an exponent at or above the width names no pattern,
-/// and shifting past it would answer zero — one home rather than one per caller. A caller that
-/// cannot reach [`HLEmitter::two_pow_const`], because it mints constants without an emitter, takes
-/// this instead.
+/// [`IntBits`] builds a power of two by shifting, with no dedicated constructor, so this gives the
+/// shift and its bound one home: an exponent at or above the width names no pattern, and shifting
+/// past it would answer zero. Use it where [`HLEmitter::two_pow_const`] is out of reach because
+/// constants are minted without an emitter.
 #[track_caller]
 pub fn two_pow_pattern(bits: usize, exponent: usize) -> IntBits {
     assert!(
@@ -236,10 +235,11 @@ pub trait HLEmitter {
     // -- Constants --
 
     // FIELD-ASSUMPTION: L2-builder
-    // Accepts anything convertible to a field element (including the raw `ark_bn254::Fr` that the
-    // Noir frontend and some call sites still hold), so migrating the payload type is a no-op here.
-    fn field_const(&mut self, value: impl Into<crate::compiler::Field>) -> ValueId {
-        self.emit_constant(Constant::Field(value.into()))
+    // Embeds into the emitter's field, reducing an integer and refusing another field's element.
+    #[track_caller]
+    fn field_const(&mut self, value: impl IntoFieldElement) -> ValueId {
+        let value = self.field().constant(value);
+        self.emit_constant(Constant::Field(value))
     }
 
     /// A constant integer carrying `pattern`, at the width the pattern itself declares.
@@ -963,6 +963,52 @@ mod tests {
         }
     }
 
+    /// The field constant `build` mints in a program over `field`.
+    fn minted_field(
+        field: FieldConfig,
+        build: impl FnOnce(&mut HLInstrBuilder<'_>) -> ValueId,
+    ) -> crate::compiler::Field {
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let fid = ssa.get_unique_entrypoint_id();
+        let mut function = ssa.take_function(fid);
+        let mut instrs = Vec::new();
+        let id = {
+            let mut b = HLInstrBuilder::new(
+                &mut function,
+                &mut ssa,
+                &mut instrs,
+                SourceLocation::synthetic("test"),
+            );
+            build(&mut b)
+        };
+        match &*ssa.get_const(id).expect("a constant was interned") {
+            Constant::Field(value) => *value,
+            other => panic!("expected a field constant, got {other:?}"),
+        }
+    }
+
+    /// `field_const` embeds into the program's field, so an integer reduces modulo its modulus.
+    #[test]
+    fn a_field_constant_belongs_to_the_programs_field() {
+        let goldilocks = FieldConfig::goldilocks();
+        let five = minted_field(goldilocks, |b| b.field_const(5u64));
+        assert_eq!(five, goldilocks.constant(5u64));
+        let wrapped = minted_field(goldilocks, |b| b.field_const(u64::MAX));
+        assert_eq!(wrapped, goldilocks.constant((1u64 << 32) - 2));
+        let bn254 = FieldConfig::bn254();
+        assert_eq!(
+            minted_field(bn254, |b| b.field_const(u64::MAX)),
+            bn254.constant(u64::MAX)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "which it does not belong to")]
+    fn a_field_constant_of_another_field_is_refused() {
+        let bn254_five = FieldConfig::bn254().constant(5u64);
+        minted_field(FieldConfig::goldilocks(), |b| b.field_const(bn254_five));
+    }
+
     /// A power of two past the host word is a constant like any other.
     ///
     /// `int_const`'s payload is a `u128`, so `2^128` cannot be written through it at all.
@@ -984,7 +1030,7 @@ mod tests {
     }
 
     /// The emitter carries whatever pattern it is handed, so a constant the host has no type for
-    /// needs no route of its own.
+    /// needs no separate route.
     #[test]
     fn a_constant_past_the_host_word_is_emitted_as_it_is_built() {
         let pattern = minted(|b| b.int_const(IntBits::all_ones(200)));

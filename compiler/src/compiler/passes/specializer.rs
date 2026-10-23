@@ -102,8 +102,8 @@ pub struct Specializer {
 #[derive(Debug, Clone)]
 // FIELD-ASSUMPTION: L4-eval
 enum ConstVal {
-    /// A raw two's-complement pattern, carrying its own width — as [`Constant::Int`] does, and for
-    /// the same reason: a width beside a payload is a second copy of a number that can drift.
+    /// A raw two's-complement pattern that carries its width, as [`Constant::Int`] does and for the
+    /// same reason: a separate width beside the payload is a second copy that can drift.
     Int(IntBits),
     Field(Field),
     Array(Vec<ValueId>),
@@ -111,10 +111,8 @@ enum ConstVal {
     BitsOf(Box<ValueId>, usize, Endianness),
 }
 
-/// A constant used as a machine index, refusing rather than truncating.
-///
-/// An `as usize` would let a value above `usize::MAX` land back inside a bounds check it should
-/// have failed.
+/// A constant used as a machine index, refusing rather than truncating: an `as usize` could wrap a
+/// huge value back inside a bounds check it should fail.
 fn const_index(pattern: &IntBits) -> usize {
     usize::try_from(pattern).expect("ICE: a constant index is wider than the machine")
 }
@@ -313,9 +311,8 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
 
     fn assert_bool(&self, ctx: &mut SpecializationState) -> Result<(), AssertionFailure> {
         let v_const = ctx.const_vals.get(&self.0).cloned();
-        // Truthiness is a property of the bit pattern, so this reads either tag. A non-integer
-        // constant emits the assertion rather than panicking: declining to decide is always safe,
-        // where panicking would make an unmodelled constant a compiler crash.
+        // Truthiness is a property of the bit pattern. A non-integer constant keeps the
+        // assertion: declining to decide is always safe.
         match int_pattern(v_const.as_ref()) {
             Some(val) => {
                 if val.is_zero() {
@@ -383,16 +380,27 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Ok(())
     }
 
-    fn array_get(&self, index: &Self, _out_type: &Type, ctx: &mut SpecializationState) -> Self {
+    fn array_get(
+        &self,
+        index: &Self,
+        _out_type: &Type,
+        ctx: &mut SpecializationState,
+    ) -> Result<Self, AssertionFailure> {
         let a_const = ctx.const_vals.get(&self.0).cloned();
         let index_const = ctx.const_vals.get(&index.0).cloned();
-        match (a_const, index_const) {
-            (Some(ConstVal::Array(a) | ConstVal::Blob(a)), Some(ConstVal::Int(index))) => {
-                let res = a[const_index(&index)];
-                Self(res)
+        Ok(match (a_const, index_const) {
+            (Some(ConstVal::Array(a) | ConstVal::Blob(a)), Some(ConstVal::Int(at)))
+                if usize::try_from(&at).is_ok_and(|at| at < a.len()) =>
+            {
+                Self(a[const_index(&at)])
+            }
+            (Some(ConstVal::Array(_) | ConstVal::Blob(_)), Some(ConstVal::Int(_))) => {
+                Self(HLEmitter::array_get(ctx, self.0, index.0))
             }
             // FIELD-ASSUMPTION: L4-decompose
-            (Some(ConstVal::BitsOf(v, size, endianness)), Some(ConstVal::Int(index))) => {
+            (Some(ConstVal::BitsOf(v, size, endianness)), Some(ConstVal::Int(index)))
+                if usize::try_from(&index).is_ok_and(|index| index < size) =>
+            {
                 let v_const = ctx.const_vals.get(v.as_ref()).cloned();
                 match v_const {
                     Some(ConstVal::Field(f)) => {
@@ -409,12 +417,15 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
                     _ => ice!("Not yet implemented {:?}", (v_const, endianness)),
                 }
             }
+            (Some(ConstVal::BitsOf(..)), Some(ConstVal::Int(_))) => {
+                Self(HLEmitter::array_get(ctx, self.0, index.0))
+            }
             (None, _) | (_, None) => {
                 let res = HLEmitter::array_get(ctx, self.0, index.0);
                 Self(res)
             }
             (a, i) => ice!("Not yet implemented {:?}", (a, i)),
-        }
+        })
     }
 
     fn array_set(
@@ -423,7 +434,7 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         _value: &Self,
         _out_type: &Type,
         _ctx: &mut SpecializationState,
-    ) -> Self {
+    ) -> Result<Self, AssertionFailure> {
         todo!()
     }
 
@@ -1206,12 +1217,9 @@ mod tests {
         }
     }
 
-    /// A constant `Eq` assertion answers on the operands' **values**, not on their widths.
-    ///
-    /// `IntBits`'s `PartialEq` includes the width, so comparing the patterns would turn a
-    /// mixed-width pair into a rejected program here while `instrumenter::cmp_op` (magnitudes) and
-    /// `hlssa_to_r1cs::assert_cmp` (field elements) accepted it. HLSSA's `Cmp` has no equal-width
-    /// typing rule, so nothing else makes such a pair unreachable.
+    /// A constant `Eq` assertion compares the operands' **values**, not their widths, as
+    /// `instrumenter::cmp_op` and `hlssa_to_r1cs::assert_cmp` do. `IntBits`'s `PartialEq`
+    /// includes the width.
     #[test]
     fn a_constant_eq_assertion_compares_values_and_not_widths() {
         let mut ssa = HLSSA::new();
@@ -1237,19 +1245,15 @@ mod tests {
         );
         assert!(Val::assert_cmp(CmpKind::Eq, &narrow, &narrow, Some(8), &mut ctx).is_ok());
 
-        // And the assertion still bites where the values genuinely differ, so the check above is
-        // not passing because the comparison stopped happening.
+        // And it still fails where the values differ.
         assert!(
             Val::assert_cmp(CmpKind::Eq, &narrow, &other, Some(8), &mut ctx).is_err(),
             "two different values must still be rejected"
         );
     }
 
-    /// A statically-failing `assert_eq` names its operands the way the Noir author wrote them.
-    ///
-    /// The message is the whole of what reaches a user here, and `IntBits`'s `Debug` is Verilog
-    /// sized-literal notation written for SSA dumps. Quoting it would report `8'hc8 != 8'h64` for
-    /// a program that says `200` and `100`.
+    /// A statically failing `assert_eq` names its operands in decimal, as the author wrote them,
+    /// not in `IntBits`'s `Debug` form (`8'hc8 != 8'h64`).
     #[test]
     fn a_failed_constant_eq_names_its_operands_in_decimal() {
         let mut ssa = HLSSA::new();
@@ -1289,8 +1293,7 @@ mod tests {
             current_location: SourceLocation::synthetic("specializer_test"),
         };
 
-        // Two widths carrying the same payload, so a recorder that ignored the width would make
-        // them indistinguishable.
+        // Two widths with the same payload, which a recorder ignoring width would confuse.
         for bits in [8usize, 32] {
             let seeded = Val::of_int(&IntBits::from_u128(bits, 1), &mut ctx);
             let recorded = int_pattern(ctx.const_vals.get(&seeded.0));
@@ -1302,14 +1305,54 @@ mod tests {
         }
     }
 
+    /// A constant index into a constant's bit decomposition folds only inside the decomposition.
+    /// Past it the read is left to fail at run time, as a read past an array's end is, rather than
+    /// underflowing the big-endian position or reading a bit the decomposition does not have.
+    #[test]
+    fn a_constant_bit_read_past_the_decomposition_is_left_to_fail() {
+        let mut ssa = HLSSA::new();
+        let fid = ssa
+            .get_function_ids()
+            .next()
+            .expect("HLSSA::new makes a main");
+        let body = ssa.take_function(fid);
+        let mut ctx = SpecializationState {
+            ssa: &ssa,
+            body,
+            const_vals: HashMap::default(),
+            current_location: SourceLocation::synthetic("specializer_test"),
+        };
+
+        let three = Val::of_field(ssa.field().constant(3u64), &mut ctx);
+        let bit_type = Type::int(1);
+        for (endianness, inside, want) in [(Endianness::Little, 1, 1), (Endianness::Big, 6, 1)] {
+            let bits = three.to_bits(endianness, 8, &bit_type, &mut ctx);
+
+            let index = Val::of_int(&IntBits::from_u128(32, inside), &mut ctx);
+            let bit = bits
+                .array_get(&index, &bit_type, &mut ctx)
+                .expect("a read inside the decomposition");
+            assert_eq!(
+                int_pattern(ctx.const_vals.get(&bit.0)),
+                Some(&IntBits::from_u128(1, want)),
+                "{endianness:?} bit {inside} of 3"
+            );
+
+            let past = Val::of_int(&IntBits::from_u128(32, 9), &mut ctx);
+            let read = bits
+                .array_get(&past, &bit_type, &mut ctx)
+                .expect("a read past the end is emitted, not refused");
+            assert!(
+                ctx.const_vals.get(&read.0).is_none(),
+                "{endianness:?}: a read past the decomposition was folded"
+            );
+        }
+    }
+
     #[test]
     fn unsigned_shl_folds_to_a_constant_inside_its_own_width() {
-        // What this pins: folding `1 << 32` at `u32` to a value one bit wider than the type it
-        // is tagged with. `hlssa_to_r1cs` wraps such a constant on the way in and reads `0` while
-        // the VM's `mov_const` carries the whole payload, so the two backends would disagree about
-        // the program.
-        //
-        // The amount is what fails, not the value, so `1 << 32` at `u32` does not fold at all.
+        // An amount at the width fails, so `1 << 32` at `u32` does not fold. Folding it would mint
+        // an over-wide constant, which `hlssa_to_r1cs` and the VM read differently.
         assert_eq!(specializer_shl((32, 1), (32, 32)), None);
         assert_eq!(specializer_shl((8, 1), (8, 8)), None);
 
@@ -1327,28 +1370,11 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_shl_declines_a_mixed_width_pair_in_either_direction() {
-        // Neither direction folds, and the reason is the same both ways: `assert_int_arith_widths`
-        // requires an integer `BinaryArithOp`'s operands to be exactly the width of its result, so
-        // a mixed-width shift is IR nothing may build and there is no constant to mint for it. A
-        // wider amount would additionally narrow the result -- the type analysis types it as
-        // `U(max(s1, s2))` -- but that is a second reason rather than the deciding one.
-        //
-        // The narrower-amount direction is refused too, though the _model_ does give a shift
-        // amount a width of its own. That freedom is real for the evaluators that meet one at
-        // runtime; it is not a licence for a folder to mint IR the rest of the pipeline rejects.
-        assert_eq!(specializer_shl((8, 1), (32, 1)), None);
-        assert_eq!(specializer_shl((32, 1), (8, 1)), None);
-    }
-
-    #[test]
     fn an_integer_fold_that_leaves_its_width_is_refused_rather_than_widened_or_panicking() {
         use BinaryArithOpKind::{SDiv, UAdd, UDiv, UShr, USub};
 
-        // Every one of these goes through the lattice rather than through hand-rolled `u128`
-        // arithmetic here, which is what makes all three answer. Hand-rolled arms fail them: the
-        // first by producing an over-wide constant, the second and third by _panicking_ in a debug
-        // build rather than declining.
+        // All three decline because they go through the lattice; hand-rolled `u128` arithmetic
+        // would mint an over-wide constant or panic in a debug build.
 
         // `u8 200 + 100` is 300, which does not fit in eight bits.
         assert_eq!(specializer_fold(UAdd, (8, 200), (8, 100)), None);

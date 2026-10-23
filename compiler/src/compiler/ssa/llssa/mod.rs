@@ -77,10 +77,9 @@ impl Blob {
 /// which pairs a struct layout with one constant value per field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
-    /// A scalar integer constant, carrying its own width.
+    /// A scalar integer constant, carrying its width.
     ///
-    /// The width lives inside the [`IntBits`] rather than beside it, so there is no second copy of
-    /// it here that could disagree with the pattern's own normalisation.
+    /// The width lives inside the [`IntBits`], so no second copy here can disagree with it.
     Int(IntBits),
 
     /// A null pointer constant.
@@ -783,9 +782,8 @@ impl LLStruct {
     // FIELD-ASSUMPTION: L3-llstruct
     /// How many `i64`s a field element occupies, in either limb form.
     ///
-    /// The two layouts below are the same shape read two ways — Montgomery storage and canonical
-    /// raw limbs — so they share one count, and anything that packs an integer into a field element
-    /// reads it here rather than naming a number of its own.
+    /// The two layouts below (Montgomery storage and canonical raw limbs) have the same shape, so
+    /// they share this count, and anything packing an integer into a field element reads it here.
     pub const FIELD_LIMBS: usize = 4;
 
     pub fn new(fields: Vec<LLFieldType>) -> Self {
@@ -793,7 +791,7 @@ impl LLStruct {
     }
 
     // FIELD-ASSUMPTION: L3-llstruct
-    /// Struct representing a BN254 field element in Montgomery form.
+    /// A field element's Montgomery storage, one `i64` per cell.
     pub fn field_elem() -> Self {
         Self::new(vec![LLFieldType::Int(64); Self::FIELD_LIMBS])
     }
@@ -873,7 +871,7 @@ impl LLStruct {
     ///   0: mults_base   (ptr)
     ///   1: inv_cnst_off (i32)
     ///   2: inv_wit_off  (i32)
-    ///   3: num_indices  (i32)
+    ///   3: num_indices  (i32; always 1 and read by nothing)
     ///   4: kind         (i32; `TableKind::code`)
     ///   5: length       (i32)
     pub fn table_info_slot() -> Self {

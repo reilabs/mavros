@@ -709,11 +709,8 @@ impl CSE {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ExprId(u32);
 
-// No `Ord` as this is an interning key, only ever hashed and compared for equality.
-//
-// The commutative chains sort their `ExprId`s, but never the nodes. Not having it matters because
-// `IntConst`'s payload deliberately has no ordering as it is an uninterpreted bit pattern with no
-// particular reading.
+// No `Ord`: an interning key is only hashed and compared. Commutative chains sort `ExprId`s, never
+// nodes, because `IntConst`'s payload is an uninterpreted bit pattern with no ordering.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ExprNode {
     /// The flattened commutative chains, carrying the sign of the operation that built them.
@@ -1025,16 +1022,14 @@ mod tests {
 
     #[test]
     fn an_interned_constant_is_keyed_by_its_width_as_well_as_its_value() {
-        // The interner is what decides two expressions are the same expression, so a constant's key
-        // has to be the whole pattern. Keying on the value alone would make `1u8` and `1u32` one
-        // node, and any two expressions differing only there would merge.
+        // A constant's key is the whole pattern: keyed on the value alone, `1u8` and `1u32` would
+        // be one node, merging expressions that differ only there.
         let mut interner = ExprInterner::default();
         let narrow = interner.int_const(IntBits::from(1u8));
         let wide = interner.int_const(IntBits::from(1u32));
         assert_ne!(narrow, wide);
 
-        // And the same pattern twice is the same node, which is the property that makes it an
-        // interner at all.
+        // And the same pattern twice is the same node, which is what makes it an interner.
         assert_eq!(narrow, interner.int_const(IntBits::from(1u8)));
     }
 
@@ -1093,9 +1088,8 @@ mod tests {
 
     #[test]
     fn no_operation_merges_with_its_opposite_sign() {
-        // Every group with two forms, not just the ones whose forms compute different values.
-        // `UAdd`/`SAdd` agree on every bit, but this is not a licence to merge them: the survivor's
-        // opcode is what picks the overflow check emitted downstream.
+        // Every group with two forms, even where they compute the same bits: the survivor's opcode
+        // picks the overflow check emitted downstream, so `UAdd` and `SAdd` must not merge.
         use BinaryArithOpKind::*;
         for (unsigned, signed) in [
             (UAdd, SAdd),

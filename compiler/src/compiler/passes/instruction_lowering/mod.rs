@@ -1,12 +1,15 @@
 mod bit_range;
+mod bit_windows;
 mod degree_spilling;
 mod guards;
+mod integer_digits;
 mod pure_decompositions;
 mod pure_guards;
 mod side_effect_free_guards;
 mod slice_insert_remove;
 mod slice_pop;
 mod slice_select;
+mod vacuous_rangechecks;
 mod witness_array;
 mod witness_assert;
 mod witness_bitwise;
@@ -37,13 +40,16 @@ use crate::compiler::{
 
 use self::{
     bit_range::LowerBitRangeOps,
+    bit_windows::WideBitWindows,
     degree_spilling::LowerDegreeSpillingOps,
     guards::LowerGuards,
+    integer_digits::IntegerDigits,
     pure_guards::LowerPureGuards,
     side_effect_free_guards::LowerSideEffectFreeGuards,
     slice_insert_remove::{LowerSliceInsert, LowerSliceRemove},
     slice_pop::LowerSlicePop,
     slice_select::LowerSliceSelect,
+    vacuous_rangechecks::VacuousRangechecks,
     witness_array::LowerWitnessArrayOps,
     witness_assert::LowerWitnessAssertOps,
     witness_bitwise::LowerWitnessBitwiseOps,
@@ -179,10 +185,27 @@ impl InstructionLowering {
         )
     }
 
-    /// The narrowing witness casts the program itself states, rewritten into bit windows.
+    /// Rewrites program-stated shapes into the ones the backends read: bit windows and digit
+    /// decompositions of single-element values only, and no range check every element passes. See
+    /// [`WideBitWindows`], [`IntegerDigits`] and [`VacuousRangechecks`].
     ///
-    /// A phase of its own, between the multi-cell representation and the lowerings below it: see
-    /// [`LowerWitnessNarrowingCast`] for why it cannot share one with them.
+    /// It runs before untaint, where nothing is guarded, so its rules decline an `OpCode::Guard`.
+    pub fn operand_shapes() -> Self {
+        Self::with_lowerers(
+            "instruction_lowering_operand_shapes",
+            vec![
+                Box::new(WideBitWindows),
+                Box::new(IntegerDigits),
+                Box::new(VacuousRangechecks),
+            ],
+            false,
+        )
+    }
+
+    /// Rewrites the narrowing witness casts the program states into bit windows.
+    ///
+    /// A separate phase between the multi-cell representation and the lowerings below it; see
+    /// [`LowerWitnessNarrowingCast`] for why it cannot share a phase with them.
     pub fn witness_narrowing_casts() -> Self {
         Self::with_lowerers(
             "instruction_lowering_witness_narrowing_casts",
@@ -427,9 +450,8 @@ mod tests {
         Assertion,
     }
 
-    /// `main(lhs, rhs: WitnessOf<int(bits)>) { shape }`, run through solely the integer lowerings
-    /// without the carry chain in front of them. Answers the lowered program and the instruction
-    /// that was lowered.
+    /// `main(lhs, rhs: WitnessOf<int(bits)>) { shape }` through the integer lowerings alone,
+    /// without the carry chain. Returns the lowered program and the original instruction.
     fn lower_alone(shape: SingleCell, bits: usize) -> (HLSSA, OpCode) {
         let mut ssa = HLSSA::with_main("main".to_string());
         let (lhs, rhs, result) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -523,8 +545,8 @@ mod tests {
         }
     }
 
-    /// One bit wider is the carry chain's, and each lowering refuses it rather than emitting a
-    /// range check that a residue passes.
+    /// One bit wider belongs to the carry chain; each lowering refuses it rather than emit a range
+    /// check a residue passes.
     #[test]
     #[should_panic(expected = "sum reached the single-cell lowering")]
     fn a_sum_past_the_cell_is_refused_by_its_single_cell_lowering() {

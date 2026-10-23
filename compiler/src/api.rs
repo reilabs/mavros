@@ -6,17 +6,19 @@ use std::{
 
 use crate::{
     Project,
-    abi_helpers::ordered_params_from_btreemap,
-    compiler::codegen::hlssa_to_r1cs::R1CS,
+    abi_helpers::{declared_return_from_btreemap, ordered_params_from_btreemap},
+    compiler::codegen::hlssa_to_r1cs::{R1CS, SealedR1CS},
     driver::Driver,
     vm::{bytecode::DebugInfo, interpreter},
 };
-use mavros_artifacts::{Field as RawField, InputValueOrdered};
+use mavros_artifacts::{
+    ConstraintsLayout, Field as RawField, InputValueOrdered, MavrosField, WitnessLayout,
+};
 use noirc_abi::input_parser::Format;
 
 type Error = Box<dyn std::error::Error>;
 
-pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS), Error> {
+pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, SealedR1CS), Error> {
     let project = Project::new(root)?;
     let mut driver = Driver::new(project, draw_graphs);
     driver.run_noir_compiler()?;
@@ -24,19 +26,24 @@ pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, R1CS
     driver.monomorphize()?;
     driver.spill_witness()?;
 
-    let r1cs = driver.generate_r1cs()?;
+    let r1cs = driver.generate_r1cs::<RawField>()?;
     Ok((driver, r1cs))
 }
 
+/// The entry blob in ABI order and the optional expected return, from the package's `Prover.toml`.
 pub fn read_prover_inputs(
     root: &Path,
     abi: &noirc_abi::Abi,
-) -> Result<Vec<InputValueOrdered>, Error> {
+) -> Result<(Vec<InputValueOrdered>, Option<InputValueOrdered>), Error> {
     let file_path = root.join("Prover.toml");
 
     if !file_path.exists() {
         if abi.parameters.is_empty() {
-            return Ok(ordered_params_from_btreemap(abi, &BTreeMap::new())?);
+            let inputs = BTreeMap::new();
+            return Ok((
+                ordered_params_from_btreemap(abi, &inputs)?,
+                declared_return_from_btreemap(abi, &inputs)?,
+            ));
         }
         return Err(format!(
             "the ABI declares {} parameter(s) but {} does not exist",
@@ -57,36 +64,43 @@ pub fn read_prover_inputs(
 
     let inputs_src = fs::read_to_string(&file_path)?;
     let inputs = format
-        .parse(&inputs_src, abi)
+        .parse(
+            &inputs_src,
+            abi,
+            // FIELD-ASSUMPTION: L1-direct-ref
+            // ABI input decoding is pinned to BN254, matching Mavros' current runtime field.
+            acvm::FieldConfig::new(acvm::FieldId::Bn254),
+        )
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
     let ordered_params = ordered_params_from_btreemap(abi, &inputs)?;
+    let declared_return = declared_return_from_btreemap(abi, &inputs)?;
 
-    Ok(ordered_params)
+    Ok((ordered_params, declared_return))
 }
 
-pub fn run_witgen_from_binary(
+pub fn run_witgen_from_binary<F: MavrosField>(
     binary: &mut [u64],
-    r1cs: &R1CS,
-    params: &[InputValueOrdered],
+    r1cs: &R1CS<F>,
+    params: &[InputValueOrdered<F>],
     debug_info: Option<DebugInfo>,
-) -> Result<interpreter::WitgenResult, interpreter::TrapError> {
+) -> Result<interpreter::WitgenResult<F>, interpreter::TrapError> {
     interpreter::run(
         binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
-        params,
+        &interpreter::flatten_param_vec(params),
         debug_info,
     )
 }
 
-pub fn run_witgen_profiled_from_binary(
+pub fn run_witgen_profiled_from_binary<F: MavrosField>(
     binary: &mut [u64],
-    r1cs: &R1CS,
-    params: &[InputValueOrdered],
+    r1cs: &R1CS<F>,
+    params: &[InputValueOrdered<F>],
     debug_info: Option<DebugInfo>,
 ) -> Result<
     (
-        interpreter::WitgenResult,
+        interpreter::WitgenResult<F>,
         mavros_artifacts::FlamegraphProfile,
     ),
     interpreter::TrapError,
@@ -95,34 +109,34 @@ pub fn run_witgen_profiled_from_binary(
         binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
-        params,
+        &interpreter::flatten_param_vec(params),
         debug_info,
     )
 }
 
 /// Phase 1: execute the VM and produce the pre-commitment witness. Returns
 /// intermediate state needed by [`run_witgen_phase2`].
-pub fn run_witgen_phase1(
+pub fn run_witgen_phase1<F: MavrosField>(
     binary: &mut [u64],
-    r1cs: &R1CS,
-    params: &[InputValueOrdered],
+    r1cs: &R1CS<F>,
+    params: &[InputValueOrdered<F>],
     debug_info: Option<DebugInfo>,
-) -> Result<interpreter::Phase1Result, interpreter::TrapError> {
+) -> Result<interpreter::Phase1Result<F>, interpreter::TrapError> {
     interpreter::run_phase1(
         binary,
         r1cs.witness_layout,
         r1cs.constraints_layout,
-        params,
+        &interpreter::flatten_param_vec(params),
         debug_info,
     )
 }
 
 /// Phase 2: given real Fiat-Shamir challenges, complete witness generation.
-pub fn run_witgen_phase2(
-    phase1: interpreter::Phase1Result,
-    challenges: &[RawField],
-    r1cs: &R1CS,
-) -> interpreter::WitgenResult {
+pub fn run_witgen_phase2<F: MavrosField>(
+    phase1: interpreter::Phase1Result<F>,
+    challenges: &[F],
+    r1cs: &R1CS<F>,
+) -> interpreter::WitgenResult<F> {
     interpreter::run_phase2(
         phase1,
         challenges,
@@ -131,7 +145,7 @@ pub fn run_witgen_phase2(
     )
 }
 
-/// Compiles the whole program (witgen and AD entry points) into a single VM binary.
+/// Compiles witgen and AD into the prover binary. Verifier code is emitted separately.
 pub fn compile_bytecode(
     driver: &mut Driver,
     options: crate::compiler::codegen::CodeGenOptions,
@@ -147,16 +161,32 @@ pub fn compile_bytecode_artifact(
     Ok(driver.compile_bytecode_artifact(options)?)
 }
 
-pub fn run_ad_from_binary(
+/// Compile the forward verifier binary without witgen or AD functions.
+pub fn compile_verifier_bytecode(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<Vec<u64>, Error> {
+    Ok(driver.compile_verifier_bytecode(options)?)
+}
+
+/// Compile verifier-only bytecode and optional standalone debug metadata.
+pub fn compile_verifier_bytecode_artifact(
+    driver: &mut Driver,
+    options: crate::compiler::codegen::CodeGenOptions,
+) -> Result<crate::driver::BytecodeArtifact, Error> {
+    Ok(driver.compile_verifier_bytecode_artifact(options)?)
+}
+
+pub fn run_ad_from_binary<F: MavrosField>(
     binary: &mut [u64],
-    r1cs: &R1CS,
-    coeffs: &[RawField],
+    r1cs: &R1CS<F>,
+    coeffs: &[F],
     debug_info: Option<DebugInfo>,
 ) -> Result<
     (
-        Vec<RawField>,
-        Vec<RawField>,
-        Vec<RawField>,
+        Vec<F>,
+        Vec<F>,
+        Vec<F>,
         crate::vm::bytecode::AllocationInstrumenter,
     ),
     interpreter::TrapError,
@@ -170,16 +200,34 @@ pub fn run_ad_from_binary(
     )
 }
 
-pub fn run_ad_profiled_from_binary(
+/// Compute `(r A w, r B w, r C w)` for arbitrary field vectors, without executing
+/// witness generation or checking satisfaction. `r` must have one element per
+/// constraint; `w` must cover the complete witness layout, including column zero
+/// and the post-commitment sections. Randomness is supplied by the caller.
+///
+/// `binary` must come from [`compile_verifier_bytecode`].
+/// Only bytecode and layouts are required; no R1CS matrices are needed.
+pub fn run_verifier_from_binary<F: MavrosField>(
+    binary: &[u64],
+    r: &[F],
+    w: &[F],
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+    debug_info: Option<DebugInfo>,
+) -> Result<interpreter::VerifierResult<F>, interpreter::TrapError> {
+    interpreter::run_verifier(binary, r, w, witness_layout, constraints_layout, debug_info)
+}
+
+pub fn run_ad_profiled_from_binary<F: MavrosField>(
     binary: &mut [u64],
-    r1cs: &R1CS,
-    coeffs: &[RawField],
+    r1cs: &R1CS<F>,
+    coeffs: &[F],
     debug_info: Option<DebugInfo>,
 ) -> Result<
     (
-        Vec<RawField>,
-        Vec<RawField>,
-        Vec<RawField>,
+        Vec<F>,
+        Vec<F>,
+        Vec<F>,
         crate::vm::bytecode::AllocationInstrumenter,
         mavros_artifacts::FlamegraphProfile,
     ),
@@ -202,7 +250,7 @@ pub fn random_ad_coeffs(r1cs: &R1CS) -> Vec<RawField> {
         .collect()
 }
 
-pub fn check_witgen(r1cs: &R1CS, res: &interpreter::WitgenResult) -> bool {
+pub fn check_witgen<F: MavrosField>(r1cs: &R1CS<F>, res: &interpreter::WitgenResult<F>) -> bool {
     r1cs.check_witgen_output(
         &res.out_wit_pre_comm,
         &res.out_wit_post_comm,
@@ -212,13 +260,7 @@ pub fn check_witgen(r1cs: &R1CS, res: &interpreter::WitgenResult) -> bool {
     )
 }
 
-pub fn check_ad(
-    r1cs: &R1CS,
-    coeffs: &[RawField],
-    a: &[RawField],
-    b: &[RawField],
-    c: &[RawField],
-) -> bool {
+pub fn check_ad<F: MavrosField>(r1cs: &R1CS<F>, coeffs: &[F], a: &[F], b: &[F], c: &[F]) -> bool {
     r1cs.check_ad_output(coeffs, a, b, c)
 }
 

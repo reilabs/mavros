@@ -13,13 +13,12 @@ use std::{
 use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
-use mavros_artifacts::Field as RawField;
+use mavros_artifacts::{Field as RawField, WitnessManifest};
 use mavros_compiler::{
     Project, abi_helpers, api,
     collections::HashMap,
     compiler::codegen::{
         CodeGenOptions,
-        hlssa_to_r1cs::R1CS,
         llssa_to_llvm::{WasmCompileOpts, wasm_debug_info_path},
         r1cs_compact,
     },
@@ -78,30 +77,8 @@ fn main() {
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[
-    // `array_refcount` and `vector_refcount` are intentionally unsupported: Mavros does not
-    // guarantee Noir's reference-count behavior, so these implementation-specific tests are ignored.
-    "reference_counts_inliner_0",
-    "reference_counts_inliner_min",
-    "reference_counts_inliner_max",
-    "reference_counts_vectors_inliner_0",
-    // Separate folded circuits and oracle functions are intentionally unsupported. Lowering
-    // rejects these with user diagnostics; compiler/tests/unsupported_features.rs covers that.
-    // `print`/`println` remain ignored, so tests that only print are still exercised.
-    "fold_2_to_17",
-    "fold_after_inlined_calls",
-    "fold_basic",
-    "fold_basic_nested_call",
-    "fold_call_witness_condition",
-    "fold_complex_outputs",
-    "fold_distinct_return",
-    "fold_dyn_index_fail",
-    "fold_fibonacci",
-    "fold_nested_brillig_assert_fail",
-    "fold_numeric_generic_poseidon",
-    "mocks_in_execution",
-    "range_check_before_acir_call",
+    // Passing an intrinsic such as `std::as_witness` as a function value is unsupported.
     "regression_10156",
-    "unknown_oracle",
     // `func_1` recurses without ever decrementing `ctx_limit`, so it never terminates. The witgen
     // VM has no recursion/step/memory guard (frames are heap-allocated per call in `Frame::push`),
     // so running it grows memory without bound. Depending on the compiled circuit shape it either
@@ -159,6 +136,35 @@ fn emit(line: &str) {
     let _ = out.flush();
 }
 
+/// Set to make each child also emit `INFO:HASH:<artifact>:<blake3>` per artifact and per witness
+/// the VM and WASM runs produce. `STATUS.md` records artifact sizes only, so a same-size change
+/// (such as renumbered opcodes) is visible only to a content hash.
+const ARTIFACT_HASHES_ENV: &str = "MAVROS_ARTIFACT_HASHES";
+
+fn artifact_hashes_enabled() -> bool {
+    env::var_os(ARTIFACT_HASHES_ENV).is_some()
+}
+
+/// The witness's storage cells, in order, as bytes to hash.
+fn witness_bytes(witness: &[RawField]) -> Vec<u8> {
+    let mut cells = [0u64; <RawField as mavros_artifacts::MavrosField>::STORAGE_CELLS];
+    witness
+        .iter()
+        .flat_map(|value| {
+            mavros_artifacts::MavrosField::to_frame_cells(*value, &mut cells);
+            cells.map(u64::to_le_bytes)
+        })
+        .flatten()
+        .collect()
+}
+
+fn emit_artifact_hash(artifact: &str, bytes: &[u8]) {
+    emit(&format!(
+        "INFO:HASH:{artifact}:{}",
+        blake3::hash(bytes).to_hex()
+    ));
+}
+
 /// Runs every pipeline step for one test directory, emitting START/END
 /// markers for the parent to parse. With `expect_failure` (execution_failure /
 /// execution_panic tests) the native AD pipeline is skipped: AD output only
@@ -195,15 +201,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         // expected failure, accepted the same way as a statically-unsatisfiable R1CS, so it gets
         // the `reject` marker. Any unsupported/internal compiler error stays a plain `fail`, so a
         // real regression is never masked.
-        Err(DriverError::NoirCompilerError(diags)) => {
-            eprintln!("Noir compiler rejected program: {diags:?}");
+        Err(error @ DriverError::NoirCompilerError { .. }) => {
+            eprintln!("Noir compiler rejected program: {error}");
             emit("END:COMPILED:reject");
             return;
         }
         Err(
-            error @ (DriverError::AssertConstantFailed(_)
-            | DriverError::Refused(_)
-            | DriverError::UnsatisfiableProgram(_)),
+            error @ (DriverError::AssertConstantFailed(_) | DriverError::UnsatisfiableProgram(_)),
         ) => {
             eprintln!("Mavros compiler rejected program: {error}");
             emit("END:COMPILED:reject");
@@ -218,16 +222,20 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
 
     // 2. R1CS
     emit("START:R1CS");
-    let r1cs = match driver.generate_r1cs() {
+    let r1cs = match driver.generate_r1cs::<RawField>() {
         Ok(r) => {
             let rows = r.constraints.len();
             let cols = r.witness_layout.size();
             emit(&format!("END:R1CS:ok:{rows}:{cols}"));
-            // Opt-in, report-only compaction-opportunity analysis: how many algebraic rows/cols a
-            // post-seal compaction pass could remove. It is _not_ part of STATUS.md — the parent
-            // captures this `INFO:` line only to echo it to stdout under `--analyze-r1cs`. Kept off
-            // the `END:R1CS` line so the STATUS output and the determinism fingerprint never depend
-            // on the (comparatively expensive) analysis.
+            if artifact_hashes_enabled() {
+                emit_artifact_hash(
+                    "r1cs",
+                    &bincode::serialize(r.system()).expect("R1CS must serialize"),
+                );
+            }
+            // Opt-in, report-only: how many rows/cols a post-seal compaction could remove. The
+            // parent only echoes this `INFO:` line under `--analyze-r1cs`; it stays off the
+            // `END:R1CS` line so STATUS.md and the determinism fingerprint never depend on it.
             if analyze {
                 let stats = r1cs_compact::analyze(&r, driver.protected_r1cs_cols());
                 emit(&format!(
@@ -249,10 +257,10 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             Some(r)
         }
 
-        // A program whose assertion can never hold is rejected as unsatisfiable while generating
-        // R1CS. That is the _expected_ outcome for an execution_failure test, so it gets its own
-        // `reject` marker — distinct from a plain `fail`, which signals a real problem (e.g. an
-        // unsupported construct) that should never be silently accepted.
+        // A program whose assertion can never hold is rejected as unsatisfiable during R1CS
+        // generation. For an execution_failure test that is the expected outcome, so it gets a
+        // separate `reject` marker, distinct from `fail`, which flags a real problem (such as an
+        // unsupported construct) that must never be silently accepted.
         Err(error @ DriverError::UnsatisfiableProgram(_)) => {
             eprintln!("R1CS rejected program as unsatisfiable: {error}");
             emit("END:R1CS:reject");
@@ -272,15 +280,24 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         match driver.compile_bytecode_artifact(checking_codegen) {
             Ok(artifact) => {
                 let bytes = artifact.binary.len() * 8;
-                let debug_bytes = serde_json::to_vec_pretty(
+                let debug_info = serde_json::to_vec_pretty(
                     artifact
                         .debug_info
                         .as_ref()
                         .expect("debug info was requested for the VM test artifact"),
                 )
-                .expect("VM debug info must serialize")
-                .len();
+                .expect("VM debug info must serialize");
+                let debug_bytes = debug_info.len();
                 emit(&format!("END:COMPILE:ok:{bytes}:{debug_bytes}"));
+                if artifact_hashes_enabled() {
+                    let binary: Vec<u8> = artifact
+                        .binary
+                        .iter()
+                        .flat_map(|word| word.to_le_bytes())
+                        .collect();
+                    emit_artifact_hash("bytecode", &binary);
+                    emit_artifact_hash("vm_debug", &debug_info);
+                }
                 Some(artifact)
             }
             Err(_) => {
@@ -293,8 +310,15 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let ordered_params =
+    let inputs =
         api::read_prover_inputs(driver.package_root(), driver.abi()).map_err(|e| e.to_string());
+    let ordered_params = inputs.as_ref().map(|(params, _)| params.clone());
+
+    let manifest = r1cs.as_ref().map(|r1cs| {
+        driver
+            .witness_manifest(r1cs)
+            .map_err(|error| error.to_string())
+    });
 
     // 4. Run witgen  (depends on COMPILE)
     let witgen_result = program_artifact.as_ref().and_then(|artifact| {
@@ -312,11 +336,24 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             &artifact.binary,
             r1cs.witness_layout,
             r1cs.constraints_layout,
-            params,
+            &interpreter::flatten_param_vec(params),
             artifact.debug_info.clone(),
         ) {
             Ok(result) => {
+                // The parent scores an expected failure by its run steps, so a wrong `return`
+                // fails here rather than at the correctness check.
+                if let Some(reason) =
+                    declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
+                {
+                    eprintln!("witgen run error: {reason}");
+                    emit("END:WITGEN_RUN:fail");
+                    return None;
+                }
                 emit("END:WITGEN_RUN:ok");
+                if artifact_hashes_enabled() {
+                    emit_artifact_hash("witness_pre", &witness_bytes(&result.out_wit_pre_comm));
+                    emit_artifact_hash("witness_post", &witness_bytes(&result.out_wit_post_comm));
+                }
                 Some(result)
             }
             Err(mut e) => {
@@ -331,14 +368,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     // 5. Check witgen correctness  (depends on WITGEN_RUN)
     if let (Some(result), Some(r1cs)) = (&witgen_result, &r1cs) {
         emit("START:WITGEN_CORRECT");
-        let correct =
-            r1cs.check_witgen_output(
-                &result.out_wit_pre_comm,
-                &result.out_wit_post_comm,
-                &result.out_a,
-                &result.out_b,
-                &result.out_c,
-            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
+        let correct = r1cs.check_witgen_output(
+            &result.out_wit_pre_comm,
+            &result.out_wit_post_comm,
+            &result.out_a,
+            &result.out_b,
+            &result.out_c,
+        ) && check_parameter_columns(&manifest, &inputs, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_CORRECT:ok"
         } else {
@@ -367,7 +403,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             let r1cs = r1cs.as_ref().unwrap();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
             let ad_coeffs: Vec<RawField> = (0..r1cs.constraints.len())
-                .map(|_| ark_bn254::Fr::rand(&mut rng)) // FIELD-ASSUMPTION: L1-direct-ref (3 sites)
+                .map(|_| ark_bn254::Fr::rand(&mut rng)) // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
                 .collect();
             match interpreter::run_ad(
                 &artifact.binary,
@@ -441,6 +477,12 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
                 };
                 let debug_bytes = debug_metadata.len();
                 emit(&format!("END:WASM_COMPILE:ok:{bytes}:{debug_bytes}"));
+                if artifact_hashes_enabled() {
+                    let module = fs::read(&wasm_path).expect("WASM module must be readable");
+                    let debug = fs::read(&debug_path).expect("WASM debug sidecar must be readable");
+                    emit_artifact_hash("wasm", &module);
+                    emit_artifact_hash("wasm_debug", &debug);
+                }
                 Some(wasm_path)
             }
             Ok(_) => {
@@ -481,16 +523,35 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             }
         };
 
-        if interpreter::flattened_param_count(params) != driver.entry_point_flattened_io_count() {
+        let entry_blob_field_count = driver.entry_blob_field_count();
+        if interpreter::flattened_param_count(params) != entry_blob_field_count {
             eprintln!("WASM run error: Unexpected number of inputs supplied");
             emit("END:WITGEN_WASM_RUN:fail");
             return None;
         }
 
-        match load(wasm_path).and_then(|loaded| wasm_host::run_witgen_loaded(loaded, r1cs, params))
-        {
+        match load(wasm_path).and_then(|loaded| {
+            wasm_host::run_witgen_loaded(loaded, r1cs, params, entry_blob_field_count)
+        }) {
             Ok(result) => {
+                if let Some(reason) =
+                    declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
+                {
+                    eprintln!("WASM run error: {reason}");
+                    emit("END:WITGEN_WASM_RUN:fail");
+                    return None;
+                }
                 emit("END:WITGEN_WASM_RUN:ok");
+                if artifact_hashes_enabled() {
+                    emit_artifact_hash(
+                        "wasm_witness_pre",
+                        &witness_bytes(&result.out_wit_pre_comm),
+                    );
+                    emit_artifact_hash(
+                        "wasm_witness_post",
+                        &witness_bytes(&result.out_wit_post_comm),
+                    );
+                }
                 Some(result)
             }
             Err(e) => {
@@ -505,14 +566,13 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     if let (Some(result), Some(r1cs)) = (&wasm_result, &r1cs) {
         emit("START:WITGEN_WASM_CORRECT");
 
-        let correct =
-            r1cs.check_witgen_output(
-                &result.out_wit_pre_comm,
-                &result.out_wit_post_comm,
-                &result.out_a,
-                &result.out_b,
-                &result.out_c,
-            ) && check_return_guard(&driver, r1cs, &ordered_params, &result.out_wit_pre_comm);
+        let correct = r1cs.check_witgen_output(
+            &result.out_wit_pre_comm,
+            &result.out_wit_post_comm,
+            &result.out_a,
+            &result.out_b,
+            &result.out_c,
+        ) && check_parameter_columns(&manifest, &inputs, &result.out_wit_pre_comm);
         emit(if correct {
             "END:WITGEN_WASM_CORRECT:ok"
         } else {
@@ -574,19 +634,47 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     }
 }
 
-/// True when the generated witness's return-guard column matches the parsed inputs.
-fn check_return_guard(
-    driver: &Driver,
-    r1cs: &R1CS,
-    ordered_params: &Result<Vec<interpreter::InputValueOrdered>, String>,
+type ProverInputs = (
+    Vec<interpreter::InputValueOrdered>,
+    Option<interpreter::InputValueOrdered>,
+);
+
+type Manifest = Option<Result<WitnessManifest, String>>;
+
+/// The parameter columns only: the declared return was already scored at the run step.
+fn check_parameter_columns(
+    manifest: &Manifest,
+    inputs: &Result<ProverInputs, String>,
     wit_pre_comm: &[RawField],
 ) -> bool {
-    let Ok(params) = ordered_params else {
+    let (Some(manifest), Ok((params, _))) = (manifest, inputs) else {
         return false;
     };
-    abi_helpers::check_return_guard(driver.abi(), &r1cs.witness_layout, params, wit_pre_comm)
-        .inspect_err(|reason| eprintln!("return-guard check failed: {reason}"))
+    manifest
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|manifest| {
+            abi_helpers::check_witness_manifest(manifest, params, None, wit_pre_comm)
+        })
+        .inspect_err(|reason| eprintln!("witness manifest check failed: {reason}"))
         .is_ok()
+}
+
+fn declared_return_mismatch(
+    manifest: &Manifest,
+    inputs: &Result<ProverInputs, String>,
+    wit_pre_comm: &[RawField],
+) -> Option<String> {
+    let Ok((_, Some(declared_return))) = inputs else {
+        return None;
+    };
+    match manifest {
+        Some(Ok(manifest)) => {
+            abi_helpers::check_declared_return(manifest, declared_return, wit_pre_comm).err()
+        }
+        Some(Err(reason)) => Some(reason.clone()),
+        None => Some("no witness manifest: R1CS generation did not succeed".to_string()),
+    }
 }
 
 // ── Parent: discover & run all tests ──────────────────────────────────
@@ -668,7 +756,7 @@ fn find_noir_test_programs_dir() -> Option<PathBuf> {
     let noir_pkg = metadata.packages.iter().find(|p| {
         p.source
             .as_ref()
-            .is_some_and(|s| s.repr.contains("noir-lang/noir") || s.repr.contains("reilabs/noir"))
+            .is_some_and(|s| s.repr.contains("worldfnd/noir"))
     })?;
     // Walk up from the package manifest to find the repo root containing
     // `test_programs`.
@@ -1492,10 +1580,9 @@ const REGRESSION_COLS: &[&str] = &[
     "AD WASM No Leak",
 ];
 
-/// Verify the table's header carries every column the checks compare. Columns are resolved by
-/// name, so files whose layouts differ (a baseline predating a column addition) still align;
-/// what must never happen silently is a _stage_ column going missing entirely — e.g. a renamed
-/// header — which would drop that stage from regression checking.
+/// Verify the table's header carries every column the checks compare. Columns are resolved by name,
+/// so differing layouts still align; a stage column going missing (a renamed header, say) must not
+/// pass silently, as it would drop that stage from regression checking.
 fn validate_layout(table: &StatusTable, path: &Path) {
     for name in REGRESSION_COLS.iter().chain(&["Test", "Rows", "Cols"]) {
         assert!(

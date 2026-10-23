@@ -43,7 +43,7 @@ use crate::{
     compiler::{
         analysis::{types::FunctionTypeInfo, value_range_analysis::FunctionValueRanges},
         passes::shared::{
-            seq_bounds::{seq_bounds_operands, widen_comparison_operands},
+            seq_bounds::seq_bounds_operands,
             value_replacements::{ReplaceScope, ValueReplacements},
         },
         ssa::{
@@ -528,15 +528,8 @@ impl<'a> SparseArrayMerge<'a> {
                 };
                 let mut current = current;
                 for write in pending.into_iter().rev() {
-                    let TypeExpr::Int(a) = self.types.get_value_type(write.index).expr else {
-                        ice_unreachable!()
-                    };
-                    let TypeExpr::Int(c) = self.types.get_value_type(read.index).expr else {
-                        ice_unreachable!()
-                    };
-                    let (lhs, rhs, _) =
-                        widen_comparison_operands(&mut b, write.index, a, read.index, c);
-                    let hit = b.cmp(lhs, rhs, CmpKind::Eq);
+                    // Both indices are `int32`, the only index type the IR admits.
+                    let hit = b.cmp(write.index, read.index, CmpKind::Eq);
                     let value = write.value.unwrap();
                     let value = emit_value_conversion(
                         value,
@@ -695,7 +688,7 @@ impl<'a> SparseArrayMerge<'a> {
                 let index = if self.index_is_safe(write.index, *len) {
                     write.index
                 } else {
-                    let (_, idx_cmp, len_cmp, _) =
+                    let (_, idx_cmp, len_cmp) =
                         seq_bounds_operands(b, base, write.index, &plan.typ, index_type);
                     let in_bounds = b.ult(idx_cmp, len_cmp);
                     b.emit(OpCode::Guard {
@@ -791,7 +784,7 @@ mod tests {
         }
     }
 
-    fn fixture(len: usize, count: usize, nested: bool, index_bits: usize) -> Fixture {
+    fn fixture(len: usize, count: usize, nested: bool) -> Fixture {
         let mut ssa = HLSSA::with_main("merge".to_string());
         let fid = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(fid);
@@ -811,7 +804,7 @@ mod tests {
         for (id, ty) in [
             (base, typ.clone()),
             (other, typ.clone()),
-            (index, Type::int(index_bits)),
+            (index, Type::int(32)),
             (condition, Type::witness_of(Type::int(1))),
             (value, scalar),
         ] {
@@ -894,7 +887,7 @@ mod tests {
             (128, false, true, false, true, false),
             (128, false, true, true, false, false),
         ] {
-            let mut f = fixture(len, 1, false, 32);
+            let mut f = fixture(len, 1, false);
             let parameter = f.ssa.fresh_value();
             let function = f.ssa.get_function_mut(f.function);
             let entry = function.get_entry_id();
@@ -951,7 +944,7 @@ mod tests {
             (3, MAX_MERGED_WRITES, false, false, false),
             (0, 1, false, false, false),
         ] {
-            let mut f = fixture(len, count, nested, 32);
+            let mut f = fixture(len, count, nested);
             if witness {
                 let function = f.ssa.get_function_mut(f.function);
                 let entry = function.get_entry_id();
@@ -997,7 +990,7 @@ mod tests {
 
     #[test]
     fn planning_rejects_writes_from_another_guard_or_without_a_guard() {
-        let f = fixture(128, 2, false, 32);
+        let f = fixture(128, 2, false);
         let other_guard = f.ssa.add_const(Constant::int(1, 1));
         let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
         let mut merger = SparseArrayMerge::new(
@@ -1020,7 +1013,7 @@ mod tests {
 
     #[test]
     fn nested_replay_requires_matching_parent_read_and_guard() {
-        let mut f = fixture(128, 1, true, 32);
+        let mut f = fixture(128, 1, true);
         let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
         let mut merger = f.merger(&types);
         let child = merger.definitions[&f.changed].value.unwrap();
@@ -1044,7 +1037,7 @@ mod tests {
     #[test]
     fn only_dead_original_updates_receive_a_deletion_credit() {
         for retained in [false, true] {
-            let mut f = fixture(6, 2, false, 32);
+            let mut f = fixture(6, 2, false);
             if retained {
                 let function = f.ssa.get_function_mut(f.function);
                 let entry = function.get_entry_id();
@@ -1072,7 +1065,7 @@ mod tests {
     #[test]
     fn bounds_are_queried_at_the_replay_block() {
         for bounded in [false, true] {
-            let mut f = fixture(128, 1, false, 32);
+            let mut f = fixture(128, 1, false);
             let mut function = f.ssa.take_function(f.function);
             let entry = function.get_entry_id();
             let body = function.add_block();
@@ -1112,7 +1105,7 @@ mod tests {
     #[test]
     fn pending_merge_arguments_cannot_narrow_index_ranges() {
         for pending in [false, true] {
-            let mut f = fixture(128, 1, false, 32);
+            let mut f = fixture(128, 1, false);
             let mut function = f.ssa.take_function(f.function);
             let entry = function.get_entry_id();
             let merge = function.add_block();
@@ -1153,71 +1146,64 @@ mod tests {
     }
 
     #[test]
-    fn safe_indices_remain_pure_and_narrow_index_bounds_do_not_wrap() {
-        for bits in [1, 32, 64, 128] {
-            let mut f = fixture(128, 1, false, bits);
-            let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-            let mut function = f.ssa.take_function(f.function);
-            let mut merger = guarded_merger(&f, &mut function, &types);
-            let entry = function.get_entry_id();
-            function.get_block_mut(entry).take_terminator();
-            let result;
-            {
-                let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
-                let mut b = fb.test_block(entry);
-                let not_cond = b.not(f.condition);
-                result = merger
-                    .try_emit(
-                        &mut b,
-                        f.condition,
-                        not_cond,
-                        f.condition,
-                        not_cond,
-                        f.changed,
-                        f.base,
-                        &f.typ,
-                    )
-                    .unwrap();
-                b.set_terminator(Terminator::Return(vec![result]));
-            }
-            f.ssa.put_function(f.function, function);
-            let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
-            let ti = types.get_function(f.function);
-            assert_eq!(ti.get_value_type(result), &f.typ);
-            for (_, block) in f.ssa.get_function(f.function).get_blocks() {
-                for op in block.get_instructions() {
-                    if let OpCode::Cmp {
-                        kind: CmpKind::ULt,
-                        lhs,
-                        rhs,
-                        ..
-                    } = op
-                    {
-                        assert_eq!(ti.get_value_type(*lhs), &Type::int(bits.max(32)));
-                        assert_eq!(ti.get_value_type(*rhs), &Type::int(bits.max(32)));
-                    }
-                    if let OpCode::ArrayGet { index, .. } = op {
-                        assert_eq!(ti.get_value_type(*index), &Type::int(bits));
-                        if bits == 1 {
-                            assert_eq!(*index, f.index);
-                        }
-                    }
+    fn index_bounds_are_compared_at_the_index_width() {
+        let mut f = fixture(128, 1, false);
+        let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
+        let mut function = f.ssa.take_function(f.function);
+        let mut merger = guarded_merger(&f, &mut function, &types);
+        let entry = function.get_entry_id();
+        function.get_block_mut(entry).take_terminator();
+        let result;
+        {
+            let mut fb = HLFunctionBuilder::new(&mut function, &mut f.ssa);
+            let mut b = fb.test_block(entry);
+            let not_cond = b.not(f.condition);
+            result = merger
+                .try_emit(
+                    &mut b,
+                    f.condition,
+                    not_cond,
+                    f.condition,
+                    not_cond,
+                    f.changed,
+                    f.base,
+                    &f.typ,
+                )
+                .unwrap();
+            b.set_terminator(Terminator::Return(vec![result]));
+        }
+        f.ssa.put_function(f.function, function);
+        let types = Types::new().run(&f.ssa, &FlowAnalysis::run(&f.ssa));
+        let ti = types.get_function(f.function);
+        assert_eq!(ti.get_value_type(result), &f.typ);
+        for (_, block) in f.ssa.get_function(f.function).get_blocks() {
+            for op in block.get_instructions() {
+                if let OpCode::Cmp {
+                    kind: CmpKind::ULt,
+                    lhs,
+                    rhs,
+                    ..
+                } = op
+                {
+                    assert_eq!(ti.get_value_type(*lhs), &Type::int(32));
+                    assert_eq!(ti.get_value_type(*rhs), &Type::int(32));
+                }
+                if let OpCode::ArrayGet { index, .. } = op {
+                    assert_eq!(ti.get_value_type(*index), &Type::int(32));
                 }
             }
         }
     }
     #[test]
     fn cleanup_removes_replayed_stores_but_preserves_other_users() {
-        for (keep_original, nested, read_bits) in
-            [(false, false, 32), (true, false, 32), (false, true, 64)]
-        {
-            let mut f = fixture(128, 1, nested, 32);
+        for (keep_original, nested) in [(false, false), (true, false), (false, true)] {
+            let mut f = fixture(128, 1, nested);
             let mut function = f.ssa.take_function(f.function);
             let entry = function.get_entry_id();
             let other_index = f.ssa.fresh_value();
             function
                 .get_block_mut(entry)
-                .push_parameter(other_index, Type::int(read_bits));
+                .push_parameter(other_index, Type::int(32));
             let first = f.changed;
             let unrelated;
             {
@@ -1311,11 +1297,11 @@ mod tests {
                     {
                         assert_eq!(
                             types.get_function(f.function).get_value_type(*lhs),
-                            &Type::int(read_bits.max(32))
+                            &Type::int(32)
                         );
                         assert_eq!(
                             types.get_function(f.function).get_value_type(*rhs),
-                            &Type::int(read_bits.max(32))
+                            &Type::int(32)
                         );
                     }
                 }
@@ -1336,8 +1322,8 @@ mod tests {
     #[test]
     fn in_bounds_constants_skip_bounds_work() {
         for index in [0, 127] {
-            let mut f = fixture(128, 1, false, 64);
-            let constant = f.ssa.add_const(Constant::int(64, index));
+            let mut f = fixture(128, 1, false);
+            let constant = f.ssa.add_const(Constant::int(32, index));
             let function = f.ssa.get_function_mut(f.function);
             for (_, block) in function.get_blocks_mut() {
                 for op in block.get_instructions_mut() {

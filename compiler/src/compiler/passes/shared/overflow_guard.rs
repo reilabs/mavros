@@ -89,12 +89,8 @@ pub fn overflow_provably_impossible(
 
 /// A `u1` that is `1` exactly when `lhs op rhs` leaves the operand width.
 ///
-/// `wrapped` is the operation's, the value it produces having wrapped, which is what the backends
-/// compute and what the add/sub tests below compare against.
-///
-/// It is **required for `Add` and `Sub`, and ignored for `Mul`**, whose test is built from the
-/// operands alone. `bits` is the operand width, and every test below is built at it, under either
-/// reading.
+/// `wrapped` is the operation's wrapped result, **required for `Add` and `Sub`** and ignored for
+/// `Mul`. Every test is built at `bits` under either reading.
 ///
 /// # Panics
 ///
@@ -128,8 +124,7 @@ pub fn emit_overflow_cond(
 
 /// Emit `assert(!overflows(lhs, rhs))`, the unguarded form of the check.
 ///
-/// The operation itself is not emitted here, and `wrapped` is supplied on [`emit_overflow_cond`]'s
-/// terms: `LowerPureGuards` emits the operation first and passes its result.
+/// The caller emits the operation and passes its result as `wrapped`.
 ///
 /// # Panics
 ///
@@ -201,23 +196,10 @@ fn signed_add_sub_overflow(
 
 /// The unsigned multiply test, written **flat**: no branch, and one division.
 ///
-/// `MAX / rhs < lhs` is the overflow condition for a nonzero `rhs`, and a multiply by zero cannot
-/// overflow at all. The zero case is handled by _substituting_ a safe divisor rather than by
-/// branching on it, which is why this differs from the guarded lowering: a diamond would give
-/// untaint, DCE and the block simplifiers three more blocks to chew on at every unguarded multiply
-/// in the program for a condition that needs no control flow at all.
-///
-/// The substitution is `rhs | (rhs == 0)`, which is `rhs` untouched when it is nonzero and `1` when
-/// it is not.
-///
-/// **No `rhs != 0` conjunct is needed**. Substituting `1` for a zero divisor makes the test
-/// `MAX / 1 < lhs`, which is `MAX < lhs` — false for every `lhs`, since `lhs` is a `bits`-wide
-/// value and `MAX` is the largest of those. So the substituted divisor answers "no overflow" on its
-/// own, which is the right answer for a multiply by zero.
-///
-/// That argument depends on [`mul_overflows_nonzero`] using **`MAX` exactly** as its numerator. A
-/// smaller bound there would make `1` an unsafe substitute and the conjunct would have to come
-/// back.
+/// `MAX / rhs < lhs` for a nonzero `rhs`. A zero `rhs` is replaced by `rhs | (rhs == 0)` rather
+/// than branched on, which would add blocks at every multiply. With divisor `1` the test is
+/// `MAX < lhs`, always false, so no `rhs != 0` conjunct is needed; that relies on
+/// [`mul_overflows_nonzero`] using **exactly `MAX`** as its numerator.
 fn unsigned_mul_overflow(
     emitter: &mut impl HLEmitter,
     lhs: ValueId,
@@ -242,18 +224,18 @@ fn substitute_one_for_zero(emitter: &mut impl HLEmitter, value: ValueId, bits: u
 /// `MAX / rhs < lhs`: the unsigned multiply overflow test for a divisor known to be nonzero.
 ///
 /// Shared by the flat form above and by `LowerPureGuards`' guarded lowering, which reaches it on
-/// the arm where it has already branched on `rhs != 0`. Keeping the two on one predicate is the
-/// point of this module.
+/// the arm where it has already branched on `rhs != 0`. Keeping both on one predicate is the point
+/// of this module.
 ///
-/// The division is exact only downwards, which is what makes this the right comparison: `MAX / rhs`
-/// floors, so it is the largest `lhs` whose product still fits, and the test is a strict `<`.
+/// `MAX / rhs` floors, so it is the largest `lhs` whose product still fits, and the test is a
+/// strict `<`.
 ///
-/// The numerator being **`MAX` exactly** is load-bearing beyond this function: it is what lets
+/// The numerator being **exactly `MAX`** matters beyond this function: it lets
 /// [`unsigned_mul_overflow`] substitute `1` for a zero divisor and drop the `rhs != 0` conjunct.
 ///
-/// It is stated as [`IntBits::all_ones`] at the operand's own width. Stating it as a host word
-/// instead would bound the _check_ at 128 bits while both pure backends multiply well past that, so
-/// the operation would be refused for want of a constant rather than for want of a lowering.
+/// `MAX` is [`IntBits::all_ones`] at the operand's width. As a host word it would cap the _check_
+/// at 128 bits while both pure backends multiply well past that, refusing the operation for want
+/// of a constant rather than a lowering.
 pub fn mul_overflows_nonzero(
     emitter: &mut impl HLEmitter,
     lhs: ValueId,
@@ -358,16 +340,16 @@ pub fn sign_bit(emitter: &mut impl HLEmitter, value: ValueId, bits: usize) -> Va
 /// The value's magnitude, as an unsigned integer of the same width.
 ///
 /// `(value ^ mask) + sign`, where `mask` is the sign broadcast across the width: `!value + 1` for a
-/// negative value, and the value itself otherwise. The one value this has to get right is
-/// `INT_MIN`, whose magnitude `2^(bits−1)` is not representable as a _signed_ value: here
-/// `!INT_MIN + 1` is exactly that pattern, which is what its unsigned reading needs. The addition
-/// cannot leave the width, as `!value` is at most `2^(bits−1) − 1` for a negative value.
+/// negative value, and the value itself otherwise. The one case to get right is `INT_MIN`, whose
+/// magnitude `2^(bits−1)` is not representable as a _signed_ value: `!INT_MIN + 1` is exactly that
+/// pattern read unsigned. The addition cannot leave the width, as `!value` is at most
+/// `2^(bits−1) − 1` for a negative value.
 ///
-/// Built from integer operations at the operand's own width, so it holds at every width with no
-/// lift into the field. It is also built without a `Select`: this runs in unconstrained functions
-/// too, and the AD half of the program keeps a copy of those whose selects nothing lowers.
+/// Built from integer operations at the operand's width, so it holds at every width without
+/// lifting into the field. It also avoids `Select`: this runs in unconstrained functions too, and
+/// the AD half of the program keeps a copy of those in which nothing lowers a select.
 ///
-/// `sign_u1` is the value's own sign bit, which the caller already has.
+/// `sign_u1` is the value's sign bit, which the caller already has.
 pub fn abs_as_u(
     emitter: &mut impl HLEmitter,
     value: ValueId,
@@ -568,9 +550,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "the caller must have emitted it")]
     fn an_add_check_without_the_sum_is_a_compiler_bug() {
-        // The add/sub test is a comparison against the operation's own result, so without that
-        // result there is nothing to build it from. Rebuilding the sum here would emit a second
-        // copy of an operation the caller owns, so `None` is refused rather than filled in.
+        // The add/sub test compares against the operation's result, so it cannot be built without
+        // it. Rebuilding the sum here would emit a second copy of an operation the caller owns, so
+        // `None` is refused rather than filled in.
         with_emitter(|e| {
             let a = e.int_const(IntBits::one(8));
             let b = e.int_const(IntBits::from_u128(8, 2));
@@ -602,24 +584,14 @@ mod tests {
 
 /// The discharge predicate's conformance relation to the normative model in `mavros-int-semantics`.
 ///
-/// [`overflow_provably_impossible`] is the one place in the guard IR that answers a question whose
-/// wrong answer is _silent_: every other function here builds a check, and a mistake in one of them
-/// rejects a program it should not, which a test corpus notices. This one **deletes** a check, and
-/// a mistake in it produces a proof for a program Noir rejects.
-///
-/// So the relation is the one-sided one that failure mode names:
+/// [`overflow_provably_impossible`] **deletes** a check, so its mistakes are silent: it would
+/// accept a program Noir rejects. The relation is one-sided:
 ///
 /// > if `overflow_provably_impossible(L, R, ..)` then for every `a ∈ γ(L)` and `b ∈ γ(R)`,
 /// > [`eval`](mavros_int_semantics::eval) does not reject `a op b`.
 ///
-/// Nothing is claimed in the other direction. Declining to discharge is always safe, so a range
-/// pair this refuses is not required to be one that can overflow — that is the difference between
-/// a check being _needed_ and a check being _emitted_, and only the first is a correctness
-/// question.
-///
-/// γ is over **both** readings, matching `value_range_analysis`'s own sweep: a `ValueRange` denotes
-/// the patterns its unsigned and signed intervals both admit, so enumerating one reading would feed
-/// the model operands the range does not actually contain.
+/// Declining to discharge is always safe. γ is over **both** readings: a `ValueRange` denotes the
+/// patterns its unsigned and signed intervals both admit.
 #[cfg(test)]
 mod int_semantics_conformance {
     use super::*;
@@ -642,12 +614,8 @@ mod int_semantics_conformance {
             .collect()
     }
 
-    /// The ranges each operand is swept over at `bits`.
-    ///
-    /// Chosen for what they straddle rather than for coverage, as `value_range_analysis`'s sweep
-    /// is: the whole width, the singletons at each end, runs sitting just inside each boundary and
-    /// astride the sign one, and two entered through the _signed_ reading so that the reduction is
-    /// exercised from both sides.
+    /// The ranges each operand is swept over at `bits`: the whole width, the end singletons, runs
+    /// at each boundary and across the sign, and two entered through the signed reading.
     fn input_ranges(bits: usize) -> Vec<ValueRange> {
         let width = Width::Bits(bits);
         let top = semantics::mask(bits);

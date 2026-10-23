@@ -1,6 +1,6 @@
-//! [`IntBits`] is a width-sized two's-complement bit pattern, used for storing and evaluating
-//! arbitrary-sized integers at compile time. It uses exactly [`IntBits::limbs_for_bits`] limbs with
-//! any additional bits set to zero.
+//! [`IntBits`] is a width-sized two's-complement bit pattern that stores and evaluates
+//! arbitrary-width integers at compile time. It has exactly [`IntBits::limbs_for_bits`] limbs, with
+//! every bit above the width set to zero.
 
 use std::fmt;
 
@@ -18,20 +18,17 @@ pub const HOST_LIMB_BITS: usize = u64::BITS as usize;
 
 /// The width of the widest integer the host has a type for.
 ///
-/// The single definition of a number that a dozen sites across this workspace each have their own
-/// reason to name: a mask ladder that runs in a `u128`, a constant minted with `1u128 << n`, a
-/// generator whose return type is `Vec<u128>`, the last reading [`crate::mask`] can express. Each
-/// of those states its own reason where it uses this, but there is one number and it is a fact
-/// about the machine, so there is one place it is written down.
+/// One definition for the many sites that need it: a mask computed in a `u128`, a constant built
+/// with `1u128 << n`, a generator returning `Vec<u128>`, the widest [`crate::mask`] can express.
 ///
-/// **Not** [`MAX_BITS`], which is far above it: a bound written as the model's cap would take a
-/// `1u128 << bits` arm at a width no `u128` can hold, resulting in a debug panic and, worse, a
-/// release build that masks the shift amount and provides a plausible but incorrect answer.
+/// **Not** [`MAX_BITS`], which is far higher: a bound written as the model's cap would reach a
+/// `1u128 << bits` at a width no `u128` holds, which panics in a debug build and, worse, silently
+/// gives a wrong answer in release, where the shift amount is masked.
 pub const HOST_WORD_BITS: usize = u128::BITS as usize;
 
-// Two limbs inline, which covers every width the host has a type for and every width the Noir
-// surface can name. A wider pattern spills to the heap, so cloning the common case — including
-// elements of the symbolic arrays compiler analysis copies — needs no allocation.
+// Two inline limbs cover every host and every Noir width; a wider pattern spills to the heap. So
+// cloning the common case, including the elements of arrays compiler analysis copies, never
+// allocates.
 type Limbs = SmallVec<[u64; 2]>;
 
 // INTEGER BIT PATTERN
@@ -40,15 +37,13 @@ type Limbs = SmallVec<[u64; 2]>;
 /// A `bits`-wide two's-complement pattern: exactly [`IntBits::limbs_for_bits`] little-endian
 /// [`HOST_LIMB_BITS`]-wide limbs, with every bit at or above `bits` set to zero.
 ///
-/// It has no [`Ord`] implementation because it is a raw bit interpretation and there are two valid
-/// readings of ordering for this type. [`IntBits::compare`] should be used to choose a reading.
+/// It has no [`Ord`]: a bit pattern has two valid orderings, signed and unsigned. Use
+/// [`IntBits::compare`], which names the reading.
 ///
 /// # Performance
 ///
-/// Patterns up to 128 bits keep their limbs inline; wider patterns use heap storage. Cloning a
-/// small integer therefore needs no allocation, including when compiler analysis copies arrays
-/// of integer values. Storage does not change the width, normalization, equality, hashing, or
-/// arithmetic rules.
+/// Up to 128 bits the limbs are inline, so cloning a small integer never allocates. Storage does
+/// not affect width, normalization, equality, hashing or arithmetic.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct IntBits {
     /// The width of the integer.
@@ -63,17 +58,16 @@ pub struct IntBits {
 
 /// Constructors for the type, all of which perform normalization during construction.
 ///
-/// **None of these caps the width at [`MAX_BITS`]** as that is the _model's_ bound on the
-/// operations it will evaluate, not the type's on the patterns it can hold. What does assert it is
-/// the field-limb group below — [`IntBits::from_packed_limbs`], [`IntBits::from_field_limbs`] and
-/// their companion predicate [`IntBits::field_limbs_fit`] — because those are reading a _field
-/// element_, which the model does own an opinion about.
+/// **None of these caps the width at [`MAX_BITS`]**: that bounds the operations the model
+/// evaluates, not the patterns the type holds. The field-limb group below does check it
+/// ([`IntBits::from_packed_limbs`], [`IntBits::from_field_limbs`] and their predicate
+/// [`IntBits::field_limbs_fit`]), because those read a _field element_, which the model does
+/// constrain.
 ///
-/// The **lower** bound is a different matter and is enforced through [`IntBits::limbs_for_bits`]: a
-/// width of zero describes no pattern at all, so it panics rather than producing an empty one.
-/// Everything that takes a width downstream — [`IntBits::cast`], [`IntBits::bit_range`],
-/// [`IntBits::sign_extend`] — inherits that panic, and a caller holding a width it did not choose
-/// itself is the one that has to refuse first.
+/// The **lower** bound is enforced by [`IntBits::limbs_for_bits`]: a width of zero describes no
+/// pattern, so it panics rather than building an empty one. Everything that takes a width
+/// ([`IntBits::cast`], [`IntBits::bit_range`], [`IntBits::sign_extend`]) inherits that panic, so a
+/// caller holding a width it did not choose must refuse a zero first.
 impl IntBits {
     /// Zero at `bits` wide.
     #[must_use]
@@ -101,8 +95,8 @@ impl IntBits {
 
     /// Every bit below `bits` set, and the companion of [`IntBits::is_all_ones`].
     ///
-    /// Distinct from [`crate::mask`], which answers the same thing as a _host_ word and so stops
-    /// being expressible at a width the host has no corresponding type for.
+    /// It works at any width, unlike [`crate::mask`], which answers as a _host_ word and so cannot
+    /// express a width the host has no type for.
     #[must_use]
     pub fn all_ones(bits: usize) -> Self {
         Self::normalized(bits, Limbs::from_elem(u64::MAX, Self::limbs_for_bits(bits)))
@@ -125,33 +119,30 @@ impl IntBits {
 
 /// The width of one limb of a **canonical field representation**.
 ///
-/// This is not a property of any particular field: `ark_ff::BigInt<const N: usize>` is `[u64; N]`,
-/// so the limb _count_ `N` varies from field to field while the limb _width_ does not. That is
-/// **arkworks'** `BigInt` and not the `num-bigint` one this crate computes with, whose own digit
-/// width is `pub(crate)` and irrelevant here: [`IntBits::from_biguint`] reads a magnitude back
-/// through `iter_u64_digits`, which is a `u64` view of it however it is stored.
+/// The same for every field: arkworks' `ark_ff::BigInt<const N: usize>` is `[u64; N]`, so the limb
+/// _count_ varies by field and the limb _width_ does not. (This crate computes with `num-bigint`,
+/// whose digit width does not matter here: [`IntBits::from_biguint`] reads through
+/// `iter_u64_digits`.)
 ///
-/// The claim is therefore about a type this crate deliberately cannot see, so it is held to
-/// arkworks one crate up, by a `const` assertion in the compiler's `util.rs`.
+/// This crate cannot see arkworks, so a `const` assertion in the compiler's `util.rs` checks the
+/// value.
 pub const FIELD_LIMB_BITS: usize = 64;
 
-/// Reading a field element's limbs as a pattern, which needs no reading of its own: a canonical
-/// field representation is an unsigned magnitude, so only the truncation is in question.
+/// Reading a field element's limbs as a pattern. A canonical field representation is an unsigned
+/// magnitude, so no signed or unsigned reading is needed, only a truncation.
 impl IntBits {
     /// Recombine little-endian limbs of `limb_bits` each into a `bits`-wide pattern.
     ///
-    /// The limb width is a parameter because Mavros has two unrelated kinds of limb, and conflating
-    /// them risks a bug: a canonical field representation is always [`FIELD_LIMB_BITS`] wide, while
-    /// the witness decompositions in `witness_bitwise` use a width that is _derived from the field
-    /// size_. Both are little-endian limb vectors and neither knows the other's width.
+    /// The limb width is a parameter because Mavros has two unrelated kinds of limb: a canonical
+    /// field representation's are [`FIELD_LIMB_BITS`] wide, while the witness decompositions in
+    /// `witness_bitwise` use a width derived from the field size.
     ///
     /// Each limb is masked to `limb_bits` first, so a caller packing a narrow limb into a wider
-    /// container need not clear the space above it.
+    /// container need not clear the bits above it.
     ///
     /// # Panics
     ///
-    /// If `limb_bits` is zero, which describes no representation at all, or if `bits` is outside
-    /// the model's range.
+    /// If `limb_bits` is zero, or if `bits` is outside the model's range.
     #[must_use]
     pub fn from_packed_limbs(limbs: &[u64], limb_bits: usize, bits: usize) -> Self {
         assert!(
@@ -160,8 +151,8 @@ impl IntBits {
         );
         assert!(limb_bits > 0, "a limb must be at least one bit wide");
 
-        // Limb `i` starts at bit `i * limb_bits`, so the ones from here up contribute nothing below
-        // `bits` and the final truncation would discard them anyway.
+        // Limb `i` starts at bit `i * limb_bits`, so limbs from here up contribute nothing below
+        // `bits`; the final truncation would discard them anyway.
         let usable = bits.div_ceil(limb_bits);
         let limb_mask = mask(limb_bits);
 
@@ -176,14 +167,12 @@ impl IntBits {
         Self::from_biguint(bits, &low)
     }
 
-    /// Read a field element's canonical little-endian limbs as a `bits`-wide pattern.
+    /// Read a field element's canonical little-endian limbs as a `bits`-wide pattern: the
+    /// `Field -> Int` cast, [`IntBits::from_packed_limbs`] at [`FIELD_LIMB_BITS`].
     ///
-    /// The `Field -> Int` cast, and [`IntBits::from_packed_limbs`] at [`FIELD_LIMB_BITS`]. It takes
-    /// the low `bits` bits of the **canonical** representation, so a caller holding a **Montgomery
-    /// form must convert first**.
-    ///
-    /// The slice is unsized because the limb count is a property of the field. A slice shorter than
-    /// `bits` implies is not an error either: it simply describes a smaller element.
+    /// It keeps the low `bits` bits of the **canonical** form, so a caller holding a Montgomery
+    /// form must convert first. The limb count depends on the field; limbs missing below `bits`
+    /// read as zero, as they do for a smaller element.
     ///
     /// # Panics
     ///
@@ -195,16 +184,15 @@ impl IntBits {
             "pattern width {bits} is outside 1..={MAX_BITS}"
         );
 
-        // Not routed through `from_packed_limbs`: at the host limb width the packed limbs already
-        // **are** the pattern's own little-endian words, so there's nothing to unpack. The
-        // congruence is enforced in tests.
+        // Not through `from_packed_limbs`: at the host limb width the packed limbs **are** the
+        // pattern's little-endian words. Tests check the two agree.
         Self::from_limbs(bits, limbs)
     }
 
     /// Whether a field element's canonical limbs are entirely inside a `bits`-wide pattern.
     ///
-    /// The companion of [`IntBits::from_field_limbs`], which **truncates**: this is how a caller
-    /// asks whether the truncation would lose anything, so that it can refuse if needed.
+    /// [`IntBits::from_field_limbs`] **truncates**; this asks whether that truncation would lose
+    /// anything, so a caller can refuse.
     ///
     /// # Panics
     ///
@@ -216,9 +204,9 @@ impl IntBits {
             "pattern width {bits} is outside 1..={MAX_BITS}"
         );
 
-        // Limbs below `whole` are covered outright. The one at `whole` is covered only up to
-        // `spare` bits, and where `spare` is zero that shift asks for the whole limb: at a width
-        // that ends on a limb boundary the limb above it is entirely outside.
+        // Limbs below `whole` are covered outright, and the one at `whole` up to `spare` bits.
+        // Where `spare` is zero the width ends on a limb boundary, and that shift asks for the
+        // whole limb above to be zero.
         let whole = bits / FIELD_LIMB_BITS;
         let spare = bits % FIELD_LIMB_BITS;
 
@@ -252,9 +240,9 @@ impl IntBits {
 
     /// The number of [`HOST_LIMB_BITS`]-wide limbs a `bits`-wide pattern occupies.
     ///
-    /// [`HOST_LIMB_BITS`] is fixed by the machine and not by the field: this is the quantity
-    /// `int_cell_count` reserves in a VM frame and `for_each_constant_word` emits. The _field_ limb
-    /// is a different and narrower thing, derived from the field's own width.
+    /// [`HOST_LIMB_BITS`] comes from the machine, not the field: this is what `int_cell_count`
+    /// reserves in a VM frame and `for_each_constant_word` emits. The _field_ limb is a separate,
+    /// narrower width derived from the field.
     ///
     /// # Panics
     ///
@@ -285,9 +273,9 @@ impl IntBits {
 
     /// Whether every bit below the width is set.
     ///
-    /// Read as two's complement that is `-1`, but this only says the pattern is saturated at its
-    /// own width. It is a property of the limbs alone precisely _because_ the pattern is normalized
-    /// — the top limb's own maximum is [`top_limb_mask`].
+    /// That is `-1` as two's complement, but this asks only whether the pattern is saturated. The
+    /// limbs alone answer it _because_ the pattern is normalized: the top limb's maximum is
+    /// [`top_limb_mask`].
     #[must_use]
     pub fn is_all_ones(&self) -> bool {
         let top = self.limbs.len() - 1;
@@ -297,9 +285,8 @@ impl IntBits {
 
     /// Bit `index`, counting from the least significant, or [`None`] at or above the width.
     ///
-    /// [`None`] rather than `false`, because the two are not the same thing: a pattern has no bit
-    /// at or above its own width, and answering `false` there would make an out-of-range read
-    /// indistinguishable from a zero bit that is genuinely part of the value.
+    /// [`None`] rather than `false`: a pattern has no bit at or above its width, and `false` would
+    /// make an out-of-range read look like a zero bit of the value.
     #[must_use]
     pub fn bit(&self, index: usize) -> Option<bool> {
         if index >= self.bits {
@@ -314,15 +301,14 @@ impl IntBits {
 
 /// Operations a pattern supports _without_ a reading being named.
 ///
-/// Every one of them is a rearrangement of bits: the answer for a given input is the same whether
-/// the operands are meant as signed or unsigned.
+/// Each one rearranges bits, so its answer is the same whether the operands are read as signed
+/// or unsigned.
 impl IntBits {
     /// Bitwise `and` with another pattern of the same width.
     ///
     /// # Panics
     ///
-    /// If the widths differ. Two patterns of different widths have no common bit positions to
-    /// combine, and every caller here has already checked that they agree.
+    /// If the widths differ. Every caller checks that they agree first.
     #[must_use]
     pub fn and(&self, other: &Self) -> Self {
         self.zip_with(other, |a, b| a & b)
@@ -361,8 +347,8 @@ impl IntBits {
     /// On a `to_bits` of zero, which describes no pattern to reinterpret as.
     #[must_use]
     pub fn cast(&self, to_bits: usize) -> Self {
-        // A cast to the width already held is the identity, and it is the common case: both
-        // constant folders spell the `BitRange` transfer as `bit_range(..).cast(self.bits())`.
+        // A cast to the same width is the identity, and the common case: both constant folders
+        // spell the `BitRange` transfer as `bit_range(..).cast(self.bits())`.
         if to_bits == self.bits {
             return self.clone();
         }
@@ -374,14 +360,14 @@ impl IntBits {
     /// The truncation primitive: `v.bit_range(0, n)` is the low `n` bits, and a logical `>>` by a
     /// constant amount is `v.bit_range(k, v.bits() - k)`.
     ///
-    /// There is no bound on `offset`, because a pattern shifted past its own width is empty where
-    /// a host word shifted past its own width is undefined. `width` is bounded below, though, for
-    /// the reason [`IntBits::cast`] is: an empty window is not a pattern.
+    /// `offset` is unbounded: a pattern shifted past its width is simply empty (unlike a host word,
+    /// where that is undefined). `width` must be at least one, as for [`IntBits::cast`]: an empty
+    /// window is not a pattern.
     ///
     /// # Panics
     ///
-    /// On a `width` of zero. HLSSA's `BitRange` refuses one too (`analysis::types` types it as an
-    /// error), so a folder handed one is looking at IR that does not type-check.
+    /// On a `width` of zero. `analysis::types` refuses such a `BitRange` too, so a folder that
+    /// meets one has IR that does not type-check.
     #[must_use]
     pub fn bit_range(&self, offset: usize, width: usize) -> Self {
         self.shifted_right(offset).cast(width)
@@ -389,9 +375,8 @@ impl IntBits {
 
     /// The pattern moved `amount` places toward the most significant end, zero-filling behind it.
     ///
-    /// Named for the movement rather than for `<<`, because an operation's shift carries additional
-    /// rules: at or above the width Noir rejects, and a total backend reduces the amount modulo the
-    /// width first. Here an amount at or above the width simply leaves nothing.
+    /// Not `<<`, which has more rules: Noir rejects an amount at or past the width, and a total
+    /// backend reduces it modulo the width first. Here such an amount leaves zero.
     #[must_use]
     pub fn shifted_left(&self, amount: usize) -> Self {
         if amount >= self.bits {
@@ -404,8 +389,8 @@ impl IntBits {
                 break;
             };
             *target |= limb << part;
-            // A shift by a whole limb is `limb << HOST_LIMB_BITS`, which is undefined rather than
-            // zero, so the carry into the next limb is guarded rather than written directly.
+            // A carry by a whole limb would be `limb << HOST_LIMB_BITS`, which overflows rather
+            // than giving zero, so the carry into the next limb is guarded.
             if part > 0
                 && let Some(next) = out.get_mut(i + whole + 1)
             {
@@ -440,11 +425,11 @@ impl IntBits {
     /// Interleave the low `bits` bits with zeros, so that bit `i` lands on bit `2i` of a pattern
     /// twice this one's width.
     ///
-    /// Only the low `bits` bits are read and anything above them is discarded. A witnessed spread
-    /// rejects such a value through its lookup instead, but a total evaluator still has to produce
-    /// a pattern. The width doubles whatever `bits` is,.
+    /// Only the low `bits` bits are read. A witnessed spread rejects a wider value through its
+    /// lookup, but a total evaluator still needs a pattern. The result is twice the pattern's
+    /// width, whatever `bits` is.
     ///
-    /// Written bit by bit so it can serve as a clear behavioral specification of the operation.
+    /// Written bit by bit, as a specification.
     ///
     /// # Panics
     ///
@@ -467,18 +452,14 @@ impl IntBits {
     /// Separate the low `bits` bits into their odd- and even-indexed streams, the inverse of
     /// [`IntBits::spread`], answering `(odd, even)`.
     ///
-    /// Bit `2i + 1` becomes bit `i` of the odd stream and bit `2i` bit `i` of the even one. The
-    /// even stream starts at bit zero, so at an odd width it holds the one bit more: the odd answer
-    /// is `floor(width / 2)` wide and the even one `ceil(width / 2)`. As with the spread, bits at
-    /// or above `bits` are discarded.
-    ///
-    /// The read is at least two bits, as HLSSA's `Unspread` requires, so that the odd stream it
-    /// reads has a bit in it.
+    /// Bit `2i + 1` becomes bit `i` of the odd stream and bit `2i` bit `i` of the even one, so the
+    /// odd answer is `floor(width / 2)` wide and the even one `ceil(width / 2)`. Bits at or above
+    /// `bits` are discarded. The read is at least two bits, as HLSSA's `Unspread` requires.
     ///
     /// # Panics
     ///
     /// If `bits` is below two or wider than the pattern, or if the pattern is a single bit, which
-    /// has no odd stream to give a width to.
+    /// has no odd stream.
     #[must_use]
     pub fn unspread(&self, bits: usize) -> (Self, Self) {
         assert!(self.bits >= 2, "an int1 has no odd stream to unspread into");
@@ -527,16 +508,13 @@ impl IntBits {
 // OPERATIONS THAT NAME A READING
 // ================================================================================================
 
-/// The operations that name a **reading** of a pattern.
-///
-/// The block above answers only what is true of the bits (`and`, `cast`, `bit_range`, the shifts)
-/// and the type deliberately has no [`Ord`], because two patterns have two orderings and it cannot
-/// pick one. Everything here picks a signedness, encoded in its name.
+/// The operations that name a **reading** of a pattern: each picks a signedness, named in the
+/// method. The block above holds what is true of the bits alone.
 impl IntBits {
     /// Read this pattern as two's complement.
     ///
-    /// Total at every width an [`IntBits`] can have: the magnitude is a [`BigUint`] and the
-    /// correction is a two-power, so there is no host type to fall out of.
+    /// Total at every width: the magnitude is a [`BigUint`] and the correction a power of two, so
+    /// no host type can overflow.
     #[must_use]
     pub fn to_signed(&self) -> SignedValue {
         let magnitude = SignedValue::from(BigUint::from(self));
@@ -549,13 +527,12 @@ impl IntBits {
 
     /// Encode a signed value as a `bits`-wide pattern.
     ///
-    /// Total for any `v`, however far outside the width it sits: a value that does not fit is
-    /// reduced modulo `2^bits`, as required by [`residue`](crate::residue).
+    /// Total for any `v`: a value that does not fit is reduced modulo `2^bits`, as
+    /// [`residue`](crate::residue) requires.
     #[must_use]
     pub fn from_signed(bits: usize, v: &SignedValue) -> Self {
-        // A [`SignedValue`]'s bitwise operators read a negative value as two's complement extended
-        // indefinitely: masking to `bits` takes the low `bits` of that and lands in `0..2^bits`
-        // whatever the sign and magnitude of `v`.
+        // A [`SignedValue`]'s bitwise operators treat a negative value as infinitely
+        // sign-extended two's complement, so masking to `bits` lands in `0..2^bits` for any `v`.
         let masked = v & (two_pow(bits) - SignedValue::from(1u8));
         Self::from_biguint(bits, masked.magnitude())
     }
@@ -574,8 +551,8 @@ impl IntBits {
     ///
     /// # Panics
     ///
-    /// On a width of zero: `bits - 1` would wrap in a release build and ask for a two-power with
-    /// no memory to hold it.
+    /// On a width of zero: `bits - 1` would wrap in a release build and ask for an unrepresentably
+    /// large power of two.
     #[must_use]
     pub fn signed_max(bits: usize) -> SignedValue {
         assert!(bits >= 1, "a signed reading needs at least a sign bit");
@@ -597,7 +574,7 @@ impl IntBits {
     ///
     /// # Panics
     ///
-    /// On a narrowing. The width extended _from_ needs no check of its own as it is the receiver's.
+    /// On a narrowing. The width extended _from_ is the receiver's, so it needs no check.
     #[must_use]
     pub fn sign_extend(&self, to: usize) -> Self {
         let from = self.bits();
@@ -605,30 +582,24 @@ impl IntBits {
         let widened = self.cast(to);
         if self.bit(from - 1) == Some(true) {
             // The fill is every bit from `from` up to `to`. At `to == from` the shift moves the
-            // ones clean out of the width and leaves nothing, which is the right answer: there is
-            // no room above the sign bit to fill.
+            // ones out of the width and leaves nothing to fill, which is right.
             widened.or(&Self::all_ones(to).shifted_left(from))
         } else {
             widened
         }
     }
 
-    /// The amount this pattern actually shifts a `operand_bits`-wide value by, where the guard IR
-    /// failed to reject it.
+    /// The amount this pattern (the receiver) actually shifts an `operand_bits`-wide value by,
+    /// where the guard IR failed to reject it.
     ///
-    /// The receiver is the **amount** and the parameter is the width of the value being shifted: an
-    /// amount carries a width of its own and it is not the width the reduction is against.
-    ///
-    /// `amount % operand_bits`: a genuine **modulo at every width**, rather than a mask. At a
-    /// power-of-two width the two coincide, but at a width that is not a power of two they differ,
-    /// and a mask would be incorrect.
+    /// `amount % operand_bits`: a **modulo at every width**, not a mask. The two agree only at a
+    /// power-of-two width.
     ///
     /// # Panics
     ///
-    /// On an `operand_bits` of zero. The VM's counterpart answers `0` there, because its width
-    /// arrives from a frame cell and a zero-width cell holds nothing; this one's arrives from the
-    /// operand [`eval`](crate::eval) was handed, whose width check has already held it at one bit
-    /// or more.
+    /// On an `operand_bits` of zero. The VM's version answers `0` there, since its width comes from
+    /// a frame cell and a zero-width cell holds nothing; here the width comes from an operand that
+    /// [`eval`](crate::eval) has already checked is at least one bit.
     #[must_use]
     pub fn reduced_shift_amount(&self, operand_bits: usize) -> u32 {
         assert!(
@@ -641,19 +612,18 @@ impl IntBits {
 
     /// Compare against another pattern of the same width, under the reading `op` names.
     ///
-    /// Spelled `compare` rather than `cmp` because [`IntBits`] deliberately has no [`Ord`] for an
-    /// inherent `cmp` to shadow, but one answering a `bool` beside the `Ord::cmp` everyone knows
-    /// answers an [`Ordering`](std::cmp::Ordering) is a readability trap for no gain.
+    /// Not named `cmp`, which would read like `Ord::cmp` returning an
+    /// [`Ordering`](std::cmp::Ordering).
     ///
     /// # Panics
     ///
     /// As [`eval`](crate::eval) does, on invalid or unequal widths.
     #[must_use]
     pub fn compare(&self, op: CmpOp, rhs: &Self) -> bool {
-        check_widths(false, self.bits(), rhs.bits());
+        check_widths(self.bits(), rhs.bits());
         match op {
-            // Equality is the one comparison a pattern answers on its own: two patterns of one
-            // width are equal under either reading exactly when their bits are.
+            // Equality needs no reading: two patterns of one width are equal under either reading
+            // exactly when their bits are.
             CmpOp::Eq => self == rhs,
             CmpOp::SLt => self.to_signed() < rhs.to_signed(),
             CmpOp::ULt => BigUint::from(self) < BigUint::from(rhs),
@@ -698,8 +668,8 @@ impl From<u8> for IntBits {
 }
 
 impl From<i8> for IntBits {
-    /// An 8-bit pattern holding `value` in two's complement, which at the host type's own width is
-    /// simply its bit pattern: `-1` is every bit set, `i8::MIN` is the sign bit alone.
+    /// An 8-bit pattern holding `value` in two's complement, which is `value`'s bit pattern: `-1`
+    /// is every bit set, `i8::MIN` is the sign bit alone.
     fn from(value: i8) -> Self {
         Self::from_u128(8, u128::from(value as u8))
     }
@@ -713,8 +683,8 @@ impl From<u16> for IntBits {
 }
 
 impl From<i16> for IntBits {
-    /// A 16-bit pattern holding `value` in two's complement, which at the host type's own width
-    /// is simply its bit pattern: `-1` is every bit set, `i16::MIN` is the sign bit alone.
+    /// A 16-bit pattern holding `value` in two's complement, which is `value`'s bit pattern: `-1`
+    /// is every bit set, `i16::MIN` is the sign bit alone.
     fn from(value: i16) -> Self {
         Self::from_u128(16, u128::from(value as u16))
     }
@@ -728,8 +698,8 @@ impl From<u32> for IntBits {
 }
 
 impl From<i32> for IntBits {
-    /// A 32-bit pattern holding `value` in two's complement, which at the host type's own width
-    /// is simply its bit pattern: `-1` is every bit set, `i32::MIN` is the sign bit alone.
+    /// A 32-bit pattern holding `value` in two's complement, which is `value`'s bit pattern: `-1`
+    /// is every bit set, `i32::MIN` is the sign bit alone.
     fn from(value: i32) -> Self {
         Self::from_u128(32, u128::from(value as u32))
     }
@@ -743,8 +713,8 @@ impl From<u64> for IntBits {
 }
 
 impl From<i64> for IntBits {
-    /// A 64-bit pattern holding `value` in two's complement, which at the host type's own width
-    /// is simply its bit pattern: `-1` is every bit set, `i64::MIN` is the sign bit alone.
+    /// A 64-bit pattern holding `value` in two's complement, which is `value`'s bit pattern: `-1`
+    /// is every bit set, `i64::MIN` is the sign bit alone.
     fn from(value: i64) -> Self {
         Self::from_u128(64, u128::from(value as u64))
     }
@@ -753,10 +723,9 @@ impl From<i64> for IntBits {
 // CONVERSIONS TO HOST TYPES
 // ================================================================================================
 
-/// Reading a pattern back out, refusing rather than truncating if it will not fit.
+/// Reading a pattern back out, refusing rather than truncating if it does not fit.
 ///
-/// Deliberately unsigned targets only as this type contains a bit pattern, not a signed or unsigned
-/// interpretation.
+/// Unsigned targets only: this type holds a bit pattern, not a signed or unsigned reading.
 impl TryFrom<&IntBits> for u8 {
     type Error = DoesNotFit;
 
@@ -856,9 +825,9 @@ impl TryFrom<IntBits> for usize {
 
 /// The one conversion the [`TryFrom`] impls above are all written in terms of.
 ///
-/// It is private, and deliberately: a `u128` is the widest host word, so every narrower target
-/// checks its own range against the value this produces rather than re-deriving one from the limbs.
-/// Widening past 128 bits will change this function and nothing else.
+/// Private on purpose: `u128` is the widest host word, so every narrower target range-checks the
+/// value this returns instead of re-reading the limbs. Supporting a wider host type would change
+/// only this function.
 impl IntBits {
     /// The pattern as a `u128`, unsigned, or [`DoesNotFit`] if any bit above 127 is set.
     fn as_u128(&self) -> Result<u128, DoesNotFit> {
@@ -876,19 +845,17 @@ impl IntBits {
 
 /// Verilog's sized-literal notation.
 ///
-/// Hand-written rather than derived because a derived one prints the limb vector, which is
-/// unreadable at any width worth having this type for: `int16384` would be 256 decimal limbs.
+/// Hand-written because a derived one prints the limb vector, which is unreadable at the widths
+/// this type exists for: `int16384` would be 256 decimal limbs.
 impl fmt::Debug for IntBits {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}'h", self.bits)?;
 
-        // Most significant limb first, and the digits have to read as one number rather than as a
-        // per-limb rendering. That takes both halves: everything below the leading limb is padded
-        // to its full sixteen digits, so a zero limb cannot swallow the magnitude above it, and the
-        // leading limb is the most significant _non-zero_ one, so a wide pattern holding a small
-        // value does not acquire a run of unnecessary zeroes.
+        // Most significant limb first, as one number: limbs below the leading non-zero one are
+        // padded to sixteen digits, so a zero limb cannot swallow the magnitude above it, and a
+        // small value in a wide pattern has no leading zeroes.
         let Some(top) = self.limbs.iter().rposition(|&limb| limb != 0) else {
-            // Every limb is zero, so there is no leading digit to find and the value is `0`.
+            // Every limb is zero.
             return write!(f, "0");
         };
 
@@ -903,14 +870,9 @@ impl fmt::Debug for IntBits {
 // CONVERSIONS TO AND FROM A BIGNUM
 // ================================================================================================
 
-/// The width-free view of a pattern, for the arithmetic the model does on it.
+/// The width-free view of a pattern: its unsigned magnitude, before any reading. It cannot fail.
 ///
-/// Unlike the host conversions above this one cannot fail, and unlike them it is not a reading: a
-/// [`BigUint`] is the unsigned magnitude of the bits, which is what they are before anyone decides
-/// what they mean.
-///
-/// This crate cannot answer whether a given number has a conversion, as it depends on the field
-/// modulus which this model is independent of.
+/// Whether it converts to a field element depends on the modulus, which this model does not know.
 impl From<&IntBits> for BigUint {
     fn from(value: &IntBits) -> Self {
         let bytes: Vec<u8> = value
@@ -928,17 +890,10 @@ impl From<IntBits> for BigUint {
     }
 }
 
-/// The direction the [`From`] impls above cannot take, because it needs a width.
-///
-/// A [`BigUint`] is a magnitude and carries none, so coming back from one is a choice about how
-/// many bits to keep rather than a conversion, which is why it is a named constructor here and not
-/// a `From`.
+/// The reverse direction needs a width, so it is a named constructor, not a `From`.
 impl IntBits {
-    /// A `bits`-wide pattern carrying `value`, discarding any bits at or above `bits`.
-    ///
-    /// The counterpart of the [`BigUint`] conversion above, and the way an arithmetic result comes
-    /// back to being a pattern. It truncates rather than refusing, which is what makes it the
-    /// wrapping every total evaluator owes.
+    /// A `bits`-wide pattern carrying `value`, discarding any bits at or above `bits`: the wrapping
+    /// every total evaluator needs.
     #[must_use]
     pub fn from_biguint(bits: usize, value: &BigUint) -> Self {
         let digits: Limbs = value.iter_u64_digits().collect();
@@ -987,18 +942,15 @@ mod tests {
         assert_eq!(IntBits::limbs_for_bits(16384), 256);
         assert_eq!(top_limb_mask(16384), u64::MAX);
 
-        // ... and `16383` is the widest width that shares that limb count with a partial top.
+        // ... and `16383` is the widest width with that limb count and a partial top limb.
         assert_eq!(IntBits::limbs_for_bits(16383), 256);
         assert_ne!(top_limb_mask(16383), u64::MAX);
         assert_eq!(IntBits::limbs_for_bits(16385), 257);
     }
 
-    /// Widths worth constructing at, chosen for their top limbs.
-    ///
-    /// `16383` and `16384` are the pair that matters most and the reason both are here: `16384` is
-    /// exactly 256 limbs, so its top limb is full and every `bits % HOST_LIMB_BITS` special case
-    /// vanishes, while `16383` is the widest width whose top limb is partial. They occupy the same
-    /// number of limbs, so a test that carries only one of them is testing half the boundary.
+    /// Widths worth constructing at, chosen for their top limbs. `16384` is exactly 256 full limbs,
+    /// where every `bits % HOST_LIMB_BITS` case vanishes, and `16383` the widest with a partial top
+    /// limb; with the same limb count, either alone covers half the boundary.
     const WIDTHS: &[usize] = &[
         1, 2, 3, 7, 8, 63, 64, 65, 96, 127, 128, 129, 191, 192, 193, 1000, 16383, 16384,
     ];
@@ -1060,7 +1012,7 @@ mod tests {
         assert_ne!(wide, narrow);
     }
 
-    /// The reference the round-trip is held to, for the widths a `u128` can express.
+    /// The round-trip's reference, at the widths a `u128` can express.
     fn mask_u128(bits: usize) -> u128 {
         if bits >= 128 {
             u128::MAX
@@ -1075,8 +1027,8 @@ mod tests {
         assert_eq!(format!("{:?}", IntBits::zero(1)), "1'h0");
         assert_eq!(format!("{:?}", IntBits::from(-1i8)), "8'hff");
 
-        // Across a limb boundary the digits have to read as one number: the low limb is padded to
-        // its full sixteen digits, so a zero low limb cannot swallow the high limb's magnitude.
+        // Across a limb boundary the digits read as one number: the low limb is padded to sixteen
+        // digits, so a zero low limb cannot swallow the high limb's magnitude.
         assert_eq!(
             format!("{:?}", IntBits::from_u128(128, 1u128 << 64)),
             "128'h10000000000000000"
@@ -1086,13 +1038,12 @@ mod tests {
             "129'h100000000000000000000000000000000"
         );
 
-        // The other half of "reads as one number": a value that does not reach the top limb is
-        // written the way a number is, without the run of leading zeroes the limb vector holds. The
-        // width prefix is what says how much room there was.
+        // A value below the top limb is written without the leading zeroes the limb vector holds;
+        // the width prefix gives the width.
         assert_eq!(format!("{:?}", IntBits::from_u128(128, 1)), "128'h1");
         assert_eq!(format!("{:?}", IntBits::from_u128(16384, 42)), "16384'h2a");
 
-        // Zero has no significant limb at all, at any width.
+        // Zero has no significant limb, at any width.
         assert_eq!(format!("{:?}", IntBits::zero(128)), "128'h0");
         assert_eq!(format!("{:?}", IntBits::zero(16384)), "16384'h0");
 
@@ -1119,18 +1070,17 @@ mod tests {
                 "at {bits} bits"
             );
         }
-        // The 16383/16384 pair shares a limb count and differs only in the top limb's mask, which
-        // is exactly why the count alone is not enough to pin the representation down.
+        // 16383 and 16384 share a limb count and differ only in the top limb's mask, so the count
+        // alone does not pin the representation down.
         assert_eq!(IntBits::zero(16383).limb_count(), 256);
         assert_eq!(IntBits::zero(16384).limb_count(), 256);
     }
 
     #[test]
     fn two_widths_sharing_a_limb_count_are_different_patterns() {
-        // The reason the width is stored rather than inferred. Both of these pairs occupy the same
-        // number of limbs and hold the same limbs, so a pattern that did not carry its own width
-        // could not tell them apart -- and `Eq` would have meant "one spelling per value per limb
-        // count" where the interning bimap needs "per width".
+        // Why the width is stored rather than inferred: each pair has the same limbs, so without
+        // the width they would compare equal, and the interning bimap needs one value per width,
+        // not per limb count.
         for &(narrow, wide) in &[(63usize, 64usize), (16383, 16384), (1, 64), (65, 128)] {
             let a = IntBits::from_u128(narrow, 1);
             let b = IntBits::from_u128(wide, 1);
@@ -1176,9 +1126,8 @@ mod tests {
 
     #[test]
     fn a_negative_reads_back_as_the_pattern_it_is() {
-        // A pattern has no sign, so reading one out gives the unsigned reading of the bits and
-        // nothing else: `-1i8` went in, `255u8` comes back. Recovering `-1` means naming the
-        // reading, which is `to_signed`'s job and not a conversion's.
+        // A pattern has no sign, so reading one out gives the unsigned reading: `-1i8` goes in,
+        // `255u8` comes back. Recovering `-1` means naming the reading, which is `to_signed`'s job.
         let minus_one = IntBits::from(-1i8);
         assert_eq!(u8::try_from(&minus_one), Ok(255));
         assert_eq!(u32::try_from(&minus_one), Ok(255));
@@ -1187,19 +1136,18 @@ mod tests {
 
     #[test]
     fn a_value_that_will_not_fit_the_target_is_refused() {
-        // Too wide for the target, though it fits a `u128` perfectly well.
+        // Too wide for the target, though it fits a `u128`.
         let big = IntBits::from(300u16);
         assert_eq!(u8::try_from(&big), Err(DoesNotFit { bits: 16 }));
         assert_eq!(u16::try_from(&big), Ok(300));
 
-        // A negative value has no unsigned reading at all.
+        // A negative value has no unsigned reading.
         assert_eq!(
             u8::try_from(&IntBits::from(-1i16)),
             Err(DoesNotFit { bits: 16 })
         );
 
-        // And the width the error carries is the pattern's, which is the thing the call site
-        // cannot see for itself.
+        // The error carries the pattern's width, which the call site cannot see.
         assert_eq!(
             u64::try_from(&IntBits::from_limbs(256, &[0, 0, 0, 1])),
             Err(DoesNotFit { bits: 256 })
@@ -1208,8 +1156,8 @@ mod tests {
 
     #[test]
     fn the_error_names_the_width_that_would_not_convert() {
-        // The width is the whole content of the message: the call site already knows which host
-        // type it asked for, and cannot see what it asked of.
+        // The width is the whole message: the call site knows which host type it asked for, but
+        // not the width of the pattern it asked.
         let err = u8::try_from(&IntBits::from(300u16)).expect_err("300 does not fit a u8");
         assert_eq!(
             err.to_string(),
@@ -1226,9 +1174,8 @@ mod tests {
 
     #[test]
     fn a_signed_host_constructor_stores_the_twos_complement_pattern() {
-        // `-1` is every bit set, at the width the name gives and no wider. What this actually
-        // catches is a lost sign or a wrong width -- _not_ an over-wide sign extension, which
-        // `from_u128` masks away, so `value as i128 as u128` here would be equally correct.
+        // `-1` is every bit set, at the type's width and no wider. This catches a lost sign or a
+        // wrong width, not an over-wide sign extension, which `from_u128` masks away.
         assert_eq!(IntBits::from(-1i8), IntBits::from(u8::MAX));
         assert_eq!(IntBits::from(-1i16), IntBits::from(u16::MAX));
         assert_eq!(IntBits::from(-1i32), IntBits::from(u32::MAX));
@@ -1240,7 +1187,7 @@ mod tests {
         assert_eq!(IntBits::from(i32::MIN), IntBits::from(1u32 << 31));
         assert_eq!(IntBits::from(i64::MIN), IntBits::from(1u64 << 63));
 
-        // Spelled out as limbs too, so the assertion does not rest on `From<u8>` being right.
+        // As limbs too, so the assertion does not rest on `From<u8>`.
         assert_eq!(IntBits::from(-1i8).limbs(), &[0xFF]);
         assert_eq!(IntBits::from(-2i8).limbs(), &[0xFE]);
     }
@@ -1254,7 +1201,7 @@ mod tests {
     #[test]
     fn no_bit_at_or_above_the_width_survives_construction() {
         for &bits in WIDTHS {
-            // All-ones in every limb the width reserves, which is the worst case for the mask.
+            // All ones in every limb the width reserves: the worst case for the mask.
             let saturated = vec![u64::MAX; bits.div_ceil(64)];
             let v = IntBits::from_limbs(bits, &saturated);
 
@@ -1262,9 +1209,8 @@ mod tests {
                 assert_eq!(v.bit(i), Some(true), "bit {i} of {bits} was cleared");
             }
 
-            // Checked against the limbs directly, NOT through `bit`. `bit` answers `None` at or
-            // above the width whatever the limbs hold, so asking it here would prove nothing --
-            // the top limb could be entirely dirty and this test would still pass.
+            // Checked against the limbs directly, NOT through `bit`, which answers `None` at or
+            // above the width whatever the limbs hold, and so would pass on a dirty top limb.
             let top = v.limbs().last().expect("a width has at least one limb");
             assert_eq!(
                 top & !top_limb_mask(bits),
@@ -1272,7 +1218,7 @@ mod tests {
                 "the top limb of {bits} kept bits above the width"
             );
 
-            // And `bit` does refuse to read there, which is the separate claim.
+            // Separately, `bit` refuses to read there.
             for i in bits..bits.div_ceil(64) * 64 {
                 assert_eq!(v.bit(i), None, "bit {i} is outside a {bits}-bit pattern");
             }
@@ -1281,10 +1227,9 @@ mod tests {
 
     #[test]
     fn dirt_above_the_width_does_not_change_the_value() {
-        // The canonicity property, stated the way it actually gets violated: a caller hands over a
-        // word that some earlier step left dirty above the declared width, and the result must be
-        // indistinguishable from the clean one. Anything less splits one value into two
-        // `ValueId`s at the interning bimap.
+        // Canonicity, as it gets violated: a caller passes a word left dirty above the width, and
+        // the result must be indistinguishable from the clean one. Otherwise the interning bimap
+        // splits one value into two `ValueId`s.
         for &bits in &[1usize, 3, 8, 63, 64, 65, 127, 128] {
             let clean = IntBits::from_u128(bits, 1);
             let dirty = IntBits::from_u128(bits, 1 | !mask_u128(bits));
@@ -1292,7 +1237,7 @@ mod tests {
             assert_eq!(hash_of(&clean), hash_of(&dirty), "at {bits} bits");
         }
 
-        // And through the wide door too, where `from_u128` cannot reach.
+        // Also through `from_limbs`, at widths `from_u128` cannot reach.
         for &bits in &[129usize, 1000, 16383] {
             let mut dirty = vec![0u64; bits.div_ceil(64)];
             dirty[0] = 1;
@@ -1310,8 +1255,8 @@ mod tests {
 
     #[test]
     fn a_full_top_limb_is_not_masked_away() {
-        // `bits % 64 == 0` is the case a naive `(1 << (bits % 64)) - 1` turns into a zero mask,
-        // which would silently delete the entire top limb of every whole-limb width.
+        // At `bits % 64 == 0`, a naive `(1 << (bits % 64)) - 1` is a zero mask, which would
+        // silently clear the top limb of every whole-limb width.
         for &bits in &[64usize, 128, 192, 16384] {
             let saturated = vec![u64::MAX; bits / 64];
             let v = IntBits::from_limbs(bits, &saturated);
@@ -1325,24 +1270,23 @@ mod tests {
 
     #[test]
     fn a_limb_slice_is_zero_extended_and_truncated_to_the_width() {
-        // Short: the missing limbs read as zero rather than as garbage.
+        // Short: the missing limbs read as zero.
         let wide = IntBits::from_limbs(256, &[7]);
         assert_eq!(wide.limbs(), &[7, 0, 0, 0]);
 
-        // Long: the limbs past the width go, on the same terms as bits past the width within a
-        // limb. Truncating rather than rejecting is what keeps this consistent with `from_u128`.
+        // Long: limbs past the width are dropped, like bits past the width within a limb.
+        // Truncating rather than rejecting matches `from_u128`.
         let narrow = IntBits::from_limbs(64, &[7, u64::MAX, u64::MAX]);
         assert_eq!(narrow.limbs(), &[7]);
     }
 
     #[test]
     fn the_field_read_is_the_packed_one_at_the_host_limb_width() {
-        // `from_field_limbs` takes the shortcut `from_packed_limbs` cannot: at the host limb width
-        // the packed limbs already are the pattern's own words. The two must answer alike, so we
-        // pin it here.
+        // `from_field_limbs` skips `from_packed_limbs`, since at the host limb width the packed
+        // limbs are the pattern's words. This checks the two agree.
         //
-        // The slice lengths straddle the width on purpose -- shorter, exact and longer -- because
-        // that is where the two spellings' truncation and zero-extension could part company.
+        // The slice lengths are shorter than, equal to and longer than the width, where the two
+        // routes' truncation and zero-extension could differ.
         for &bits in &[1usize, 8, 63, 64, 65, 96, 127, 128] {
             for limbs in [
                 &[][..],
@@ -1378,14 +1322,14 @@ mod tests {
 
     #[test]
     fn a_value_too_wide_for_a_host_word_declines_rather_than_truncating() {
-        // The whole reason the conversion is fallible: a caller wanting a host word out of a
-        // pattern has to decide what a wider one means, and refusing is what makes it decide.
+        // Why the conversion is fallible: a caller taking a host word out of a wider pattern must
+        // decide what that means, and the refusal forces the decision.
         let mut limbs = vec![0u64; 4];
         limbs[3] = 1;
         assert!(u128::try_from(&IntBits::from_limbs(256, &limbs)).is_err());
 
-        // A wide _width_ with a narrow _value_ still fits, because the question is about the
-        // value and not about how much room it was given.
+        // A wide _width_ with a narrow _value_ still fits: what matters is the value, not the
+        // width.
         assert_eq!(u128::try_from(&IntBits::from_u128(16384, 5)), Ok(5));
         assert_eq!(u128::try_from(&IntBits::zero(16384)), Ok(0));
     }
@@ -1418,27 +1362,24 @@ mod tests {
             assert!(all_ones.is_all_ones(), "all ones at {bits}");
             assert!(!zero.is_all_ones(), "zero is not saturated at {bits}");
 
-            // At one bit these three patterns are two, not three, and the predicates have to say
-            // so rather than each claiming its own value.
+            // At one bit, one and all ones are the same pattern, and the predicates must agree.
             assert_eq!(one.is_all_ones(), bits == 1, "one vs all ones at {bits}");
             assert_eq!(all_ones.is_one(), bits == 1, "all ones vs one at {bits}");
         }
 
-        // Saturation is per-width, so the same limbs are all-ones at one width and not at another.
+        // All-ones is per width: the same limbs are all ones at one width and not at another.
         assert!(IntBits::from_limbs(64, &[u64::MAX]).is_all_ones());
         assert!(!IntBits::from_limbs(128, &[u64::MAX, 0]).is_all_ones());
         // And it must read every limb, not just the top one.
         assert!(!IntBits::from_limbs(128, &[0, u64::MAX]).is_all_ones());
-        // Likewise `is_one` has to look past the limb the one is in, or any value whose low limb
-        // happens to be 1 answers yes.
+        // Likewise `is_one` must look past the low limb, or any value whose low limb is 1 passes.
         assert!(!IntBits::from_limbs(128, &[1, 1]).is_one());
     }
 
     #[test]
     fn an_index_too_wide_for_the_machine_is_refused_rather_than_truncated() {
-        // The whole point of the `usize` conversion: a pattern carrying a value above the host's
-        // address width must not come back as some unrelated small number that passes a bounds
-        // check it should have failed.
+        // The point of the `usize` conversion: a value above the host's address width must not
+        // come back as an unrelated small number that passes a bounds check it should fail.
         let huge = IntBits::from_u128(128, (u64::MAX as u128) + 1);
         assert_eq!(usize::try_from(&huge), Err(DoesNotFit { bits: 128 }));
 
@@ -1448,14 +1389,14 @@ mod tests {
 
     #[test]
     fn distinct_values_at_one_width_stay_distinct() {
-        // The other half of canonicity: masking must not collapse values that differ below the
-        // width. A mask applied at the wrong width would show up here and nowhere else.
+        // The other half of canonicity: masking must not merge values that differ below the
+        // width. Only this catches a mask applied at the wrong width.
         for &bits in &[3usize, 8, 64, 65, 128] {
             let m = mask_u128(bits);
             let values = [0u128, 1, 2, 3, m, m - 1, m ^ 1];
 
-            // A `Vec` and a linear scan rather than a set: `IntBits` has no `Ord` for a `BTreeSet`
-            // and a `HashSet` is disallowed workspace-wide for its iteration order. Seven values.
+            // A `Vec`: `IntBits` has no `Ord` for a `BTreeSet`, and `HashSet` is disallowed
+            // workspace-wide for its iteration order.
             let mut seen: Vec<IntBits> = Vec::new();
             for value in values {
                 let v = IntBits::from_u128(bits, value);
@@ -1470,8 +1411,8 @@ mod tests {
     }
 
     proptest! {
-        /// Canonicity over the whole space rather than the corners: one value at one width has
-        /// exactly one spelling, however it is reached.
+        /// Canonicity over the whole space, not just the corners: one value at one width has
+        /// exactly one representation, however it is reached.
         #[test]
         fn one_value_at_one_width_has_one_spelling(
             width_index in 0..WIDTHS.len(),
@@ -1481,7 +1422,7 @@ mod tests {
             let bits = WIDTHS[width_index];
             let direct = IntBits::from_u128(bits, value);
 
-            // Reached again through the limb door, carrying arbitrary dirt above the width.
+            // Reached again through `from_limbs`, with arbitrary dirt above the width.
             let mut limbs = direct.limbs().to_vec();
             let top = limbs.len() - 1;
             limbs[top] |= (dirt as u64) & !top_limb_mask(bits);
@@ -1491,7 +1432,7 @@ mod tests {
             prop_assert_eq!(hash_of(&direct), hash_of(&indirect));
         }
 
-        /// Construction is idempotent: feeding a pattern's own limbs back in changes nothing.
+        /// Construction is idempotent: feeding a pattern's limbs back in changes nothing.
         #[test]
         fn rebuilding_from_its_own_limbs_is_the_identity(
             width_index in 0..WIDTHS.len(),
@@ -1523,11 +1464,11 @@ mod tests {
     // PATTERN OPERATIONS
     // --------------------------------------------------------------------------------------
 
-    /// Widths that straddle every limb boundary a 128-bit cap can reach: a sub-limb width, the two
-    /// either side of the first boundary, an odd one, and the two either side of the second.
+    /// Widths around every limb boundary up to 128 bits: a sub-limb width, both sides of the first
+    /// boundary, an odd one, and both sides of the second.
     const CORNERS: [usize; 8] = [1, 5, 63, 64, 65, 96, 127, 128];
 
-    /// The `u128` a pattern denotes, for holding the limb code to host semantics.
+    /// The `u128` a pattern denotes, to check the limb code against host semantics.
     fn as_u128(v: &IntBits) -> u128 {
         u128::try_from(v).expect("the corner widths all fit a u128")
     }
@@ -1546,8 +1487,8 @@ mod tests {
 
     #[test]
     fn the_bitwise_operations_are_limbwise_across_a_boundary() {
-        // Values chosen so that both limbs differ and the top limb is partial at the odd widths,
-        // which is where a mask applied to the wrong limb would show.
+        // Both limbs differ, and the top limb is partial at the odd widths, so a mask applied to
+        // the wrong limb shows.
         for bits in CORNERS {
             let a = IntBits::from_u128(bits, 0x0F0F_0F0F_0F0F_0F0F_FFFF_0000_FFFF_0000);
             let b = IntBits::from_u128(bits, 0x00FF_00FF_00FF_00FF_0F0F_0F0F_0F0F_0F0F);
@@ -1575,16 +1516,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot sign-extend 32 to 8")]
     fn sign_extension_refuses_to_narrow() {
-        // The gate is a full `assert!` rather than a `debug_assert!` because a release build that
-        // skipped it would not merely truncate: the fill is taken from the source's sign bit, so a
-        // narrowing would answer a value that is neither the source nor its low bits.
+        // A full `assert!`: in release a narrowing would fill from the source's sign bit and give
+        // neither the source nor its low bits.
         let _ = IntBits::from(-1i32).sign_extend(8);
     }
 
     #[test]
     fn a_signed_reading_is_total_above_every_lowering() {
-        // A signed reading is total: this model caps nothing, so the support frontier is enforced
-        // in one place only, the compiler's own funnel.
+        // A signed reading is total: the model caps no width.
         assert_eq!(
             IntBits::from_u128(128, 1).to_signed(),
             SignedValue::from(1u8)
@@ -1595,8 +1534,8 @@ mod tests {
             "the top bit is the sign at 128 bits, not a large magnitude"
         );
 
-        // Past any host type, where only the `BigInt` reading can answer: `2^999` set alone is
-        // `INT_MIN` at 1000 bits.
+        // Past any host type, where only the `BigInt` reading answers: bit 999 alone is `INT_MIN`
+        // at 1000 bits.
         let min = IntBits::from_signed(1000, &IntBits::signed_min(1000));
         assert_eq!(min.to_signed(), IntBits::signed_min(1000));
         assert!(min.to_signed() < SignedValue::from(0u8));
@@ -1605,25 +1544,23 @@ mod tests {
     #[test]
     #[should_panic(expected = "at least a sign bit")]
     fn the_signed_bounds_refuse_a_zero_width() {
-        // `bits - 1` wraps in a release build, so this gate is the difference between a panic and
-        // asking for a two-power of `usize::MAX`.
+        // `bits - 1` wraps in a release build, so without this gate it would ask for
+        // `2^usize::MAX` instead of panicking.
         let _ = IntBits::signed_max(0);
     }
 
     #[test]
     #[should_panic(expected = "a width of at least one bit")]
     fn a_shift_amount_refuses_to_reduce_against_no_width() {
-        // The last width-taking method to answer instead of refusing. The VM's counterpart is total
-        // there because its width comes off a frame cell; this one's comes off the operand `eval`
-        // was handed, so a zero is a caller that skipped the model's own width check.
+        // The VM's version is total here because its width comes from a frame cell. This width
+        // comes from an operand `eval` checked, so a zero means a caller skipped that check.
         let _ = IntBits::from(1u8).reduced_shift_amount(0);
     }
 
     #[test]
     fn a_shift_amount_reduces_by_the_width_it_is_given() {
-        // The neighboring claim, so the refusal above is not the only thing pinning this method: an
-        // in-range amount survives and an out-of-range one wraps by a modulo rather than a mask. At
-        // seven bits a mask by `bits - 1 == 6` would answer `0` for both of the first two.
+        // An in-range amount survives, and an out-of-range one is reduced modulo the width, not
+        // masked: at seven bits a mask by 6 would give `0` for both of the first two.
         assert_eq!(IntBits::from(1u8).reduced_shift_amount(7), 1);
         assert_eq!(IntBits::from(8u8).reduced_shift_amount(7), 1);
         assert_eq!(IntBits::from(9u8).reduced_shift_amount(8), 1);
@@ -1633,16 +1570,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "two patterns of one width")]
     fn a_bitwise_operation_refuses_two_widths() {
-        // 32 and 64 share a limb, so nothing about the storage stops this: it is refused because
-        // the bit positions of two widths do not correspond, not because the limbs disagree.
+        // 32 and 64 share a limb, but their bit positions do not correspond, so this is refused.
         let _ = IntBits::from(1u32).and(&IntBits::from(1u64));
     }
 
     #[test]
     #[should_panic(expected = "at least one bit wide")]
     fn a_cast_to_no_width_is_refused() {
-        // The width-taking operations inherit the constructors' lower bound rather than answering
-        // an empty pattern.
+        // Operations that take a width share the constructors' lower bound rather than returning an
+        // empty pattern.
         let _ = IntBits::from(1u8).cast(0);
     }
 
@@ -1654,9 +1590,8 @@ mod tests {
 
     #[test]
     fn a_cast_to_the_width_already_held_is_the_identity() {
-        // The fast path, and the property it has to preserve: `bit_range(..).cast(self.bits())` is
-        // how both constant folders spell the `BitRange` transfer, so the common case must answer
-        // exactly what the general one does.
+        // The fast path must agree with the general one. It is the common case: both constant
+        // folders spell `BitRange` as `bit_range(..).cast(self.bits())`.
         for bits in CORNERS {
             for value in [0u128, 1, 0x5A5A_5A5A, u128::MAX] {
                 let v = IntBits::from_u128(bits, value);
@@ -1692,8 +1627,8 @@ mod tests {
 
     #[test]
     fn a_shift_by_a_whole_limb_keeps_every_bit_it_should() {
-        // The case the guarded carry exists for: `limb << 64` is undefined rather than zero, so a
-        // shift that is an exact multiple of the limb width must take the other path.
+        // The case the guarded carry exists for: `limb << 64` overflows rather than giving zero,
+        // so a shift by an exact multiple of the limb width must take the other path.
         let v = IntBits::from_u128(128, u128::MAX);
         assert_eq!(as_u128(&v.shifted_left(64)), u128::MAX << 64);
         assert_eq!(as_u128(&v.shifted_right(64)), u128::MAX >> 64);
@@ -1702,8 +1637,8 @@ mod tests {
     // SPREAD AND UNSPREAD
     // --------------------------------------------------------------------------------------
 
-    /// The mask ladder the backends run, as an oracle for the bit-by-bit definition at the widths a
-    /// host word holds.
+    /// The mask ladder the backends run: an oracle for the bit-by-bit definition at host-word
+    /// widths.
     fn ladder_spread(v: u64) -> u128 {
         let mut x = u128::from(v);
         x = (x | (x << 32)) & 0x0000_0000_FFFF_FFFF_0000_0000_FFFF_FFFF;
@@ -1734,7 +1669,7 @@ mod tests {
         assert_eq!(dirty.spread(4), clean.spread(4));
         assert_eq!(dirty.spread(4), IntBits::from_u128(16, 0x55));
 
-        // The unspread reads its own low bits the same way: a spread `0x0F` and two dirty bits.
+        // The unspread discards bits above its read too: a spread `0x0F` plus two dirty bits.
         let spread_dirty = IntBits::from_u128(16, 0xC055);
         assert_eq!(
             spread_dirty.unspread(8),
@@ -1744,12 +1679,12 @@ mod tests {
 
     #[test]
     fn an_odd_width_unspreads_into_a_wider_even_stream() {
-        // Seven bits, the even ones set: four of them, and three odd ones that are clear.
+        // Seven bits with the four even ones set and the three odd ones clear.
         let (odd, even) = IntBits::from_u128(7, 0b101_0101).unspread(7);
         assert_eq!(odd, IntBits::zero(3));
         assert_eq!(even, IntBits::from_u128(4, 0b1111));
 
-        // And the odd ones set, which fill the narrower stream exactly.
+        // The odd ones set, which fill the narrower stream exactly.
         let (odd, even) = IntBits::from_u128(7, 0b010_1010).unspread(7);
         assert_eq!(odd, IntBits::from_u128(3, 0b111));
         assert_eq!(even, IntBits::zero(4));
@@ -1799,8 +1734,8 @@ mod tests {
             prop_assert_eq!(got, IntBits::from_u128(2 * width, ladder_spread(read)));
         }
 
-        /// Two spreads, one moved onto the odd positions, come back apart at every width, which is
-        /// the identity a bitwise lowering stands on.
+        /// Two spreads, one moved onto the odd positions, separate again at every width: the
+        /// identity a bitwise lowering relies on.
         #[test]
         fn an_unspread_separates_two_interleaved_spreads(
             width_index in 0..WIDTHS.len(),
@@ -1814,8 +1749,7 @@ mod tests {
             prop_assert_eq!(woven.unspread(2 * bits), (odd, even));
         }
 
-        /// The streams put back together give the value they came from, at an odd width as at an
-        /// even one.
+        /// The streams put back together give the original value, at odd and even widths.
         #[test]
         fn an_unspread_at_any_width_loses_nothing(
             width_index in 0..WIDTHS.len(),
@@ -1829,8 +1763,8 @@ mod tests {
             prop_assert_eq!(odd.bits(), bits / 2);
             prop_assert_eq!(even.bits(), bits.div_ceil(2));
 
-            // Back at the original width: the even stream's spread already sits on the even
-            // positions, and the odd stream's moves one place up onto the odd ones.
+            // At the original width, the even stream's spread sits on the even positions, and the
+            // odd stream's moves one place up onto the odd ones.
             let rebuilt = odd
                 .spread(odd.bits())
                 .cast(2 * bits)
@@ -1862,8 +1796,8 @@ mod tests {
 
     #[test]
     fn a_bignum_too_wide_for_the_pattern_is_truncated() {
-        // The same discipline as `from_limbs`: a constructor that takes a width discards above it
-        // rather than complaining, which is what makes it the wrapping a total evaluator owes.
+        // As with `from_limbs`, a constructor that takes a width discards bits above it rather
+        // than refusing, which makes it the wrapping a total evaluator needs.
         let wide = BigUint::from(u128::MAX);
         assert_eq!(IntBits::from_biguint(8, &wide), IntBits::from(0xFFu8));
         assert_eq!(IntBits::from_biguint(64, &wide), IntBits::from(u64::MAX));

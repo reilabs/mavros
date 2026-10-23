@@ -3,9 +3,69 @@ use quote::ToTokens;
 use quote::format_ident;
 use quote::quote;
 use stringcase::Caser;
-use syn::{FnArg, Ident, Pat, parse_macro_input};
+use syn::{FnArg, Ident, Pat, Token, parse_macro_input, punctuated::Punctuated};
 
-#[derive(Debug)]
+/// A field that the interpreter generates a set of opcodes for: an entry
+/// `name = Type` of `#[interpreter(fields(...))]`, optionally preceded by
+/// `#[cfg(...)]`
+///
+/// `name` is the prefix of the field's opcode names (`bn254` gives
+/// `bn254_add_field` and `Bn254AddField`), and its PascalCase form is the
+/// field's `FieldId` variant. A `cfg`-gated field is a test instance: it has no
+/// `FieldId` variant, so `FieldOpCode::for_field` cannot select it, and it must
+/// be the last field so that its gating moves no other opcode's number.
+struct FieldInstance {
+    name: Ident,
+    ty: syn::Type,
+    cfg: Option<proc_macro2::TokenStream>,
+}
+
+impl syn::parse::Parse for FieldInstance {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let attrs = input.call(syn::Attribute::parse_outer)?;
+        let cfg = match attrs.as_slice() {
+            [] => None,
+            [attr] if attr.path().is_ident("cfg") => Some(attr.meta.require_list()?.tokens.clone()),
+            _ => {
+                return Err(input.error("a field entry takes at most one attribute, `#[cfg(..)]`"));
+            }
+        };
+        let name: Ident = input.parse()?;
+        input.parse::<Token![=]>()?;
+        let ty: syn::Type = input.parse()?;
+        Ok(FieldInstance { name, ty, cfg })
+    }
+}
+
+/// The `#[interpreter(fields(..))]` argument.
+struct InterpreterArgs {
+    fields: Vec<FieldInstance>,
+}
+
+impl syn::parse::Parse for InterpreterArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let key: Ident = input.parse()?;
+        if key != "fields" {
+            return Err(syn::Error::new(key.span(), "expected `fields(..)`"));
+        }
+        let content;
+        syn::parenthesized!(content in input);
+        let fields = Punctuated::<FieldInstance, Token![,]>::parse_terminated(&content)?;
+        Ok(InterpreterArgs {
+            fields: fields.into_iter().collect(),
+        })
+    }
+}
+
+/// `#[cfg(..)]` for an item that exists only under `cfg`, or nothing.
+fn cfg_attr(cfg: &Option<proc_macro2::TokenStream>) -> proc_macro2::TokenStream {
+    match cfg {
+        Some(cfg) => quote! { #[cfg(#cfg)] },
+        None => quote! {},
+    }
+}
+
+#[derive(Clone, Debug)]
 enum GuestType {
     Field,
     U64,
@@ -16,9 +76,9 @@ enum GuestType {
 
 impl GuestType {
     /// How many frame cells a value of this type covers.
-    fn to_cells_tokens(&self) -> proc_macro2::TokenStream {
+    fn to_cells_tokens(&self, field_ty: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         match self {
-            GuestType::Field => quote! { Frame::cells_of::<Field>() },
+            GuestType::Field => quote! { Frame::cells_of::<#field_ty>() },
             GuestType::Int128 => quote! { Frame::cells_of::<Int128>() },
             GuestType::BoxedValue => quote! { Frame::cells_of::<BoxedValue>() },
             GuestType::U64 => quote! { Frame::cells_of::<u64>() },
@@ -29,7 +89,7 @@ impl GuestType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum HostType {
     U64,
     USize,
@@ -43,19 +103,22 @@ enum HostType {
 }
 
 impl HostType {
-    fn to_def_tokens(&self) -> proc_macro2::TokenStream {
+    fn to_def_tokens(&self, field_ty: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         match self {
             HostType::U64 => quote! { u64 },
             HostType::USize => quote! { usize },
             HostType::ISize => quote! { isize },
             HostType::JumpTarget => quote! { JumpTarget },
-            HostType::Field => quote! { Field },
+            HostType::Field => quote! { #field_ty },
             HostType::Slice(ty) => {
-                let child = ty.to_def_tokens();
+                let child = ty.to_def_tokens(field_ty);
                 quote! { Vec<#child> }
             }
             HostType::Tuple(ty) => {
-                let children = ty.iter().map(|ty| ty.to_def_tokens()).collect::<Vec<_>>();
+                let children = ty
+                    .iter()
+                    .map(|ty| ty.to_def_tokens(field_ty))
+                    .collect::<Vec<_>>();
                 quote! { ( #(#children),* ) }
             }
             HostType::FramePosition => quote! { FramePosition },
@@ -67,6 +130,7 @@ impl HostType {
         &self,
         offset: proc_macro2::Ident,
         pc: proc_macro2::Ident,
+        field_ty: &proc_macro2::TokenStream,
     ) -> proc_macro2::TokenStream {
         match self {
             HostType::JumpTarget => {
@@ -124,7 +188,7 @@ impl HostType {
                 }
             }
             HostType::Slice(ty) => {
-                let size = ty.measure_size() as isize;
+                let size = ty.measure_size(field_ty);
                 quote! {
                     unsafe {
                         let len = *#pc.offset(#offset) as usize;
@@ -133,21 +197,22 @@ impl HostType {
                             #pc.offset(#offset) as *const _,
                             len
                         );
-                        #offset += len as isize * #size;
+                        #offset += len as isize * (#size) as isize;
                         r
                     }
                 }
             }
-            // FIELD-ASSUMPTION: L3-opcode-width
+            // A field immediate is encoded as its storage cells, the form frames hold, so the VM
+            // never converts one.
             HostType::Field => {
                 quote! {
                     unsafe {
-                        let r0 = *#pc.offset(#offset);
-                        let r1 = *#pc.offset(#offset + 1);
-                        let r2 = *#pc.offset(#offset + 2);
-                        let r3 = *#pc.offset(#offset + 3);
-                        #offset += 4;
-                        ark_ff::Fp(ark_ff::BigInt([r0, r1, r2, r3]), std::marker::PhantomData)
+                        let cells = std::slice::from_raw_parts(
+                            #pc.offset(#offset),
+                            <#field_ty as ::mavros_artifacts::MavrosField>::STORAGE_CELLS,
+                        );
+                        #offset += cells.len() as isize;
+                        <#field_ty as ::mavros_artifacts::MavrosField>::from_frame_cells(cells)
                     }
                 }
             }
@@ -157,18 +222,39 @@ impl HostType {
         }
     }
 
-    fn measure_size(&self) -> usize {
+    /// The number of instruction words a value of this type is encoded as, as a `usize` expression:
+    /// a field's width is its `STORAGE_CELLS`, which only the compiled crate can evaluate.
+    fn measure_size(&self, field_ty: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         match self {
             HostType::U64
             | HostType::USize
             | HostType::ISize
             | HostType::JumpTarget
             | HostType::FramePosition
-            | HostType::BoxedLayout => 1,
-            // FIELD-ASSUMPTION: L3-opcode-width
-            HostType::Field => 4, // TODO parameterize
+            | HostType::BoxedLayout => quote! { 1usize },
+            HostType::Field => {
+                quote! { <#field_ty as ::mavros_artifacts::MavrosField>::STORAGE_CELLS }
+            }
             HostType::Slice(_) => panic!("slice size is not known at compile time"),
-            HostType::Tuple(ty) => ty.iter().map(|ty| ty.measure_size()).sum(),
+            HostType::Tuple(ty) => {
+                let sizes = ty.iter().map(|ty| ty.measure_size(field_ty));
+                quote! { (0usize #(+ #sizes)*) }
+            }
+        }
+    }
+
+    /// Whether a value of this type holds a field element anywhere.
+    fn contains_field(&self) -> bool {
+        match self {
+            HostType::Field => true,
+            HostType::Slice(ty) => ty.contains_field(),
+            HostType::Tuple(tys) => tys.iter().any(HostType::contains_field),
+            HostType::U64
+            | HostType::USize
+            | HostType::ISize
+            | HostType::JumpTarget
+            | HostType::FramePosition
+            | HostType::BoxedLayout => false,
         }
     }
 
@@ -179,6 +265,7 @@ impl HostType {
         binary: &proc_macro2::Ident,
         jumps_to_fix: &proc_macro2::Ident,
         is_ref: bool,
+        field_ty: &proc_macro2::TokenStream,
     ) -> proc_macro2::TokenStream {
         match self {
             HostType::JumpTarget => {
@@ -222,20 +309,32 @@ impl HostType {
                     #offset -= 1;
                 }
             }
-            // FIELD-ASSUMPTION: L3-opcode-width
             HostType::Field => {
+                let i = if is_ref {
+                    quote! { *#i }
+                } else {
+                    quote! { #i }
+                };
                 quote! {
-                    #binary.push(#i.0.0[0] as u64);
-                    #binary.push(#i.0.0[1] as u64);
-                    #binary.push(#i.0.0[2] as u64);
-                    #binary.push(#i.0.0[3] as u64);
-                    #offset -= 1;
+                    {
+                        let mut cells =
+                            [0u64; <#field_ty as ::mavros_artifacts::MavrosField>::STORAGE_CELLS];
+                        ::mavros_artifacts::MavrosField::to_frame_cells(#i, &mut cells);
+                        #binary.extend_from_slice(&cells);
+                        #offset -= cells.len() as isize;
+                    }
                 }
             }
             HostType::Slice(intp) => {
                 let ixed = quote! { elem };
-                let child_serializer =
-                    intp.make_serializer(ixed.clone(), offset, binary, jumps_to_fix, true);
+                let child_serializer = intp.make_serializer(
+                    ixed.clone(),
+                    offset,
+                    binary,
+                    jumps_to_fix,
+                    true,
+                    field_ty,
+                );
                 quote! {
                     #binary.push(#i.len() as u64);
                     #offset -= 1;
@@ -249,7 +348,14 @@ impl HostType {
                 for (ix, intp) in intps.iter().enumerate() {
                     let ix = syn::Index::from(ix);
                     let ixed = quote! { #i.#ix };
-                    result.extend(intp.make_serializer(ixed, offset, binary, jumps_to_fix, false));
+                    result.extend(intp.make_serializer(
+                        ixed,
+                        offset,
+                        binary,
+                        jumps_to_fix,
+                        false,
+                        field_ty,
+                    ));
                 }
                 result
             }
@@ -260,6 +366,7 @@ impl HostType {
         &self,
         binary: &proc_macro2::Ident,
         ix: &proc_macro2::Ident,
+        field_ty: &proc_macro2::TokenStream,
     ) -> proc_macro2::TokenStream {
         match self {
             HostType::U64
@@ -273,17 +380,18 @@ impl HostType {
                 }
             }
             HostType::Field => {
+                let size = self.measure_size(field_ty);
                 quote! {
-                    #ix += 4;
+                    #ix += #size;
                 }
             }
             HostType::Slice(child) => {
-                let child_size = child.measure_size();
+                let child_size = child.measure_size(field_ty);
                 quote! {
                     {
                         let len = #binary[#ix] as usize;
                         #ix += 1;
-                        #ix += len * #child_size;
+                        #ix += len * (#child_size);
                     };
                 }
             }
@@ -294,13 +402,10 @@ impl HostType {
     }
 }
 
-/// A run of consecutive frame cells, addressed by one encoded [`FramePosition`], with its length
-/// taken from an integer width the same opcode carries.
-///
-/// This is used to implement wide integer operands: the frame layouter gives an `int(N)` value a
-/// set of contiguous cells, so the position alone cannot say how many to read. We thus take the
-/// width from the immediate.
-#[derive(Debug)]
+/// A run of consecutive frame cells at one encoded `FramePosition`, whose length comes from an
+/// integer width the same opcode carries. A wide integer's cells are contiguous, so the position
+/// alone cannot say how many to read.
+#[derive(Clone, Debug)]
 struct SliceInput {
     /// The name of the host parameter holding the operand width in bits.
     ///
@@ -312,7 +417,7 @@ struct SliceInput {
     mutable: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum StructInputType {
     Frame(GuestType),
     Out(GuestType),
@@ -320,7 +425,7 @@ enum StructInputType {
     Host(HostType),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct StructInput {
     name: String,
     val: StructInputType,
@@ -363,18 +468,37 @@ impl StructInput {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Input {
     Struct(StructInput),
     Frame,
     VM,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct OpCodeDef {
+    /// The opcode's name: its mnemonic, and in PascalCase its `OpCode` variant.
     name: String,
+
+    /// The function the handler calls: `name`, or for one field's copy of a field opcode, the
+    /// generic function every field shares.
+    fn_name: String,
+
     is_raw: bool,
     inputs: Vec<Input>,
+
+    /// The type a `Field` operand has: `Field` for a plain opcode, the field's type for a copy.
+    field_ty: proc_macro2::TokenStream,
+
+    /// Whether `fn_name` is generic over the field, so the handler names `field_ty` explicitly.
+    generic: bool,
+
+    /// `Some` for a field opcode: on a copy, its field's index into `InterpreterArgs::fields`; on
+    /// the declared template, `Some(0)`, marking it as one.
+    field: Option<usize>,
+
+    /// The `cfg` predicate the copy exists under, for a `cfg`-gated field's copies.
+    cfg: Option<proc_macro2::TokenStream>,
 }
 
 impl OpCodeDef {
@@ -401,8 +525,17 @@ impl OpCodeDef {
     }
 }
 
+/// Generates the dispatch machinery for the opcodes declared in the annotated module.
+///
+/// An opcode's number is its index in the generated list: the declared opcodes in declaration
+/// order, then, for each field after the first in `fields(..)`, that field's copies of every
+/// `#[field_opcode]` in declaration order. A `#[field_opcode]` function is generic over one type
+/// parameter, the field, and the first field's copy takes the function's position, so declaring a
+/// further field shouldn't cause any opcode to move.
 #[proc_macro_attribute]
-pub fn interpreter(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn interpreter(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as InterpreterArgs);
+    check_fields(&args.fields);
     let i = item.clone();
     let input = parse_macro_input!(i as syn::ItemMod);
 
@@ -424,6 +557,7 @@ pub fn interpreter(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let old_attrs = func.attrs;
                 let mut controls_inline = false;
                 let mut is_raw = false;
+                let mut is_field = false;
                 func.attrs = vec![];
                 for attr in old_attrs {
                     if attr.path().is_ident("opcode") {
@@ -433,13 +567,17 @@ pub fn interpreter(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         is_raw = true;
                         continue;
                     }
+                    if attr.path().is_ident("field_opcode") {
+                        is_field = true;
+                        continue;
+                    }
                     if attr.path().is_ident("inline") {
                         controls_inline = true;
                     }
                     func.attrs.push(attr);
                 }
 
-                let def = parse_signature(is_raw, &func.sig);
+                let def = parse_signature(is_raw, is_field, &func.sig);
                 codes.push(def);
 
                 for inp in func.sig.inputs.iter_mut() {
@@ -468,16 +606,75 @@ pub fn interpreter(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
+    let templates = codes;
+    let codes = expand_field_opcodes(&templates, &args.fields);
+
     for (idx, code) in codes.iter().enumerate() {
         result.extend(gen_handler(idx, code));
     }
 
     result.extend(gen_opcode_enum(&codes));
     result.extend(gen_opcode_helpers(&codes));
-
-    // println!("codes: {:?}", codes);
+    result.extend(gen_field_opcode_enum(&templates, &codes, &args.fields));
 
     result.into()
+}
+
+/// The first field owns the declared positions, so it cannot be `cfg`-gated; a gated field must be
+/// last, so that gating it changes only the numbers past every other opcode.
+fn check_fields(fields: &[FieldInstance]) {
+    assert!(
+        !fields.is_empty(),
+        "`fields(..)` must name at least one field"
+    );
+    assert!(
+        fields[0].cfg.is_none(),
+        "the first field takes each field opcode's declared position, so it cannot be cfg-gated"
+    );
+    let gated = fields.iter().filter(|field| field.cfg.is_some()).count();
+    assert!(
+        gated <= 1
+            && fields
+                .last()
+                .is_some_and(|field| field.cfg.is_some() || gated == 0),
+        "at most one field may be cfg-gated, and it must be the last"
+    );
+}
+
+/// One field's copy of a field opcode template.
+fn instantiate(template: &OpCodeDef, index: usize, field: &FieldInstance) -> OpCodeDef {
+    let ty = &field.ty;
+    OpCodeDef {
+        name: format!("{}_{}", field.name, template.name),
+        fn_name: template.fn_name.clone(),
+        is_raw: template.is_raw,
+        inputs: template.inputs.clone(),
+        field_ty: quote! { #ty },
+        generic: true,
+        field: Some(index),
+        cfg: field.cfg.clone(),
+    }
+}
+
+/// The numbered opcode list: each template in declaration order, the first field's copy standing in
+/// for a field opcode, then every further field's copies as one block per field.
+fn expand_field_opcodes(templates: &[OpCodeDef], fields: &[FieldInstance]) -> Vec<OpCodeDef> {
+    let mut codes: Vec<OpCodeDef> = templates
+        .iter()
+        .map(|template| match template.field {
+            Some(_) => instantiate(template, 0, &fields[0]),
+            None => template.clone(),
+        })
+        .collect();
+    for (index, field) in fields.iter().enumerate().skip(1) {
+        codes.extend(
+            templates
+                .iter()
+                .filter(|template| template.field.is_some())
+                .map(|template| instantiate(template, index, field)),
+        );
+    }
+    codes
 }
 
 fn expect_ident(pat: &syn::Pat) -> Ident {
@@ -487,7 +684,25 @@ fn expect_ident(pat: &syn::Pat) -> Ident {
     }
 }
 
-fn parse_signature(is_raw: bool, sig: &syn::Signature) -> OpCodeDef {
+fn parse_signature(is_raw: bool, is_field: bool, sig: &syn::Signature) -> OpCodeDef {
+    let name = sig.ident.to_string();
+    let type_params = sig.generics.type_params().collect::<Vec<_>>();
+    // The name a field operand's type is spelled with: the plain `Field`, or a field opcode's
+    // type parameter.
+    let field_name = if is_field {
+        assert!(
+            type_params.len() == 1,
+            "field opcode `{name}` must be generic over exactly one type parameter, its field"
+        );
+        type_params[0].ident.to_string()
+    } else {
+        assert!(
+            type_params.is_empty(),
+            "opcode `{name}` is generic, so it must be a #[field_opcode]"
+        );
+        "Field".to_string()
+    };
+
     let mut inputs = vec![];
     let skip = if is_raw { 3 } else { 0 };
     for arg in sig.inputs.iter().skip(skip) {
@@ -496,15 +711,20 @@ fn parse_signature(is_raw: bool, sig: &syn::Signature) -> OpCodeDef {
                 panic!("receiver arguments are not allowed in the interpreter definition")
             }
             FnArg::Typed(pat) => {
-                let input = parse_pat_type(pat);
+                let input = parse_pat_type(pat, &field_name);
                 inputs.push(input);
             }
         }
     }
     let def = OpCodeDef {
-        name: sig.ident.to_string(),
+        fn_name: name.clone(),
+        name,
         is_raw,
         inputs,
+        field_ty: quote! { Field },
+        generic: false,
+        field: is_field.then_some(0),
+        cfg: None,
     };
     check_slice_widths(&def);
     def
@@ -533,19 +753,19 @@ fn check_slice_widths(def: &OpCodeDef) {
     }
 }
 
-fn parse_pat_type(pat: &syn::PatType) -> Input {
+fn parse_pat_type(pat: &syn::PatType, field_name: &str) -> Input {
     if pat.attrs.len() > 1 {
         panic!("only one attribute is allowed in the interpreter definition");
     }
 
     if pat.attrs.is_empty() {
-        return parse_unannotated(expect_ident(&pat.pat), pat.ty.as_ref());
+        return parse_unannotated(expect_ident(&pat.pat), pat.ty.as_ref(), field_name);
     }
 
     if pat.attrs[0].path().is_ident("out") {
-        parse_out(expect_ident(&pat.pat), pat.ty.as_ref())
+        parse_out(expect_ident(&pat.pat), pat.ty.as_ref(), field_name)
     } else if pat.attrs[0].path().is_ident("frame") {
-        parse_frame(expect_ident(&pat.pat), pat.ty.as_ref())
+        parse_frame(expect_ident(&pat.pat), pat.ty.as_ref(), field_name)
     } else if pat.attrs[0].path().is_ident("frame_slice") {
         parse_frame_slice(expect_ident(&pat.pat), pat.ty.as_ref(), &pat.attrs[0])
     } else {
@@ -553,7 +773,7 @@ fn parse_pat_type(pat: &syn::PatType) -> Input {
     }
 }
 
-fn parse_unannotated(ident: Ident, ty: &syn::Type) -> Input {
+fn parse_unannotated(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
     match ty {
         syn::Type::Path(typath) => {
             let ty_ident = typath.path.require_ident().unwrap();
@@ -562,7 +782,7 @@ fn parse_unannotated(ident: Ident, ty: &syn::Type) -> Input {
             }
             Input::Struct(StructInput {
                 name: ident.to_string(),
-                val: StructInputType::Host(parse_host_type(ty)),
+                val: StructInputType::Host(parse_host_type(ty, field_name)),
             })
         }
         syn::Type::Reference(intype) => match intype.elem.as_ref() {
@@ -573,23 +793,23 @@ fn parse_unannotated(ident: Ident, ty: &syn::Type) -> Input {
                 } else {
                     Input::Struct(StructInput {
                         name: ident.to_string(),
-                        val: StructInputType::Host(parse_host_type(ty)),
+                        val: StructInputType::Host(parse_host_type(ty, field_name)),
                     })
                 }
             }
             _ => Input::Struct(StructInput {
                 name: ident.to_string(),
-                val: StructInputType::Host(parse_host_type(ty)),
+                val: StructInputType::Host(parse_host_type(ty, field_name)),
             }),
         },
         _ => Input::Struct(StructInput {
             name: ident.to_string(),
-            val: StructInputType::Host(parse_host_type(ty)),
+            val: StructInputType::Host(parse_host_type(ty, field_name)),
         }),
     }
 }
 
-fn parse_out(ident: Ident, ty: &syn::Type) -> Input {
+fn parse_out(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
     match &ty {
         syn::Type::Ptr(ty) => {
             if ty.mutability.is_none() {
@@ -597,7 +817,7 @@ fn parse_out(ident: Ident, ty: &syn::Type) -> Input {
             }
             Input::Struct(StructInput {
                 name: ident.to_string(),
-                val: StructInputType::Out(parse_guest_type(&ty.elem)),
+                val: StructInputType::Out(parse_guest_type(&ty.elem, field_name)),
             })
         }
         _ => {
@@ -606,18 +826,15 @@ fn parse_out(ident: Ident, ty: &syn::Type) -> Input {
     }
 }
 
-fn parse_frame(ident: Ident, ty: &syn::Type) -> Input {
+fn parse_frame(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
     Input::Struct(StructInput {
         name: ident.to_string(),
-        val: StructInputType::Frame(parse_guest_type(ty)),
+        val: StructInputType::Frame(parse_guest_type(ty, field_name)),
     })
 }
 
-/// Parse `#[frame_slice(width)] name: &[u64]`, or `&mut [u64]` for a result.
-///
-/// One attribute covers both directions, keyed off the reference's own mutability, because the two
-/// encode identically as a single [`FramePosition`], and differ only in what the handler may do
-/// with the cells.
+/// Parse `#[frame_slice(width)] name: &[u64]`, or `&mut [u64]` for a result. Both encode as one
+/// `FramePosition`; the mutability says only what the handler may do with the cells.
 fn parse_frame_slice(ident: Ident, ty: &syn::Type, attr: &syn::Attribute) -> Input {
     let width: Ident = attr
         .parse_args()
@@ -646,12 +863,12 @@ fn parse_frame_slice(ident: Ident, ty: &syn::Type, attr: &syn::Attribute) -> Inp
     })
 }
 
-fn parse_guest_type(ty: &syn::Type) -> GuestType {
+fn parse_guest_type(ty: &syn::Type, field_name: &str) -> GuestType {
     match ty {
         syn::Type::Path(ty) => {
             let ident = ty.path.require_ident().unwrap();
             match ident.to_string().as_str() {
-                "Field" => GuestType::Field,
+                name if name == field_name => GuestType::Field,
                 "u64" => GuestType::U64,
                 "Int128" => GuestType::Int128,
                 "BoxedValue" => GuestType::BoxedValue,
@@ -670,18 +887,18 @@ fn parse_guest_type(ty: &syn::Type) -> GuestType {
     }
 }
 
-fn parse_host_type(ty: &syn::Type) -> HostType {
+fn parse_host_type(ty: &syn::Type, field_name: &str) -> HostType {
     match ty {
         syn::Type::Path(ty) => {
             let ident = ty.path.require_ident().unwrap();
             match ident.to_string().as_str() {
+                name if name == field_name => HostType::Field,
                 "u64" => HostType::U64,
                 "usize" => HostType::USize,
                 "isize" => HostType::ISize,
                 "JumpTarget" => HostType::JumpTarget,
                 "FramePosition" => HostType::FramePosition,
                 "BoxedLayout" => HostType::BoxedLayout,
-                "Field" => HostType::Field,
                 _ => panic!("unsupported type {:?}", ty),
             }
         }
@@ -691,11 +908,18 @@ fn parse_host_type(ty: &syn::Type) -> HostType {
                 "parameter reference must be immutable"
             );
             match ty.elem.as_ref() {
-                syn::Type::Slice(ty) => HostType::Slice(Box::new(parse_host_type(&ty.elem))),
+                syn::Type::Slice(ty) => {
+                    HostType::Slice(Box::new(parse_host_type(&ty.elem, field_name)))
+                }
                 _ => panic!("References not supported here"),
             }
         }
-        syn::Type::Tuple(ty) => HostType::Tuple(ty.elems.iter().map(parse_host_type).collect()),
+        syn::Type::Tuple(ty) => HostType::Tuple(
+            ty.elems
+                .iter()
+                .map(|ty| parse_host_type(ty, field_name))
+                .collect(),
+        ),
         _ => {
             panic!("unsupported host type {:?}", ty);
         }
@@ -704,6 +928,7 @@ fn parse_host_type(ty: &syn::Type) -> HostType {
 
 fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
     let prof_idx = idx;
+    let field_ty = &def.field_ty;
     let mut getters = proc_macro2::TokenStream::new();
     for input in &def.inputs {
         match input {
@@ -713,11 +938,11 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
             }) => {
                 let i = format_ident!("{}", name);
                 let getter = match tp {
-                    GuestType::Field => format_ident!("read_field"),
-                    GuestType::U64 => format_ident!("read_u64"),
-                    GuestType::Int128 => format_ident!("read_int128"),
-                    GuestType::Ptr => format_ident!("read_ptr"),
-                    GuestType::BoxedValue => format_ident!("read_array"),
+                    GuestType::Field => quote! { read_field::<#field_ty> },
+                    GuestType::U64 => quote! { read_u64 },
+                    GuestType::Int128 => quote! { read_int128 },
+                    GuestType::Ptr => quote! { read_ptr },
+                    GuestType::BoxedValue => quote! { read_array },
                 };
                 getters.extend(quote! {
                     let #i = unsafe {
@@ -732,16 +957,15 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
             }) => {
                 let i: Ident = format_ident!("{}", name);
                 let getter = match tp {
-                    GuestType::Field => format_ident!("read_field_mut"),
-                    GuestType::U64 => format_ident!("read_u64_mut"),
-                    GuestType::Int128 => format_ident!("read_int128_mut"),
-                    GuestType::Ptr => format_ident!("read_ptr_mut"),
-                    GuestType::BoxedValue => format_ident!("read_array_mut"),
+                    GuestType::Field => quote! { read_field_mut::<#field_ty> },
+                    GuestType::U64 => quote! { read_u64_mut },
+                    GuestType::Int128 => quote! { read_int128_mut },
+                    GuestType::Ptr => quote! { read_ptr_mut },
+                    GuestType::BoxedValue => quote! { read_array_mut },
                 };
-                // The position is bound rather than read inline so that `gen_slice_bindings` can
-                // check a wide result against it. A raw pointer is not a borrow, so the pointer
-                // itself may exist before that check; what must not is a write through it while a
-                // slice covers the same cells, and the check runs before any slice is built.
+                // Bound, not read inline, so `gen_slice_bindings` can check a wide result against
+                // it before any slice exists. A raw pointer may coexist with a slice; a write
+                // through it may not.
                 let pos = format_ident!("__out_pos_{}", name);
                 getters.extend(quote! {
                     let #pos = unsafe { *pc.offset(current_field_offset) as isize };
@@ -771,7 +995,7 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
                 let i = format_ident!("{}", name);
                 let offset_id = format_ident!("current_field_offset");
                 let pc = format_ident!("pc");
-                let getter = htp.make_getter(offset_id, pc);
+                let getter = htp.make_getter(offset_id, pc, field_ty);
                 getters.extend(quote! {
                     let #i = #getter;
                 });
@@ -792,8 +1016,8 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
         def.inputs
             .iter()
             .map(|input| match input {
-                // Every operand kind is bound to its own name above, so the call passes that name
-                // whatever the kind was.
+                // Every operand kind is bound above to a local named after the operand, so the call
+                // passes that name whatever the kind was.
                 Input::Struct(StructInput { name, .. }) => {
                     let i = format_ident!("{}", name);
                     quote! { #i }
@@ -803,7 +1027,12 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
             })
             .collect::<Vec<_>>(),
     );
-    let op_name = format_ident!("{}", &def.name);
+    let fn_name = format_ident!("{}", &def.fn_name);
+    let op_name = if def.generic {
+        quote! { #fn_name::<#field_ty> }
+    } else {
+        quote! { #fn_name }
+    };
 
     let (call_and_finish, return_call) = if def.is_raw {
         // Raw opcodes already return `(*const u64, Frame)` themselves; the
@@ -822,9 +1051,17 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
         (call_op, finish)
     };
 
+    let check_field = if def.generic {
+        quote! { vm.check_field::<#field_ty>(); }
+    } else {
+        quote! {}
+    };
+
     let handler_name = format_ident!("{}_handler", def.name);
     let prof_idx = prof_idx;
+    let cfg = cfg_attr(&def.cfg);
     quote! {
+        #cfg
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
         pub fn #handler_name(
             pc: *const u64,
@@ -839,6 +1076,7 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
             if vm.instruction_profile_enabled() {
                 vm.record_instruction(pc, frame);
             }
+            #check_field
             let mut current_field_offset = 1isize;
             #getters
             #slice_bindings
@@ -856,17 +1094,14 @@ fn gen_handler(idx: usize, def: &OpCodeDef) -> proc_macro2::TokenStream {
     }
 }
 
-/// Build every frame slice a handler takes, after the assertion that nothing else it writes
-/// overlaps said frame slice.
+/// Build every frame slice a handler takes, after asserting that nothing the handler writes
+/// overlaps one.
 ///
-/// A `&mut [u64]` and a `&[u64]` over the same cells is undefined behavior the moment both exist,
-/// so the check has to run while there are only positions and lengths.
-///
-/// Every operand the handler **writes** is checked against every slice: a result slice against the
-/// other slices, and an `#[out]` against all of them, its extent coming from
-/// [`GuestType::to_cells_tokens`]. An `#[out]` is a raw pointer rather than a reference, so its
-/// mere existence alongside a slice is fine; the write through it is not, and that happens in the
-/// handler body once every binding below is live.
+/// The check runs while there are only positions and lengths: a `&mut [u64]` and a `&[u64]` over
+/// the same cells are undefined behavior as soon as both exist. A result slice is checked against
+/// the other slices, and an `#[out]` against all of them, with its extent from
+/// [`GuestType::to_cells_tokens`]. An `#[out]` is a raw pointer, which may coexist with a slice,
+/// but the handler body writes through it while every binding is live.
 fn gen_slice_bindings(def: &OpCodeDef) -> proc_macro2::TokenStream {
     let slices = def
         .struct_args()
@@ -883,7 +1118,11 @@ fn gen_slice_bindings(def: &OpCodeDef) -> proc_macro2::TokenStream {
         .filter_map(|input| match &input.val {
             StructInputType::Out(tp) => {
                 let pos = format_ident!("__out_pos_{}", input.name);
-                Some((input.name.as_str(), quote! { #pos }, tp.to_cells_tokens()))
+                Some((
+                    input.name.as_str(),
+                    quote! { #pos },
+                    tp.to_cells_tokens(&def.field_ty),
+                ))
             }
             _ => None,
         })
@@ -900,8 +1139,8 @@ fn gen_slice_bindings(def: &OpCodeDef) -> proc_macro2::TokenStream {
         })
         .collect::<Vec<_>>();
 
-    // A result slice is checked against every slice; an `#[out]` against every slice too, but not
-    // against another `#[out]`, which is the pair this attribute has no bearing on.
+    // Each writer is checked against every slice. Two `#[out]`s are not checked against each
+    // other, as neither is a slice.
     let writers = extents
         .iter()
         .filter(|(_, mutable, _, _)| *mutable)
@@ -948,26 +1187,31 @@ fn gen_slice_bindings(def: &OpCodeDef) -> proc_macro2::TokenStream {
     result
 }
 
+/// The `name: Type` of each operand of `code`, as an `OpCode` variant holds it.
+fn variant_params(code: &OpCodeDef) -> Vec<proc_macro2::TokenStream> {
+    code.struct_args()
+        .map(|input| {
+            let i = format_ident!("{}", input.name);
+            match &input.val {
+                StructInputType::Frame(_) => quote! {#i: FramePosition},
+                StructInputType::Out(_) => quote! {#i: FramePosition},
+                StructInputType::Slice(_) => quote! {#i: FramePosition},
+                StructInputType::Host(ty) => {
+                    let ty = ty.to_def_tokens(&code.field_ty);
+                    quote! {#i: #ty}
+                }
+            }
+        })
+        .collect()
+}
+
 fn gen_opcode_enum(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
     let codes = codes.iter().map(|code| {
-        let params = code
-            .struct_args()
-            .map(|input| {
-                let i = format_ident!("{}", input.name);
-                match &input.val {
-                    // StructInputType::Const(_) => todo!(),
-                    StructInputType::Frame(_) => Some(quote! {#i: FramePosition}),
-                    StructInputType::Out(_) => Some(quote! {#i: FramePosition}),
-                    StructInputType::Slice(_) => Some(quote! {#i: FramePosition}),
-                    StructInputType::Host(ty) => {
-                        let ty = ty.to_def_tokens();
-                        Some(quote! {#i: #ty})
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        let name = format_ident!("{}", &code.name.to_string().to_pascal_case());
+        let params = variant_params(code);
+        let name = format_ident!("{}", code.struct_name());
+        let cfg = cfg_attr(&code.cfg);
         quote! {
+            #cfg
             #name{#(#params),*}
         }
     });
@@ -980,6 +1224,12 @@ fn gen_opcode_enum(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
 }
 
 fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
+    let field_cases = codes.iter().map(|code| {
+        let name = format_ident!("{}", code.struct_name());
+        let cfg = cfg_attr(&code.cfg);
+        let is_field = code.field.is_some();
+        quote! { #cfg Self::#name { .. } => #is_field }
+    });
     let opcode_writer_cases = codes
         .iter()
         .enumerate()
@@ -1019,12 +1269,15 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
                                 &binary,
                                 &jumps_to_fix,
                                 true,
+                                &code.field_ty,
                             )
                         }
                     }
                 })
                 .collect::<Vec<_>>();
+            let cfg = cfg_attr(&code.cfg);
             quote! {
+                #cfg
                 Self::#name { #(#params),* } => {
                     binary.push(#i);
                     let mut init_offset = -1isize;
@@ -1052,11 +1305,13 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
                 StructInputType::Host(htp) => {
                     let binary = format_ident!("binary");
                     let ix = format_ident!("ix");
-                    result.extend(htp.make_measurer(&binary, &ix));
+                    result.extend(htp.make_measurer(&binary, &ix, &code.field_ty));
                 }
             }
         }
+        let cfg = cfg_attr(&code.cfg);
         quote! {
+            #cfg
             #i => {#result}
         }
     });
@@ -1068,7 +1323,9 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
         let fields = code
             .struct_args()
             .map(|field| field.make_printer(&fields_ident));
+        let cfg = cfg_attr(&code.cfg);
         quote! {
+            #cfg
             #matcher => {
                 let mut #fields_ident = String::new();
                 #(#fields);*
@@ -1077,34 +1334,32 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
         }
     });
 
-    let dsp_size = codes.len();
-    let dispatch_cases = codes.iter().map(|code| {
-        let name = format_ident!("{}_handler", code.name);
-        quote! {
-            #name
+    // The tables indexed by opcode number. A `cfg`-gated field's copies are the last opcodes (see
+    // `check_fields`), so the tables without them are a prefix of the tables with them, and both
+    // are generated, each under its side of the `cfg`.
+    let tables = match codes.iter().find_map(|code| code.cfg.clone()) {
+        None => gen_opcode_tables(codes, quote! {}),
+        Some(cfg) => {
+            let ungated = codes
+                .iter()
+                .take_while(|code| code.cfg.is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut tables = gen_opcode_tables(codes, quote! { #[cfg(#cfg)] });
+            tables.extend(gen_opcode_tables(&ungated, quote! { #[cfg(not(#cfg))] }));
+            tables
         }
-    });
-
-    let opcode_name_strs = codes.iter().map(|code| code.name.clone());
-    let raw_opcode_indices = codes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, code)| code.is_raw.then_some(index));
+    };
 
     quote! {
-        /// The number of distinct opcodes — i.e. the size of the dispatch table
-        /// and of the VM's per-opcode profiling buffer.
-        pub const NUM_OPCODES: usize = #dsp_size;
-
-        /// Opcode names indexed by discriminant. Used by the profiling report.
-        #[cfg(feature = "vm-profile")]
-        pub static OPCODE_NAMES: [&str; #dsp_size] = [ #(#opcode_name_strs),* ];
-
-        /// Lets dispatch tests require coverage when a new raw opcode is introduced.
-        #[cfg(test)]
-        pub const RAW_OPCODES: &[usize] = &[#(#raw_opcode_indices),*];
+        #tables
 
         impl OpCode {
+            /// Whether this opcode is specialized for a field.
+            pub fn is_field_opcode(&self) -> bool {
+                match self { #(#field_cases),* }
+            }
+
             pub fn to_binary(&self, binary: &mut Vec<u64>, jumps_to_fix: &mut Vec<(usize, isize)>) {
                 match self {
                     #(#opcode_writer_cases),*
@@ -1130,7 +1385,134 @@ fn gen_opcode_helpers(codes: &[OpCodeDef]) -> proc_macro2::TokenStream {
                 Ok(())
             }
         }
+    }
+}
 
+/// The opcode-number-indexed tables over `codes`, each item carrying `cfg`.
+fn gen_opcode_tables(
+    codes: &[OpCodeDef],
+    cfg: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let dsp_size = codes.len();
+    let dispatch_cases = codes.iter().map(|code| {
+        let name = format_ident!("{}_handler", code.name);
+        quote! {
+            #name
+        }
+    });
+
+    let opcode_name_strs = codes.iter().map(|code| code.name.clone());
+    let raw_opcode_indices = codes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, code)| code.is_raw.then_some(index));
+
+    quote! {
+        /// The number of distinct opcodes — i.e. the size of the dispatch table
+        /// and of the VM's per-opcode profiling buffer.
+        #cfg
+        pub const NUM_OPCODES: usize = #dsp_size;
+
+        /// Opcode names indexed by discriminant. Used by the profiling report and the pinned
+        /// opcode-number test.
+        #cfg
+        #[cfg(any(test, feature = "vm-profile"))]
+        pub static OPCODE_NAMES: [&str; #dsp_size] = [ #(#opcode_name_strs),* ];
+
+        /// Lets dispatch tests require coverage when a new raw opcode is introduced.
+        #cfg
+        #[cfg(test)]
+        pub const RAW_OPCODES: &[usize] = &[#(#raw_opcode_indices),*];
+
+        #cfg
         pub const DISPATCH: [Handler; #dsp_size] = [ #(#dispatch_cases),* ];
+    }
+}
+
+/// `FieldOpCode`, the field-independent form of every field opcode, and its `for_field`.
+///
+/// Codegen builds a `FieldOpCode` with named operands and picks the field once, through an
+/// exhaustive `match` on `FieldId`, so a new `FieldId` variant is a compile error here. A fallback
+/// arm would silently emit another field's opcode for it. `cfg`-gated fields have no `FieldId`
+/// variant and so no arm.
+fn gen_field_opcode_enum(
+    templates: &[OpCodeDef],
+    codes: &[OpCodeDef],
+    fields: &[FieldInstance],
+) -> proc_macro2::TokenStream {
+    let families = templates
+        .iter()
+        .filter(|template| template.field.is_some())
+        .collect::<Vec<_>>();
+
+    let variants = families.iter().map(|template| {
+        assert!(
+            !template.struct_args().any(
+                |input| matches!(&input.val, StructInputType::Host(ty) if ty.contains_field())
+            ),
+            "field opcode `{}` takes a field immediate, which has no field-independent type for \
+             `FieldOpCode` to hold",
+            template.name
+        );
+        let name = format_ident!("{}", template.struct_name());
+        let params = variant_params(template);
+        quote! { #name { #(#params),* } }
+    });
+
+    // One method per field, named after it, choosing that field's copy.
+    let choosers = fields.iter().enumerate().map(|(index, field)| {
+        let arms = families.iter().map(|template| {
+            let name = format_ident!("{}", template.struct_name());
+            let args = template
+                .struct_args()
+                .map(|input| format_ident!("{}", input.name))
+                .collect::<Vec<_>>();
+            let code = codes
+                .iter()
+                .find(|code| code.fn_name == template.fn_name && code.field == Some(index))
+                .expect("every field has a copy of every field opcode");
+            let copy = format_ident!("{}", code.struct_name());
+            quote! { FieldOpCode::#name { #(#args),* } => OpCode::#copy { #(#args),* } }
+        });
+        let method = &field.name;
+        let cfg = cfg_attr(&field.cfg);
+        let doc = format!("The opcode performing this operation over `{method}`.");
+        quote! {
+            #cfg
+            #[doc = #doc]
+            pub fn #method(self) -> OpCode {
+                match self {
+                    #(#arms),*
+                }
+            }
+        }
+    });
+
+    // A field behind a `cfg` has no `FieldId`.
+    let field_arms = fields
+        .iter()
+        .filter(|field| field.cfg.is_none())
+        .map(|field| {
+            let id = format_ident!("{}", field.name.to_string().to_pascal_case());
+            let method = &field.name;
+            quote! { ::mavros_artifacts::FieldId::#id => self.#method() }
+        });
+
+    quote! {
+        /// A field opcode with its field not yet chosen; [`FieldOpCode::for_field`] chooses it.
+        pub enum FieldOpCode {
+            #(#variants),*
+        }
+
+        impl FieldOpCode {
+            #(#choosers)*
+
+            /// The opcode performing this operation over `field`.
+            pub fn for_field(self, field: ::mavros_artifacts::FieldId) -> OpCode {
+                match field {
+                    #(#field_arms),*
+                }
+            }
+        }
     }
 }

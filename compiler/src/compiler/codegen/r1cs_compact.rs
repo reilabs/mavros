@@ -57,11 +57,10 @@
 //! The backward direction is the adversarial one, but as any adversarial solution to the compacted
 //! system lifts to a solution of the original system, **no new statements become provable**.
 //!
-//! Column 0 and the positional in/return block (`protected_cols`) are **never** removable.
-//! Protected columns are the lowest indices and [`UnionFind`] keeps the `Ord`-smallest root, so a
-//! class containing a protected column would have a protected root. Pins reject protected roots,
-//! and phase 3 skips protected defining columns entirely, so union-find classes never contain a
-//! protected column at all and unions only ever eliminate roots at or above `protected_cols`. The
+//! Column 0 and the parameter/return columns (`protected_cols`) are **never** removable, wherever
+//! they sit. Pins and affine pivots exclude them. Union-find merges only unprotected roots; an
+//! equality with a protected column instead substitutes the unprotected column toward it. This
+//! preserves a return even when its index is greater than the internal column it equals. The
 //! public statement (the projection onto the protected columns) is therefore unchanged.
 //!
 //! ## Estimation
@@ -99,7 +98,9 @@
 //! iteration is in row/column index order and merges go through [`UnionFind`], whose smaller-root
 //! tie-break keeps the partition deterministic.
 
-use crate::collections::{HashMap, UnionFind};
+use mavros_artifacts::MavrosField;
+
+use crate::collections::{HashMap, HashSet, UnionFind};
 use crate::compiler::Field;
 
 use super::hlssa_to_r1cs::{LC, R1CS};
@@ -109,21 +110,32 @@ use super::hlssa_to_r1cs::{LC, R1CS};
 //
 /// Measure how much a post-seal compaction could remove from `r1cs`'s algebraic section.
 ///
-/// `protected_cols` is the number of leading witness columns that must survive untouched: column 0
-/// (the constant one) plus the positional input/return block, i.e. `1 + flattened field count of
-/// the entry point's params and returns`.
-pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
-    // With column 0 unprotected, `pin_candidate` could "pin" the constant-one column itself,
-    // silently corrupting every constant fold below.
-    assert!(
-        protected_cols >= 1,
-        "column 0 (the constant one) must always be protected"
-    );
-
+/// `protected_cols` names the witness columns that must survive untouched, including column 0
+/// (the constant one). Parameter and return columns need not form a contiguous prefix.
+pub fn analyze<F: MavrosField>(
+    r1cs: &R1CS<F>,
+    protected_cols: impl IntoIterator<Item = usize>,
+) -> CompactionStats {
     // Columns are narrowed to `u32` for interning; wider indices would silently alias.
     assert!(
         r1cs.witness_layout.algebraic_size <= u32::MAX as usize,
         "algebraic column indices must fit in u32"
+    );
+
+    let protected: HashSet<u32> = protected_cols
+        .into_iter()
+        .map(|column| {
+            assert!(
+                column < r1cs.witness_layout.algebraic_size,
+                "protected column is outside the algebraic section"
+            );
+            column as u32
+        })
+        .collect();
+    // Without this, a pin could eliminate the constant-one column itself.
+    assert!(
+        protected.contains(&0),
+        "column 0 (the constant one) must always be protected"
     );
 
     let algebraic_rows = r1cs.constraints_layout.algebraic_size;
@@ -132,10 +144,9 @@ pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
         algebraic_cols: r1cs.witness_layout.algebraic_size,
         ..CompactionStats::default()
     };
-    let protected = protected_cols as u32;
 
     let mut interner = CoeffInterner::default();
-    let mut subst = Substitution::new();
+    let mut subst = Substitution::new(F::ZERO.to_element());
     let mut live = vec![true; algebraic_rows];
 
     // Canonical form of each row, kept as `None` while the row is dead. Persisted across rounds
@@ -191,7 +202,8 @@ pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
                 live[idx] = false;
                 stats.tautology_rows += 1;
                 changed = true;
-            } else if let Some((col, value)) = pin_candidate(row, protected, &interner) {
+            } else if let Some((col, value)) = pin_candidate(row, &protected, &interner, subst.zero)
+            {
                 if !subst.is_pinned(col) {
                     let root = subst.uf.find(col);
                     subst.pins.insert(root, value);
@@ -218,35 +230,32 @@ pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
             }
             let a = subst.apply_canon(&row.a, &mut interner);
             let b = subst.apply_canon(&row.b, &mut interner);
-            // `(k, product_lc)`: the product is `k·product_lc` (with `product_lc = None` meaning
-            // the product is identically 0). `None` overall means a genuinely quadratic row — skip
-            // it.
+            // `product` is `Some((k, lc))` when the product is `k·lc`, and `None` when it is
+            // identically 0. `linear` is `None` for a genuinely quadratic row, which is skipped.
             let linear = if a.is_empty() || b.is_empty() {
-                Some((Field::ZERO, None))
+                Some(None)
             } else if let Some(k) = lone_constant(&a, &interner) {
-                Some((k, Some(b.clone())))
+                Some(Some((k, b.clone())))
             } else if let Some(k) = lone_constant(&b, &interner) {
-                Some((k, Some(a.clone())))
+                Some(Some((k, a.clone())))
             } else {
                 None
             };
-            let Some((k, product_lc)) = linear else { continue };
+            let Some(product) = linear else { continue };
             let c = subst.apply_canon(&row.c, &mut interner);
-            // L = C − k·product_lc, folded.
+            // L = C − k·lc, folded.
             let mut folded = std::collections::BTreeMap::<u32, Field>::new();
             for &(col, coeff_id) in &c {
-                *folded.entry(col).or_insert(Field::ZERO) += interner.value(coeff_id);
+                accumulate(&mut folded, col, interner.value(coeff_id));
             }
-            if let Some(lc) = &product_lc {
+            if let Some((k, lc)) = &product {
                 for &(col, coeff_id) in lc {
-                    *folded.entry(col).or_insert(Field::ZERO) -= k * interner.value(coeff_id);
+                    accumulate(&mut folded, col, -(*k * interner.value(coeff_id)));
                 }
             }
-            let terms: Vec<(u32, Field)> = folded
-                .into_iter()
-                .filter(|(_, v)| *v != Field::ZERO)
-                .collect();
-            match eliminate_linear(&mut subst, &terms, protected) {
+            let terms: Vec<(u32, Field)> =
+                folded.into_iter().filter(|(_, v)| !v.is_zero()).collect();
+            match eliminate_linear(&mut subst, &terms, &protected) {
                 Elim::None => {}
                 Elim::Pin => {
                     live[idx] = false;
@@ -306,7 +315,7 @@ pub fn analyze(r1cs: &R1CS, protected_cols: usize) -> CompactionStats {
                     // possible when the difference fixes a column to a constant — is counted under
                     // `eliminated_cols`, not `pinned_cols` (which is reserved for pins that kill
                     // their own row, keeping the row-death partition exact).
-                    match eliminate_linear(&mut subst, &terms, protected) {
+                    match eliminate_linear(&mut subst, &terms, &protected) {
                         Elim::None => {}
                         Elim::Merge => {
                             stats.merged_cols += 1;
@@ -437,14 +446,18 @@ struct Substitution {
     uf: UnionFind<u32>,
     pins: HashMap<u32, Field>,
     subs: HashMap<u32, Vec<(u32, Field)>>,
+
+    /// The zero of the R1CS's field, which a column pinned to zero takes.
+    zero: Field,
 }
 
 impl Substitution {
-    fn new() -> Self {
+    fn new(zero: Field) -> Self {
         Substitution {
             uf: UnionFind::default(),
             pins: HashMap::default(),
             subs: HashMap::default(),
+            zero,
         }
     }
 
@@ -455,10 +468,10 @@ impl Substitution {
 
     /// Canonicalize one LC under the current substitution. The R1CS holds raw coefficients, so this
     /// is the boundary where they become middle-end [`Field`] values.
-    fn apply(&mut self, lc: &LC, interner: &mut CoeffInterner) -> CanonLc {
+    fn apply<F: MavrosField>(&mut self, lc: &LC<F>, interner: &mut CoeffInterner) -> CanonLc {
         self.fold_terms(
             lc.iter()
-                .map(|&(col, coeff)| (col as u32, Field::from(coeff))),
+                .map(|&(col, coeff)| (col as u32, coeff.to_element())),
             interner,
         )
     }
@@ -504,7 +517,7 @@ impl Substitution {
         let mut gathered: Vec<(u32, Field)> = Vec::new();
         let mut stack: Vec<(u32, Field)> = terms.collect();
         while let Some((col, coeff)) = stack.pop() {
-            if coeff == Field::ZERO {
+            if coeff.is_zero() {
                 continue;
             }
             let root = self.uf.find(col);
@@ -527,7 +540,7 @@ impl Substitution {
                 _ => folded.push((col, coeff)),
             }
         }
-        folded.retain(|(_, coeff)| *coeff != Field::ZERO);
+        folded.retain(|(_, coeff)| !coeff.is_zero());
 
         folded
     }
@@ -567,15 +580,21 @@ struct CanonRow {
 fn lc_difference(c: &CanonLc, c_ref: &CanonLc, interner: &CoeffInterner) -> Vec<(u32, Field)> {
     let mut folded = std::collections::BTreeMap::<u32, Field>::new();
     for &(col, coeff_id) in c {
-        *folded.entry(col).or_insert(Field::ZERO) += interner.value(coeff_id);
+        accumulate(&mut folded, col, interner.value(coeff_id));
     }
     for &(col, coeff_id) in c_ref {
-        *folded.entry(col).or_insert(Field::ZERO) -= interner.value(coeff_id);
+        accumulate(&mut folded, col, -interner.value(coeff_id));
     }
+    folded.into_iter().filter(|(_, v)| !v.is_zero()).collect()
+}
+
+/// Adds `value` to column `col`'s coefficient in `folded`. A new column starts at `value`, so no
+/// zero of the field is needed.
+fn accumulate(folded: &mut std::collections::BTreeMap<u32, Field>, col: u32, value: Field) {
     folded
-        .into_iter()
-        .filter(|(_, v)| *v != Field::ZERO)
-        .collect()
+        .entry(col)
+        .and_modify(|coeff| *coeff += value)
+        .or_insert(value);
 }
 
 /// Is this LC a lone constant term `k·w_0`? Returns `k`.
@@ -628,17 +647,22 @@ fn is_tautology(row: &CanonRow, interner: &CoeffInterner) -> bool {
 
 /// A degenerate row that pins an unprotected column to a constant: one product side is the empty
 /// LC (so the product is 0) and `C` is `k·w_j` or `k·w_j + m·w_0`, giving `w_j = −m/k`.
-fn pin_candidate(row: &CanonRow, protected: u32, interner: &CoeffInterner) -> Option<(u32, Field)> {
+fn pin_candidate(
+    row: &CanonRow,
+    protected: &HashSet<u32>,
+    interner: &CoeffInterner,
+    zero: Field,
+) -> Option<(u32, Field)> {
     // `b < a` normalization puts an empty product side in `a`.
     if !row.a.is_empty() {
         return None;
     }
     let (col, k, m) = match row.c.as_slice() {
-        [(col, k_id)] => (*col, interner.value(*k_id), Field::ZERO),
+        [(col, k_id)] => (*col, interner.value(*k_id), zero),
         [(0, m_id), (col, k_id)] => (*col, interner.value(*k_id), interner.value(*m_id)),
         _ => return None,
     };
-    if col < protected {
+    if protected.contains(&col) {
         return None;
     }
     // Canonicalization never emits zero coefficients, so `k` is invertible.
@@ -669,17 +693,21 @@ enum Elim {
 /// [`Elim::None`], no phantom column removed) and the recorded substitution can never be
 /// self-referential.
 ///
-/// The lowest-index unprotected column is a deterministic pivot; because protected columns are the
-/// lowest indices it is never one of them. Its coefficient is invertible (folding strips zeros; the
-/// field is prime), and the relation is entailed, so `w_pivot := −(1/k)·(rest)` is a
+/// The lowest-index unprotected column is a deterministic pivot. Its coefficient is invertible
+/// (folding strips zeros; the field is prime), and the relation is entailed, so
+/// `w_pivot := −(1/k)·(rest)` is a
 /// value-preserving substitution. It is sound for the algebraic rows, and — because the table /
 /// lookup rows are logUp linear forms in these columns rather than single-column commitments —
 /// expanding a column into a multi-term LC there keeps every row a valid R1C with unchanged value.
-fn eliminate_linear(subst: &mut Substitution, terms: &[(u32, Field)], protected: u32) -> Elim {
+fn eliminate_linear(
+    subst: &mut Substitution,
+    terms: &[(u32, Field)],
+    protected: &HashSet<u32>,
+) -> Elim {
     // Normalize the relation against the current substitution first (see the doc above). After this
     // every column is a distinct surviving root, sorted by column.
     let terms = subst.fold_field_terms(terms.iter().copied());
-    let Some(pivot_pos) = terms.iter().position(|&(col, _)| col >= protected) else {
+    let Some(pivot_pos) = terms.iter().position(|(col, _)| !protected.contains(col)) else {
         return Elim::None;
     };
     let (pivot, pivot_coeff) = terms[pivot_pos];
@@ -693,24 +721,29 @@ fn eliminate_linear(subst: &mut Substitution, terms: &[(u32, Field)], protected:
     match rhs.as_slice() {
         // A constant (or zero) right-hand side is a pin.
         [] => {
-            subst.pins.insert(root, Field::ZERO);
+            subst.pins.insert(root, subst.zero);
             Elim::Pin
         }
         [(0, value)] => {
             subst.pins.insert(root, *value);
             Elim::Pin
         }
-        // A single other column with unit coefficient is a plain equality — kept in union-find so
-        // deep merge chains stay near-O(1). `union` keeps the min-index (hence protected) root.
+        // A single other column with unit coefficient is a plain equality. Union-find keeps the
+        // min-index root, so an equality to a protected column uses a directed substitution
+        // instead: a protected return can have a higher index than the unprotected pivot.
         // Because the folded `terms` hold distinct surviving roots, `root != other_root` always
         // holds here, so this eliminates exactly one column; the equality guard is a last-line
         // defence that a would-be no-op union never counts as a removed column.
-        [(other, coeff)] if *coeff == Field::from(1u64) => {
+        [(other, coeff)] if coeff.is_one() => {
             let other_root = subst.uf.find(*other);
             if root == other_root {
                 Elim::None
             } else {
-                subst.uf.union(root, other_root);
+                if protected.contains(&other_root) {
+                    subst.subs.insert(root, rhs);
+                } else {
+                    subst.uf.union(root, other_root);
+                }
                 Elim::Merge
             }
         }
@@ -728,32 +761,26 @@ fn eliminate_linear(subst: &mut Substitution, terms: &[(u32, Field)], protected:
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{ConstraintsLayout, R1C, WitnessLayout};
+    use mavros_artifacts::{ConstraintsLayout, FieldConfig, R1C, WitnessLayout};
 
     use super::*;
 
     fn field(v: i64) -> Field {
-        if v < 0 {
-            -Field::from((-v) as u64)
-        } else {
-            Field::from(v as u64)
-        }
+        FieldConfig::bn254().constant(v)
     }
 
     fn lc(terms: &[(usize, i64)]) -> LC {
         terms
             .iter()
-            .map(|&(col, v)| (col, field(v).to_ark()))
+            .map(|&(col, v)| (col, MavrosField::from_element(field(v))))
             .collect()
     }
 
     /// An R1CS whose algebraic section is exactly `rows` over `cols` columns, with empty
     /// non-algebraic sections (the analysis never looks at them).
-    fn system(cols: usize, rows: Vec<R1C>) -> R1CS {
+    fn system<F: MavrosField>(cols: usize, rows: Vec<R1C<F>>) -> R1CS<F> {
         R1CS {
             witness_layout: WitnessLayout {
-                guard_index: None,
-                return_len: 0,
                 algebraic_size: cols,
                 multiplicities_size: 0,
                 challenges_size: 0,
@@ -783,7 +810,7 @@ mod tests {
         let rows = (1..5)
             .map(|i| r1c(&[(i, 1)], &[(i, 1)], &[(i + 1, 1)]))
             .collect();
-        let stats = analyze(&system(6, rows), 2);
+        let stats = analyze(&system(6, rows), 0..2);
         assert_eq!(stats.removable_rows, 0);
         assert_eq!(stats.removable_cols, 0);
         assert_eq!(stats.rounds, 1);
@@ -793,7 +820,7 @@ mod tests {
     fn zero_product_zero_c_is_tautology() {
         // (0) * (w1) - (0) = 0, in both product orientations.
         let rows = vec![r1c(&[], &[(1, 1)], &[]), r1c(&[(1, 1)], &[], &[])];
-        let stats = analyze(&system(2, rows), 2);
+        let stats = analyze(&system(2, rows), 0..2);
         assert_eq!(stats.tautology_rows, 2);
         assert_eq!(stats.removable_rows, 2);
         assert_eq!(stats.removable_cols, 0);
@@ -806,7 +833,7 @@ mod tests {
             r1c(&[(0, 2)], &[(2, 3), (3, 5)], &[(2, 6), (3, 10)]),
             r1c(&[(2, 3), (3, 5)], &[(0, 2)], &[(2, 6), (3, 10)]),
         ];
-        let stats = analyze(&system(4, rows), 2);
+        let stats = analyze(&system(4, rows), 0..2);
         assert_eq!(stats.tautology_rows, 2);
         assert_eq!(stats.removable_rows, 2);
     }
@@ -819,7 +846,7 @@ mod tests {
             // (2) * (3) - (7) = 0: unsatisfiable, must NOT be dropped.
             r1c(&[(0, 2)], &[(0, 3)], &[(0, 7)]),
         ];
-        let stats = analyze(&system(1, rows), 1);
+        let stats = analyze(&system(1, rows), 0..1);
         assert_eq!(stats.tautology_rows, 1);
         assert_eq!(stats.removable_rows, 1);
     }
@@ -835,13 +862,70 @@ mod tests {
             // (0) * (w1) - (w2 + 3·w0) = 0: same fact again; a tautology once w2 is pinned.
             r1c(&[], &[(1, 1)], &[(2, 1), (0, 3)]),
         ];
-        let stats = analyze(&system(4, rows), 2);
+        let stats = analyze(&system(4, rows), 0..2);
         assert_eq!(stats.pinned_cols, 1);
         assert_eq!(stats.eliminated_cols, 1);
         assert_eq!(stats.tautology_rows, 1);
         assert_eq!(stats.removable_rows, 3);
         assert_eq!(stats.removable_cols, 2);
         assert!(stats.rounds >= 2);
+    }
+
+    #[test]
+    fn a_column_in_both_c_and_the_product_cancels_before_pinning() {
+        let rows = vec![
+            // (w0) * (w3) - (w3 + w4) = 0: `L = C − 1·B = w4`, so w3 cancels and w4 = 0 (pin).
+            r1c(&[(0, 1)], &[(3, 1)], &[(3, 1), (4, 1)]),
+            // (w4) * (w1) - (0) = 0: a tautology only once w4 is pinned to zero.
+            r1c(&[(4, 1)], &[(1, 1)], &[]),
+        ];
+        let stats = analyze(&system(5, rows), 0..3);
+        assert_eq!(stats.pinned_cols, 1);
+        assert_eq!(stats.eliminated_cols, 0);
+        assert_eq!(stats.merged_cols, 0);
+        assert_eq!(stats.tautology_rows, 1);
+    }
+
+    #[test]
+    fn a_zero_product_equal_to_one_column_pins_it_to_zero() {
+        let rows = vec![
+            // (0) * (w1) - (w3) = 0  =>  w3 = 0 (pin).
+            r1c(&[], &[(1, 1)], &[(3, 1)]),
+            // (w3) * (w1) - (0) = 0: a tautology only once w3 is pinned to zero.
+            r1c(&[(3, 1)], &[(1, 1)], &[]),
+        ];
+        let stats = analyze(&system(4, rows), 0..2);
+        assert_eq!(stats.pinned_cols, 1);
+        assert_eq!(stats.tautology_rows, 1);
+        assert_eq!(stats.removable_rows, 2);
+    }
+
+    /// The analysis runs over any field's R1CS. On Goldilocks, a column pinned to zero takes
+    /// Goldilocks' zero, and the second row's product reads it: another field's zero would make
+    /// that a mixed-field operation.
+    #[test]
+    fn a_goldilocks_system_pins_a_column_to_its_zero() {
+        use mavros_artifacts::Goldilocks;
+
+        let one = Goldilocks::ONE;
+        let rows = vec![
+            // (0) * (w1) - (w3) = 0  =>  w3 = 0 (pin).
+            R1C {
+                a: vec![],
+                b: vec![(1, one)],
+                c: vec![(3, one)],
+            },
+            // (w3) * (w1) - (0) = 0: a tautology once w3 is pinned to zero.
+            R1C {
+                a: vec![(3, one)],
+                b: vec![(1, one)],
+                c: vec![],
+            },
+        ];
+        let stats = analyze(&system(4, rows), 0..2);
+        assert_eq!(stats.pinned_cols, 1);
+        assert_eq!(stats.tautology_rows, 1);
+        assert_eq!(stats.removable_rows, 2);
     }
 
     /// Two rows pinning the same column to different values make the system unsatisfiable. The
@@ -857,7 +941,7 @@ mod tests {
             // this row becomes 0·w1 - 2·w0 = 0, which no pattern may ever remove.
             r1c(&[], &[(1, 1)], &[(2, 1), (0, 5)]),
         ];
-        let stats = analyze(&system(3, rows), 2);
+        let stats = analyze(&system(3, rows), 0..2);
         assert_eq!(stats.pinned_cols, 1);
         assert_eq!(stats.tautology_rows, 0);
         assert_eq!(stats.duplicate_rows, 0);
@@ -870,9 +954,35 @@ mod tests {
     fn protected_columns_are_never_pinned() {
         // Would pin w1, but w1 is inside the protected block.
         let rows = vec![r1c(&[], &[(2, 1)], &[(1, 1), (0, 3)])];
-        let stats = analyze(&system(3, rows), 2);
+        let stats = analyze(&system(3, rows), 0..2);
         assert_eq!(stats.removable_rows, 0);
         assert_eq!(stats.removable_cols, 0);
+    }
+
+    #[test]
+    fn non_prefix_protection_keeps_returns_and_allows_internal_elimination() {
+        let rows = vec![
+            r1c(&[], &[(0, 1)], &[(3, 1), (0, -42)]), // protected return w3 = 42
+            r1c(&[], &[(0, 1)], &[(1, 1), (0, -7)]),  // internal w1 = 7
+            r1c(&[], &[(0, 1)], &[(2, 1), (3, 2), (0, -9)]),
+        ];
+        let stats = analyze(&system(4, rows), [0, 3]);
+        assert_eq!(stats.removable_cols, 2);
+        assert_eq!(stats.removable_rows, 2);
+    }
+
+    #[test]
+    fn merges_preserve_higher_protected_columns() {
+        let rows = vec![
+            r1c(&[(1, 1)], &[(0, 1)], &[(3, 1)]), // internal w1 = protected return w3
+            r1c(&[], &[(0, 1)], &[(1, 1), (3, 1), (0, -5)]),
+        ];
+        let stats = analyze(&system(4, rows), [0, 3]);
+        // Substituting w1 -> w3 leaves the public constraint 2*w3 = 5. A min-index union
+        // would instead discard w3, then pin w1 and incorrectly remove both columns/rows.
+        assert_eq!(stats.merged_cols, 1);
+        assert_eq!(stats.removable_cols, 1);
+        assert_eq!(stats.removable_rows, 1);
     }
 
     #[test]
@@ -885,7 +995,7 @@ mod tests {
             r1c(&[(1, 1)], &[(2, 1)], &[(4, 1)]),
             r1c(&[(4, 1)], &[(4, 1)], &[(6, 1)]),
         ];
-        let stats = analyze(&system(7, rows), 3);
+        let stats = analyze(&system(7, rows), 0..3);
         // Round 1 merges w4 -> w3 AND w6 -> w5 (phase 3 applies the substitution live, so row
         // 3's residue already sees w4 -> w3); round 2 drops rows 2 and 3 as duplicates.
         assert_eq!(stats.merged_cols, 2);
@@ -903,7 +1013,7 @@ mod tests {
             r1c(&[(1, 1)], &[(2, 1)], &[(3, 1)]),
             r1c(&[(1, 1)], &[(2, 1)], &[(4, 2)]),
         ];
-        let stats = analyze(&system(5, rows), 3);
+        let stats = analyze(&system(5, rows), 0..3);
         assert_eq!(stats.merged_cols, 0);
         assert_eq!(stats.eliminated_cols, 1);
         assert_eq!(stats.duplicate_rows, 1);
@@ -919,7 +1029,7 @@ mod tests {
             r1c(&[(1, 1)], &[(2, 1)], &[(4, 1), (5, 1)]),
             r1c(&[(1, 1)], &[(2, 1)], &[(6, 1)]),
         ];
-        let stats = analyze(&system(7, rows), 3);
+        let stats = analyze(&system(7, rows), 0..3);
         assert_eq!(stats.eliminated_cols, 1);
         assert_eq!(stats.duplicate_rows, 1);
         assert_eq!(stats.removable_rows, 1);
@@ -934,7 +1044,7 @@ mod tests {
             r1c(&[(3, 1)], &[(2, 1)], &[(3, 1)]),
             r1c(&[(4, 1)], &[(2, 1)], &[(4, 1)]),
         ];
-        let stats = analyze(&system(5, rows), 3);
+        let stats = analyze(&system(5, rows), 0..3);
         assert_eq!(stats.merged_cols, 0);
         assert_eq!(stats.eliminated_cols, 0);
         assert_eq!(stats.removable_rows, 0);
@@ -948,7 +1058,7 @@ mod tests {
             // Commuted product: still the same constraint after normalization.
             r1c(&[(2, 1)], &[(1, 1)], &[(3, 1)]),
         ];
-        let stats = analyze(&system(4, rows), 2);
+        let stats = analyze(&system(4, rows), 0..2);
         assert_eq!(stats.duplicate_rows, 2);
         assert_eq!(stats.removable_rows, 2);
     }
@@ -962,7 +1072,7 @@ mod tests {
             r1c(&[(1, 1)], &[(3, 2), (2, 1), (5, 0)], &[(4, 1)]),
             r1c(&[(1, 1)], &[(3, 1), (2, 1), (3, 1)], &[(4, 1)]),
         ];
-        let stats = analyze(&system(6, rows), 2);
+        let stats = analyze(&system(6, rows), 0..2);
         assert_eq!(stats.duplicate_rows, 2);
         assert_eq!(stats.removable_rows, 2);
     }
@@ -980,7 +1090,7 @@ mod tests {
         );
         r1cs.constraints_layout.algebraic_size = 0;
         r1cs.constraints_layout.tables_data_size = 2;
-        let stats = analyze(&r1cs, 2);
+        let stats = analyze(&r1cs, 0..2);
         assert_eq!(stats.algebraic_rows, 0);
         assert_eq!(stats.removable_rows, 0);
         assert_eq!(stats.removable_cols, 0);
@@ -1006,7 +1116,7 @@ mod tests {
                 &[(2 + n + i, 1)],
             ));
         }
-        let stats = analyze(&system(2 + 2 * n, rows), 2);
+        let stats = analyze(&system(2 + 2 * n, rows), 0..2);
         assert_eq!(stats.eliminated_cols, 2 * n);
         assert_eq!(stats.linear_elim_rows, 2 * n);
         assert_eq!(stats.removable_rows, 2 * n);
@@ -1025,10 +1135,10 @@ mod tests {
             r1c(&[], &[(1, 1)], &[]),
             r1c(&[], &[(2, 1)], &[(7, 2), (0, 6)]),
         ];
-        let baseline = analyze(&system(8, rows.clone()), 3);
+        let baseline = analyze(&system(8, rows.clone()), 0..3);
         let mut reversed = rows;
         reversed.reverse();
-        let permuted = analyze(&system(8, reversed), 3);
+        let permuted = analyze(&system(8, reversed), 0..3);
         assert_eq!(baseline.removable_rows, permuted.removable_rows);
         assert_eq!(baseline.removable_cols, permuted.removable_cols);
         assert_eq!(baseline.merged_cols, permuted.merged_cols);
@@ -1040,7 +1150,7 @@ mod tests {
         // (0)*(w1) - (w3 + w4 + w5) = 0 is the relation w3 + w4 + w5 = 0. Solving it for the
         // lowest-index unprotected column (w3) removes one column and consumes the row. (Claim 1.)
         let rows = vec![r1c(&[], &[(1, 1)], &[(3, 1), (4, 1), (5, 1)])];
-        let stats = analyze(&system(6, rows), 3);
+        let stats = analyze(&system(6, rows), 0..3);
         assert_eq!(stats.eliminated_cols, 1);
         assert_eq!(stats.linear_elim_rows, 1);
         assert_eq!(stats.removable_rows, 1);
@@ -1055,7 +1165,7 @@ mod tests {
             r1c(&[], &[(1, 1)], &[(3, 1), (4, 1)]),
             r1c(&[], &[(1, 1)], &[(3, 2), (4, 2)]),
         ];
-        let stats = analyze(&system(5, rows), 3);
+        let stats = analyze(&system(5, rows), 0..3);
         assert_eq!(stats.removable_cols, 1);
         assert_eq!(stats.removable_rows, 2);
     }
@@ -1064,7 +1174,7 @@ mod tests {
     fn standalone_equality_routes_to_merge() {
         // (0)*(w1) - (w3 - w4) = 0 is w3 = w4: a plain equality merges (union-find), not a sub.
         let rows = vec![r1c(&[], &[(1, 1)], &[(3, 1), (4, -1)])];
-        let stats = analyze(&system(5, rows), 3);
+        let stats = analyze(&system(5, rows), 0..3);
         assert_eq!(stats.merged_cols, 1);
         assert_eq!(stats.eliminated_cols, 0);
         assert_eq!(stats.linear_elim_rows, 1);
@@ -1077,7 +1187,7 @@ mod tests {
         // (2·w0) * (w3 + w4) - (w5) = 0 is the relation 2·w3 + 2·w4 − w5 = 0 (Claim 2: the constant
         // multiplicand makes it linear). It is NOT a tautology (C ≠ 2·B), so it removes a column.
         let rows = vec![r1c(&[(0, 2)], &[(3, 1), (4, 1)], &[(5, 1)])];
-        let stats = analyze(&system(6, rows), 3);
+        let stats = analyze(&system(6, rows), 0..3);
         assert_eq!(stats.eliminated_cols, 1);
         assert_eq!(stats.linear_elim_rows, 1);
         assert_eq!(stats.removable_rows, 1);
@@ -1092,7 +1202,7 @@ mod tests {
             r1c(&[], &[(1, 1)], &[(3, 1), (4, 1)]),
             r1c(&[], &[(1, 1)], &[(3, 1), (4, 1), (0, -1)]),
         ];
-        let stats = analyze(&system(5, rows), 3);
+        let stats = analyze(&system(5, rows), 0..3);
         assert_eq!(stats.removable_cols, 1);
         assert_eq!(stats.removable_rows, 1);
     }
@@ -1108,10 +1218,10 @@ mod tests {
             r1c(&[(1, 1)], &[(2, 1)], &[(7, 1), (8, 1)]),   // w1·w2 = w7 + w8   }
             r1c(&[(1, 1)], &[(2, 1)], &[(9, 1)]),           // w1·w2 = w9        } (Claim 3)
         ];
-        let baseline = analyze(&system(10, rows.clone()), 3);
+        let baseline = analyze(&system(10, rows.clone()), 0..3);
         let mut reversed = rows;
         reversed.reverse();
-        let permuted = analyze(&system(10, reversed), 3);
+        let permuted = analyze(&system(10, reversed), 0..3);
         assert_eq!(baseline.removable_rows, permuted.removable_rows);
         assert_eq!(baseline.removable_cols, permuted.removable_cols);
         assert_eq!(baseline.eliminated_cols, permuted.eliminated_cols);
@@ -1122,7 +1232,7 @@ mod tests {
         // w1 + w2 = 0 over only protected columns: a real constraint on the public statement, not
         // an elimination.
         let rows = vec![r1c(&[], &[(2, 1)], &[(1, 1), (2, 1)])];
-        let stats = analyze(&system(3, rows), 3);
+        let stats = analyze(&system(3, rows), 0..3);
         assert_eq!(stats.removable_rows, 0);
         assert_eq!(stats.removable_cols, 0);
     }
@@ -1143,7 +1253,7 @@ mod tests {
             r1c(&[(1, 1)], &[(2, 1)], &[(4, 1)]), // group B hit: w4 − w3 ⇒ merge w4 → w3 (real)
             r1c(&[(5, 1)], &[(6, 1)], &[(3, 1)]), // group A hit: [w3] − STALE [w4] ⇒ 0 = 0, no col
         ];
-        let stats = analyze(&system(7, rows.clone()), 2);
+        let stats = analyze(&system(7, rows.clone()), 0..2);
         assert_eq!(stats.merged_cols, 1, "only w4 → w3 is a real merge");
         assert_eq!(stats.eliminated_cols, 0);
         assert_eq!(stats.removable_cols, 1);
@@ -1154,7 +1264,7 @@ mod tests {
         // The over-count must not depend on row order either.
         let mut reversed = rows;
         reversed.reverse();
-        let permuted = analyze(&system(7, reversed), 2);
+        let permuted = analyze(&system(7, reversed), 0..2);
         assert_eq!(permuted.removable_cols, 1);
         assert_eq!(permuted.removable_rows, 2);
     }
@@ -1173,7 +1283,7 @@ mod tests {
             r1c(&[(1, 1)], &[(2, 1)], &[(5, 1)]),         // group Y hit: w5 − w3 ⇒ merge w5 → w3
             r1c(&[(7, 1)], &[(8, 1)], &[(6, 1)]),         // group X hit: [w6] − STALE [w3+w5]
         ];
-        let stats = analyze(&system(9, rows), 2);
+        let stats = analyze(&system(9, rows), 0..2);
         assert_eq!(stats.merged_cols, 1, "w5 → w3");
         assert_eq!(stats.eliminated_cols, 1, "w3 → w6/2");
         assert_eq!(stats.removable_cols, 2);

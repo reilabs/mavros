@@ -202,7 +202,7 @@ impl<'a> TotalityOracle<'a> {
     }
 
     /// The divisor of a `Div`/`Mod` is provably safe at `block`: nonzero via a constant or the
-    /// disequality channel, and free of the `i64::MIN / -1` overflow.
+    /// disequality channel, and, for a signed one, never `-1`, which overflows on `INT_MIN`.
     fn divisor_provably_safe(
         &self,
         kind: BinaryArithOpKind,
@@ -215,15 +215,10 @@ impl<'a> TotalityOracle<'a> {
         let field = self.ssa.field();
         let ty = self.value_type(divisor);
 
-        // `INT_MIN / -1` is a failure at **every** signed width, not just 64. What the operation
-        // owes is set by `divmod_guard::emit_divmod_failure_cond`, which builds the overflow
-        // disjunct from `1 << (bits - 1)` for any `bits` — so an `i8` division by a constant `-1`
-        // can still fail, and speculating it moves that failure onto a path that did not have it.
-        //
-        // Reasoning from the VM instead would gate this on `bits == 64`: `sdiv_int` sign-extends
-        // to i64, where only a 64-bit `MIN / -1` actually overflows. That is a true statement about
-        // `sdiv_int` and the wrong question — the check the speculation has to respect is the one
-        // mavros emits, not the one the interpreter would trap on.
+        // `INT_MIN / -1` fails at **every** signed width (see
+        // `divmod_guard::emit_divmod_failure_cond`), so speculating a division by `-1` moves a
+        // failure onto a path that did not have it. The check mavros emits decides this, not where
+        // `sdiv_int` happens to trap (only at 64 bits).
         let minus_one_hazard = kind.is_signed();
 
         if let Some(c) = self.cc.const_of(self.fid, divisor) {
@@ -393,14 +388,8 @@ mod int_semantics_conformance {
         ArithGroup::Xor,
     ];
 
-    /// The groups the model can reject, swept once for the whole test binary.
-    ///
-    /// [`can_reject`] returns early on the first rejection it finds, so the groups that answer
-    /// `false` (the bitwise three) are exactly the ones that pay for the entire corner matrix,
-    /// narrow and wide, to reach that answer.
-    ///
-    /// Both tests below need the same verdict for all ten groups, so computing it twice would spend
-    /// the expensive half of the sweep twice over to learn the same thing.
+    /// The groups the model can reject, computed once: the bitwise groups sweep the whole corner
+    /// matrix to answer `false`, and both tests below need all ten.
     static REJECTING: LazyLock<Vec<ArithGroup>> =
         LazyLock::new(|| ALL_GROUPS.into_iter().filter(|g| can_reject(*g)).collect());
 
@@ -425,9 +414,7 @@ mod int_semantics_conformance {
 
     /// Whether the model rejects this operation on any corner input at any width.
     fn can_reject(group: ArithGroup) -> bool {
-        // The bitwise groups have one signed form and `Shl` has one model operation, so both signs
-        // land on the same `IntOp` for four of the ten groups; sweeping it twice would double the
-        // work and prove nothing the first pass did not.
+        // Four groups map both signs to one `IntOp`; each is swept once.
         let mut ops: Vec<IntOp> = Vec::new();
         for signed in [false, true] {
             let op: IntOp = BinaryArithOpKind::with_sign(group, signed).into();
@@ -439,7 +426,7 @@ mod int_semantics_conformance {
         for op in ops {
             for &bits in corners::widths() {
                 let rhs = if op.is_shift() {
-                    corners::shift_amounts(bits, bits)
+                    corners::shift_amounts(bits)
                 } else {
                     corners::values(bits)
                 };
