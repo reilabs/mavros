@@ -4941,7 +4941,7 @@ mod tests {
         codegen.compile(&llssa, &FlowAnalysis::run(&llssa));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("subject.wasm");
-        let runtime = crate::wasm_runtime::locate_or_build();
+        let runtime = crate::wasm_runtime::locate_or_build().unwrap();
         codegen.compile_to_wasm(&path, WasmCompileOpts::fast(runtime));
 
         let engine = wasmtime::Engine::default();
