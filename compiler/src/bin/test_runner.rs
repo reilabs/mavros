@@ -120,12 +120,27 @@ const TEST_EXPECTATION_OVERRIDES: &[(&str, TestExpectation)] = &[
         "noir/test_programs/execution_failure/workspace_fail/crates/b",
         TestExpectation::ExecutionSuccess,
     ),
+    // These fixtures deliberately exercise host-side validation rather than a VM trap.
+    (
+        "noir_failure_tests/prover_file_missing",
+        TestExpectation::InputFailure,
+    ),
+    (
+        "noir_failure_tests/prover_missing_param",
+        TestExpectation::InputFailure,
+    ),
+    (
+        "noir_failure_tests/return_wrong_value",
+        TestExpectation::ReturnMismatch,
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestExpectation {
     ExecutionSuccess,
     ExecutionFailure,
+    InputFailure,
+    ReturnMismatch,
 }
 
 fn parse_output_arg(args: &[String]) -> PathBuf {
@@ -436,7 +451,7 @@ fn run_single_vm<F: MavrosField>(
             Ok(params) => params.as_slice(),
             Err(reason) => {
                 eprintln!("witgen run error: {reason}");
-                emit("END:WITGEN_RUN:error");
+                emit("END:WITGEN_RUN:input-error");
                 return None;
             }
         };
@@ -454,7 +469,7 @@ fn run_single_vm<F: MavrosField>(
                     declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
                 {
                     eprintln!("witgen run error: {reason}");
-                    emit("END:WITGEN_RUN:error");
+                    emit("END:WITGEN_RUN:return-mismatch");
                     return None;
                 }
                 emit("END:WITGEN_RUN:ok");
@@ -646,7 +661,7 @@ fn run_single_wasm(run: SingleRun<RawField>) {
             Ok(params) => params.as_slice(),
             Err(reason) => {
                 eprintln!("WASM run error: {reason}");
-                emit("END:WITGEN_WASM_RUN:error");
+                emit("END:WITGEN_WASM_RUN:input-error");
                 return None;
             }
         };
@@ -666,7 +681,7 @@ fn run_single_wasm(run: SingleRun<RawField>) {
                     declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
                 {
                     eprintln!("WASM run error: {reason}");
-                    emit("END:WITGEN_WASM_RUN:error");
+                    emit("END:WITGEN_WASM_RUN:return-mismatch");
                     return None;
                 }
                 emit("END:WITGEN_WASM_RUN:ok");
@@ -1078,7 +1093,7 @@ fn run_parent(
                             cmd.arg("--run-single")
                                 .arg(&entry.path)
                                 .args(["--field", field_name(field)]);
-                            if matches!(entry.expectation, TestExpectation::ExecutionFailure) {
+                            if entry.expectation != TestExpectation::ExecutionSuccess {
                                 cmd.arg("--expect-failure");
                             }
                             if analyze {
@@ -1174,7 +1189,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     let mut started = HashMap::<String, bool>::default();
     let mut ended = HashMap::<String, bool>::default();
     let mut rejected = HashMap::<String, bool>::default();
-    let mut errors = HashMap::<String, bool>::default();
+    let mut errors = HashMap::<String, String>::default();
     let mut rows = None;
     let mut cols = None;
     let mut analysis_stats = None;
@@ -1214,8 +1229,12 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
             ["END", key, "reject"] => {
                 rejected.insert(key.to_string(), true);
             }
-            ["END", key, "error"] => {
-                errors.insert(key.to_string(), true);
+            [
+                "END",
+                key,
+                kind @ ("error" | "input-error" | "return-mismatch"),
+            ] => {
+                errors.insert(key.to_string(), kind.to_string());
             }
             ["END", key, "fail"] => {
                 ended.insert(key.to_string(), false);
@@ -1236,9 +1255,18 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         .enumerate()
         .map(|(idx, &key)| {
             let raw_status = raw_step_status(key, &started, &ended, &rejected);
-            if errors.contains_key(key) {
-                // Input/configuration errors are never an expected runtime trap.
-                return (key.to_string(), Status::Fail);
+            if let Some(kind) = errors.get(key) {
+                // Only fixtures specifically testing this host rejection may accept it.
+                let expected = matches!(key, "WITGEN_RUN" | "WITGEN_WASM_RUN")
+                    && matches!(
+                        (expectation, kind.as_str()),
+                        (TestExpectation::InputFailure, "input-error")
+                            | (TestExpectation::ReturnMismatch, "return-mismatch")
+                    );
+                return (
+                    key.to_string(),
+                    if expected { Status::Pass } else { Status::Fail },
+                );
             }
             (
                 key.to_string(),
@@ -1593,11 +1621,17 @@ fn expected_step_status(
                 std::cmp::Ordering::Greater => Status::NotApplicable,
             }
         }
-        TestExpectation::ExecutionFailure => match key {
+        TestExpectation::ExecutionFailure
+        | TestExpectation::InputFailure
+        | TestExpectation::ReturnMismatch => match key {
             "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
-                Status::Fail | Status::Crash => Status::Pass,
-                Status::Pass => Status::Fail,
-                Status::Skip | Status::NotApplicable | Status::Rejected => raw_status,
+                Status::Fail | Status::Crash
+                    if expectation == TestExpectation::ExecutionFailure =>
+                {
+                    Status::Pass
+                }
+                Status::Pass | Status::Rejected => Status::Fail,
+                other => other,
             },
             // Correctness/leak checks need a witness, and the native AD
             // pipeline only feeds proving; neither is meaningful for a program
@@ -1610,7 +1644,10 @@ fn expected_step_status(
             | "AD_RUN"
             | "AD_CORRECT"
             | "AD_NOLEAK" => Status::NotApplicable,
-            _ => raw_status,
+            _ => match raw_status {
+                Status::Rejected => Status::Fail,
+                other => other,
+            },
         },
     }
 }
@@ -2376,13 +2413,70 @@ mod tests {
     }
 
     #[test]
+    fn host_failure_fixtures_accept_only_their_intended_rejection() {
+        for (name, expected_kind) in [
+            ("prover_file_missing", "input-error"),
+            ("prover_missing_param", "input-error"),
+            ("return_wrong_value", "return-mismatch"),
+        ] {
+            let display_name = format!("noir_failure_tests/{name}");
+            let mut entries = vec![TestEntry {
+                path: PathBuf::from(&display_name),
+                fixture_name: display_name.clone(),
+                display_name: display_name.clone(),
+                expectation: TestExpectation::ExecutionFailure,
+            }];
+            apply_test_expectation_overrides(&mut entries);
+            let expectation = entries[0].expectation;
+            assert_ne!(expectation, TestExpectation::ExecutionFailure);
+            for kind in ["input-error", "return-mismatch", "error", "fail", "ok"] {
+                let result = parse_child_output(
+                    &display_name,
+                    expectation,
+                    &lines(&[
+                        "START:COMPILED",
+                        "END:COMPILED:ok",
+                        "START:WITGEN_RUN",
+                        &format!("END:WITGEN_RUN:{kind}"),
+                        "START:WITGEN_WASM_RUN",
+                        &format!("END:WITGEN_WASM_RUN:{kind}"),
+                    ]),
+                );
+                let status = if kind == expected_kind {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                };
+                assert_eq!(result.steps["WITGEN_RUN"], status, "{name}: {kind}");
+                assert_eq!(result.steps["WITGEN_WASM_RUN"], status, "{name}: {kind}");
+                assert_eq!(result.steps["AD_RUN"], Status::NotApplicable);
+            }
+            let rejected = parse_child_output(
+                &display_name,
+                expectation,
+                &lines(&["START:COMPILED", "END:COMPILED:reject"]),
+            );
+            assert_eq!(rejected.steps["COMPILED"], Status::Fail);
+            let crashed = parse_child_output(
+                &display_name,
+                expectation,
+                &lines(&["START:WITGEN_RUN", "START:WITGEN_WASM_RUN"]),
+            );
+            assert_eq!(crashed.steps["WITGEN_RUN"], Status::Crash);
+            assert_eq!(crashed.steps["WITGEN_WASM_RUN"], Status::Crash);
+        }
+    }
+
+    #[test]
     fn input_errors_do_not_satisfy_expected_runtime_failures() {
-        let result = parse_child_output(
-            "invalid_input",
-            TestExpectation::ExecutionFailure,
-            &lines(&["START:WITGEN_RUN", "END:WITGEN_RUN:error"]),
-        );
-        assert_eq!(result.steps["WITGEN_RUN"], Status::Fail);
+        for kind in ["error", "input-error", "return-mismatch"] {
+            let result = parse_child_output(
+                "invalid_input",
+                TestExpectation::ExecutionFailure,
+                &lines(&["START:WITGEN_RUN", &format!("END:WITGEN_RUN:{kind}")]),
+            );
+            assert_eq!(result.steps["WITGEN_RUN"], Status::Fail);
+        }
     }
 
     #[test]

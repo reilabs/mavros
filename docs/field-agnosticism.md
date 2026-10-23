@@ -262,8 +262,8 @@ stays raw by design until P5. By file (count):
 
 The pinned Noir frontend accepts a field per compilation, including compile-time evaluation and
 modulus builtins. A `Field` literal crosses the boundary unreduced, as the signed integer written.
-The ABI parser checks values against the selected modulus, using BN254 elements as exact
-containers before conversion to the chosen VM field.
+The ABI parser checks values against the selected modulus, using BN254 elements as exact containers
+before conversion to the chosen VM field.
 
 - [x] `compiler/src/compiler/lowering/expression_converter.rs` — `integer_constant` takes a
       literal's magnitude into the configured field, refusing one at or above its modulus with a
@@ -271,9 +271,9 @@ containers before conversion to the chosen VM field.
 - [x] `compiler/src/driver.rs` — `run_noir_compiler_for_field` passes the selected field to both
       Noir's frontend and Mavros' AST lowering. Existing callers default to BN254.
 - [ ] Mavros' injected stdlib replacements contain BN254-only constants and casts (including
-      `u128 as Field`). Goldilocks compilation currently rejects these before monomorphization,
-      even for programs that do not call those replacements. Porting the libraries is separate
-      from running and reporting the test corpus under each field.
+      `u128 as Field`). Goldilocks compilation currently rejects these before monomorphization, even
+      for programs that do not call those replacements. Porting the libraries is separate from
+      running and reporting the test corpus under each field.
 - [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is unsatisfiable
       for a value at or above `2^n`, on every field: `LowerWitnessNarrowingCast` windows an `Int`
       source only, and a `Field` source relies on the frontend emitting `bit_range(v, 0, n)` before

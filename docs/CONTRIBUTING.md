@@ -61,15 +61,15 @@ pipeline stages, excluding intentionally ignored tests. Unsupported Goldilocks f
 decoding, and WASM operations remain visible as failures.
 
 CI runs the two fields as separate parallel corpus jobs. Pass `--field bn254` or
-`--field goldilocks` to run the full corpus for just one field locally. The regression job waits
-for both reports and combines them with
+`--field goldilocks` to run the full corpus for just one field locally. The regression job waits for
+both reports and combines them with
 `test-runner --merge-status STATUS-bn254.md STATUS-goldilocks.md --output STATUS.md`, then uses the
 usual baseline comparisons and result posting. Merging requires both fields and matching test lists.
 
 To investigate one package and field, run
 `cargo run --bin test-runner -- --run-single <package-path> --field goldilocks` inside the devshell.
-Single-package and determinism checks default to BN254. The CLI's normal compilation commands
-also retain their BN254 default; library callers can select a frontend field with
+Single-package and determinism checks default to BN254. The CLI's normal compilation commands also
+retain their BN254 default; library callers can select a frontend field with
 `Driver::run_noir_compiler_for_field`.
 
 ## Integer Semantics
