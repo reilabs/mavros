@@ -53,6 +53,25 @@ for Mavros:
   They are most easily run using `make func-test`.
 - The **unit tests** in the codebase can be run simply using `make unit-test`.
 
+The functional runner runs every discovered binary package under both BN254 and Goldilocks.
+`STATUS.md` identifies each row's field and reports a separate success percentage for each field;
+the regression and growth checks compare only matching test/field pairs. Older reports without a
+field column are treated as BN254 baselines. Success percentages count passed or not-applicable
+pipeline stages, excluding intentionally ignored tests. Unsupported Goldilocks frontend, input
+decoding, and WASM operations remain visible as failures.
+
+CI runs the two fields as separate parallel corpus jobs. Pass `--field bn254` or
+`--field goldilocks` to run the full corpus for just one field locally. The regression job waits for
+both reports and combines them with
+`test-runner --merge-status STATUS-bn254.md STATUS-goldilocks.md --output STATUS.md`, then uses the
+usual baseline comparisons and result posting. Merging requires both fields and matching test lists.
+
+To investigate one package and field, run
+`cargo run --bin test-runner -- --run-single <package-path> --field goldilocks` inside the devshell.
+Single-package and determinism checks default to BN254. The CLI's normal compilation commands also
+retain their BN254 default; library callers can select a frontend field with
+`Driver::run_noir_compiler_for_field`.
+
 ## Integer Semantics
 
 Noir is what determines the [semantics](./int-semantics.md) of integer operations in Mavros, so the

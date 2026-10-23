@@ -13,12 +13,15 @@ use std::{
 use cargo_metadata::MetadataCommand;
 
 use ark_ff::UniformRand as _;
-use mavros_artifacts::{Field as RawField, WitnessManifest};
+use mavros_artifacts::{
+    Field as RawField, FieldConfig, FieldId, Goldilocks, MavrosField, WitnessManifest,
+};
 use mavros_compiler::{
     Project, abi_helpers, api,
     collections::HashMap,
     compiler::codegen::{
         CodeGenOptions,
+        hlssa_to_r1cs::SealedR1CS,
         llssa_to_llvm::{WasmCompileOpts, wasm_debug_info_path},
         r1cs_compact,
     },
@@ -27,7 +30,7 @@ use mavros_compiler::{
     vm::interpreter,
     wasm_host, wasm_runtime,
 };
-use rand::SeedableRng;
+use rand::{RngCore, SeedableRng};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -36,7 +39,30 @@ fn main() {
     if args.len() >= 3 && args[1] == "--run-single" {
         let expect_failure = args[3..].iter().any(|a| a == "--expect-failure");
         let analyze = args[3..].iter().any(|a| a == "--analyze-r1cs");
-        run_single(PathBuf::from(&args[2]), expect_failure, analyze);
+        run_single(
+            PathBuf::from(&args[2]),
+            expect_failure,
+            analyze,
+            parse_field_arg(&args),
+        );
+        return;
+    }
+
+    // Combine the independently executed field reports without rerunning the corpus.
+    if args.get(1).is_some_and(|arg| arg == "--merge-status") {
+        let paths: Vec<_> = args[2..]
+            .iter()
+            .take_while(|arg| *arg != "--output")
+            .collect();
+        let reports: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                fs::read_to_string(path)
+                    .unwrap_or_else(|error| panic!("Cannot read {path}: {error}"))
+            })
+            .collect();
+        let markdown = merge_status_reports(&reports).expect("Cannot merge field reports");
+        fs::write(parse_output_arg(&args), markdown).expect("Cannot write merged report");
         return;
     }
 
@@ -73,7 +99,8 @@ fn main() {
     // its per-test stats to stdout. Off by default so CI (and the STATUS.md it produces) never pays
     // for it.
     let analyze = args.iter().any(|a| a == "--analyze-r1cs");
-    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS, analyze);
+    let fields = parse_fields_arg(&args);
+    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS, analyze, &fields);
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[
@@ -93,12 +120,27 @@ const TEST_EXPECTATION_OVERRIDES: &[(&str, TestExpectation)] = &[
         "noir/test_programs/execution_failure/workspace_fail/crates/b",
         TestExpectation::ExecutionSuccess,
     ),
+    // These fixtures deliberately exercise host-side validation rather than a VM trap.
+    (
+        "noir_failure_tests/prover_file_missing",
+        TestExpectation::InputFailure,
+    ),
+    (
+        "noir_failure_tests/prover_missing_param",
+        TestExpectation::InputFailure,
+    ),
+    (
+        "noir_failure_tests/return_wrong_value",
+        TestExpectation::ReturnMismatch,
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestExpectation {
     ExecutionSuccess,
     ExecutionFailure,
+    InputFailure,
+    ReturnMismatch,
 }
 
 fn parse_output_arg(args: &[String]) -> PathBuf {
@@ -127,6 +169,79 @@ fn parse_jobs_arg(args: &[String]) -> usize {
     1
 }
 
+const SUPPORTED_FIELDS: &[FieldId] = &[FieldId::Bn254, FieldId::Goldilocks];
+
+fn field_name(field: FieldId) -> &'static str {
+    match field {
+        FieldId::Bn254 => "bn254",
+        FieldId::Goldilocks => "goldilocks",
+    }
+}
+
+fn field_config(field: FieldId) -> FieldConfig {
+    match field {
+        FieldId::Bn254 => FieldConfig::bn254(),
+        FieldId::Goldilocks => FieldConfig::goldilocks(),
+    }
+}
+
+fn parse_field_arg(args: &[String]) -> FieldId {
+    let Some(index) = args.iter().position(|arg| arg == "--field") else {
+        return FieldId::Bn254;
+    };
+    match args.get(index + 1).map(String::as_str) {
+        Some("bn254") => FieldId::Bn254,
+        Some("goldilocks") => FieldId::Goldilocks,
+        _ => panic!("--field requires bn254 or goldilocks"),
+    }
+}
+
+fn parse_fields_arg(args: &[String]) -> Vec<FieldId> {
+    if args.iter().any(|arg| arg == "--field") {
+        vec![parse_field_arg(args)]
+    } else {
+        SUPPORTED_FIELDS.to_vec()
+    }
+}
+
+fn random_field<F: MavrosField>(rng: &mut rand::rngs::StdRng) -> F {
+    match F::ID {
+        // Preserve the BN254 harness's seeded coefficient sequence.
+        FieldId::Bn254 => F::from_element(ark_bn254::Fr::rand(rng).into()),
+        FieldId::Goldilocks => loop {
+            if let Some(value) = F::from_canonical_limbs(&[rng.next_u64()]) {
+                break value;
+            }
+        },
+    }
+}
+
+struct SingleRun<F: MavrosField> {
+    driver: Driver,
+    r1cs: Option<SealedR1CS<F>>,
+    inputs: Result<ProverInputs<F>, String>,
+    manifest: Manifest,
+}
+
+fn run_single(root: PathBuf, expect_failure: bool, analyze: bool, field: FieldId) {
+    match field {
+        FieldId::Bn254 => {
+            if let Some(run) = run_single_vm::<RawField>(root, expect_failure, analyze) {
+                run_single_wasm(run);
+            }
+        }
+        FieldId::Goldilocks => {
+            if let Some(run) = run_single_vm::<Goldilocks>(root, expect_failure, analyze) {
+                if run.r1cs.is_some() {
+                    emit("START:WASM_COMPILE");
+                    eprintln!("WASM compile error: the WASM backend does not support Goldilocks");
+                    emit("END:WASM_COMPILE:fail");
+                }
+            }
+        }
+    }
+}
+
 // ── Child: run a single test ──────────────────────────────────────────
 
 fn emit(line: &str) {
@@ -146,16 +261,14 @@ fn artifact_hashes_enabled() -> bool {
 }
 
 /// The witness's storage cells, in order, as bytes to hash.
-fn witness_bytes(witness: &[RawField]) -> Vec<u8> {
-    let mut cells = [0u64; <RawField as mavros_artifacts::MavrosField>::STORAGE_CELLS];
-    witness
-        .iter()
-        .flat_map(|value| {
-            mavros_artifacts::MavrosField::to_frame_cells(*value, &mut cells);
-            cells.map(u64::to_le_bytes)
-        })
-        .flatten()
-        .collect()
+fn witness_bytes<F: MavrosField>(witness: &[F]) -> Vec<u8> {
+    let mut cells = vec![0u64; F::STORAGE_CELLS];
+    let mut bytes = Vec::with_capacity(witness.len() * F::STORAGE_CELLS * 8);
+    for value in witness {
+        value.to_frame_cells(&mut cells);
+        bytes.extend(cells.iter().flat_map(|cell| cell.to_le_bytes()));
+    }
+    bytes
 }
 
 fn emit_artifact_hash(artifact: &str, bytes: &[u8]) {
@@ -165,12 +278,16 @@ fn emit_artifact_hash(artifact: &str, bytes: &[u8]) {
     ));
 }
 
-/// Runs every pipeline step for one test directory, emitting START/END
+/// Runs the native pipeline for one test directory, emitting START/END
 /// markers for the parent to parse. With `expect_failure` (execution_failure /
 /// execution_panic tests) the native AD pipeline is skipped: AD output only
 /// feeds proving, and a program whose witgen is expected to trap is never
-/// proven. WASM paths still run as compile/runtime sanity checks.
-fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
+/// proven. The caller subsequently runs the BN254 WASM compile/runtime sanity checks.
+fn run_single_vm<F: MavrosField>(
+    root: PathBuf,
+    expect_failure: bool,
+    analyze: bool,
+) -> Option<SingleRun<F>> {
     let checking_codegen = CodeGenOptions {
         check_constraints: true,
         include_debug_info: true,
@@ -183,12 +300,12 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         Err(error) => {
             eprintln!("Project error: {error}");
             emit("END:COMPILED:fail");
-            return;
+            return None;
         }
     };
     let mut driver = Driver::new(project, false);
     let compile_result = (|| -> Result<(), DriverError> {
-        driver.run_noir_compiler()?;
+        driver.run_noir_compiler_for_field(field_config(F::ID))?;
         driver.make_struct_access_static()?;
         driver.monomorphize()?;
         driver.spill_witness()?;
@@ -203,26 +320,32 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         // real regression is never masked.
         Err(error @ DriverError::NoirCompilerError { .. }) => {
             eprintln!("Noir compiler rejected program: {error}");
-            emit("END:COMPILED:reject");
-            return;
+            // A foreign-field frontend error can mean an unsupported ABI or builtin,
+            // rather than the runtime failure this fixture intends to exercise.
+            emit(if F::ID == FieldId::Bn254 {
+                "END:COMPILED:reject"
+            } else {
+                "END:COMPILED:fail"
+            });
+            return None;
         }
         Err(
             error @ (DriverError::AssertConstantFailed(_) | DriverError::UnsatisfiableProgram(_)),
         ) => {
             eprintln!("Mavros compiler rejected program: {error}");
             emit("END:COMPILED:reject");
-            return;
+            return None;
         }
         Err(e) => {
             eprintln!("Compile error: {e}");
             emit("END:COMPILED:fail");
-            return;
+            return None;
         }
     }
 
     // 2. R1CS
     emit("START:R1CS");
-    let r1cs = match driver.generate_r1cs::<RawField>() {
+    let r1cs = match driver.generate_r1cs::<F>() {
         Ok(r) => {
             let rows = r.constraints.len();
             let cols = r.witness_layout.size();
@@ -310,8 +433,8 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let inputs =
-        api::read_prover_inputs(driver.package_root(), driver.abi()).map_err(|e| e.to_string());
+    let inputs = api::read_prover_inputs_for_field::<F>(driver.package_root(), driver.abi())
+        .map_err(|e| e.to_string());
     let ordered_params = inputs.as_ref().map(|(params, _)| params.clone());
 
     let manifest = r1cs.as_ref().map(|r1cs| {
@@ -328,7 +451,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             Ok(params) => params.as_slice(),
             Err(reason) => {
                 eprintln!("witgen run error: {reason}");
-                emit("END:WITGEN_RUN:fail");
+                emit("END:WITGEN_RUN:input-error");
                 return None;
             }
         };
@@ -346,7 +469,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
                     declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
                 {
                     eprintln!("witgen run error: {reason}");
-                    emit("END:WITGEN_RUN:fail");
+                    emit("END:WITGEN_RUN:return-mismatch");
                     return None;
                 }
                 emit("END:WITGEN_RUN:ok");
@@ -402,8 +525,8 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             emit("START:AD_RUN");
             let r1cs = r1cs.as_ref().unwrap();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-            let ad_coeffs: Vec<RawField> = (0..r1cs.constraints.len())
-                .map(|_| ark_bn254::Fr::rand(&mut rng)) // FIELD-ASSUMPTION: L1-direct-ref (2 sites)
+            let ad_coeffs: Vec<F> = (0..r1cs.constraints.len())
+                .map(|_| random_field::<F>(&mut rng))
                 .collect();
             match interpreter::run_ad(
                 &artifact.binary,
@@ -446,6 +569,28 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             "END:AD_NOLEAK:fail"
         });
     }
+
+    Some(SingleRun {
+        driver,
+        r1cs,
+        inputs,
+        manifest,
+    })
+}
+
+fn run_single_wasm(run: SingleRun<RawField>) {
+    let SingleRun {
+        mut driver,
+        r1cs,
+        inputs,
+        manifest,
+    } = run;
+    let checking_codegen = CodeGenOptions {
+        check_constraints: true,
+        include_debug_info: true,
+    };
+    let source_path_root = driver.package_root().to_path_buf();
+    let ordered_params = inputs.as_ref().map(|(params, _)| params.clone());
 
     // 10. Compile WASM: a single module exporting both the witgen and AD entry
     //     points (depends on R1CS).
@@ -516,7 +661,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
             Ok(params) => params.as_slice(),
             Err(reason) => {
                 eprintln!("WASM run error: {reason}");
-                emit("END:WITGEN_WASM_RUN:fail");
+                emit("END:WITGEN_WASM_RUN:input-error");
                 return None;
             }
         };
@@ -524,7 +669,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         let entry_blob_field_count = driver.entry_blob_field_count();
         if interpreter::flattened_param_count(params) != entry_blob_field_count {
             eprintln!("WASM run error: Unexpected number of inputs supplied");
-            emit("END:WITGEN_WASM_RUN:fail");
+            emit("END:WITGEN_WASM_RUN:error");
             return None;
         }
 
@@ -536,7 +681,7 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
                     declared_return_mismatch(&manifest, &inputs, &result.out_wit_pre_comm)
                 {
                     eprintln!("WASM run error: {reason}");
-                    emit("END:WITGEN_WASM_RUN:fail");
+                    emit("END:WITGEN_WASM_RUN:return-mismatch");
                     return None;
                 }
                 emit("END:WITGEN_WASM_RUN:ok");
@@ -632,18 +777,18 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
     }
 }
 
-type ProverInputs = (
-    Vec<interpreter::InputValueOrdered>,
-    Option<interpreter::InputValueOrdered>,
+type ProverInputs<F> = (
+    Vec<interpreter::InputValueOrdered<F>>,
+    Option<interpreter::InputValueOrdered<F>>,
 );
 
 type Manifest = Option<Result<WitnessManifest, String>>;
 
 /// The parameter columns only: the declared return was already scored at the run step.
-fn check_parameter_columns(
+fn check_parameter_columns<F: MavrosField>(
     manifest: &Manifest,
-    inputs: &Result<ProverInputs, String>,
-    wit_pre_comm: &[RawField],
+    inputs: &Result<ProverInputs<F>, String>,
+    wit_pre_comm: &[F],
 ) -> bool {
     let (Some(manifest), Ok((params, _))) = (manifest, inputs) else {
         return false;
@@ -658,10 +803,10 @@ fn check_parameter_columns(
         .is_ok()
 }
 
-fn declared_return_mismatch(
+fn declared_return_mismatch<F: MavrosField>(
     manifest: &Manifest,
-    inputs: &Result<ProverInputs, String>,
-    wit_pre_comm: &[RawField],
+    inputs: &Result<ProverInputs<F>, String>,
+    wit_pre_comm: &[F],
 ) -> Option<String> {
     let Ok((_, Some(declared_return))) = inputs else {
         return None;
@@ -699,6 +844,7 @@ const STEP_KEYS: &[&str] = &[
 
 struct TestResult {
     name: String,
+    field: FieldId,
     steps: HashMap<String, Status>,
     rows: Option<usize>,
     cols: Option<usize>,
@@ -846,7 +992,13 @@ fn apply_test_expectation_overrides(entries: &mut [TestEntry]) {
     }
 }
 
-fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: bool) {
+fn run_parent(
+    output_path: &Path,
+    jobs: usize,
+    ignored_tests: &[&str],
+    analyze: bool,
+    fields: &[FieldId],
+) {
     let mut entries: Vec<TestEntry> = Vec::new();
 
     // 1. Local noir_tests/ directory
@@ -901,15 +1053,20 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
     // If children built it themselves, their `cargo metadata`/`cargo build` invocations would
     // walk the noir git checkout while other children create and delete `mavros_debug` dirs for
     // tests living inside it, crashing whichever child loses the race.
-    let wasm_runtime_lib = wasm_runtime::locate_or_build();
-    eprintln!("Built wasm runtime at: {}", wasm_runtime_lib.display());
+    let wasm_runtime_lib = fields
+        .contains(&FieldId::Bn254)
+        .then(wasm_runtime::locate_or_build);
+    if let Some(path) = &wasm_runtime_lib {
+        eprintln!("Built wasm runtime at: {}", path.display());
+    }
 
     let exe = env::current_exe().expect("Cannot determine own exe path");
-    let total = entries.len();
+    let total = entries.len() * fields.len();
     let ignored_count = entries
         .iter()
         .filter(|entry| is_ignored_test(entry, ignored_tests))
-        .count();
+        .count()
+        * fields.len();
     eprintln!("Running {total} test(s) with {jobs} parallel job(s) ({ignored_count} ignored)");
 
     let next_idx = AtomicUsize::new(0);
@@ -921,46 +1078,53 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
             scope.spawn(|| {
                 loop {
                     let idx = next_idx.fetch_add(1, Ordering::SeqCst);
-                    if idx >= total {
+                    if idx >= entries.len() {
                         break;
                     }
                     let entry = &entries[idx];
-                    if is_ignored_test(entry, ignored_tests) {
-                        let result = ignored_test_result(&entry.display_name);
+                    // Each driver clears its package's mavros_debug directory. Run fields for
+                    // one package sequentially so they never delete each other's dumps.
+                    for (field_idx, &field) in fields.iter().enumerate() {
+                        let ignored = is_ignored_test(entry, ignored_tests);
+                        let mut result = if ignored {
+                            ignored_test_result(&entry.display_name)
+                        } else {
+                            let mut cmd = Command::new(&exe);
+                            cmd.arg("--run-single")
+                                .arg(&entry.path)
+                                .args(["--field", field_name(field)]);
+                            if entry.expectation != TestExpectation::ExecutionSuccess {
+                                cmd.arg("--expect-failure");
+                            }
+                            if analyze {
+                                cmd.arg("--analyze-r1cs");
+                            }
+                            if let Some(path) = &wasm_runtime_lib {
+                                cmd.env(wasm_runtime::WASM_RUNTIME_LIB_ENV, path);
+                            }
+                            let mut child = cmd
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::inherit())
+                                .spawn()
+                                .expect("Failed to spawn child");
+                            let stdout = child.stdout.take().unwrap();
+                            let lines: Vec<String> = BufReader::new(stdout)
+                                .lines()
+                                .map_while(Result::ok)
+                                .collect();
+                            let _ = child.wait();
+                            parse_child_output(&entry.display_name, entry.expectation, &lines)
+                        };
+                        result.field = field;
                         let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                        eprintln!("[{n}/{total}] {} (ignored)", entry.display_name);
-                        *slots[idx].lock().unwrap() = Some(result);
-                        continue;
+                        let suffix = if ignored { " (ignored)" } else { "" };
+                        eprintln!(
+                            "[{n}/{total}] {} [{}]{suffix}",
+                            entry.display_name,
+                            field_name(field)
+                        );
+                        *slots[idx * fields.len() + field_idx].lock().unwrap() = Some(result);
                     }
-
-                    let mut cmd = Command::new(&exe);
-                    cmd.arg("--run-single").arg(&entry.path);
-                    if matches!(entry.expectation, TestExpectation::ExecutionFailure) {
-                        cmd.arg("--expect-failure");
-                    }
-                    if analyze {
-                        cmd.arg("--analyze-r1cs");
-                    }
-                    let mut child = cmd
-                        .env(wasm_runtime::WASM_RUNTIME_LIB_ENV, &wasm_runtime_lib)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::inherit())
-                        .spawn()
-                        .expect("Failed to spawn child");
-
-                    let stdout = child.stdout.take().unwrap();
-                    let lines: Vec<String> = BufReader::new(stdout)
-                        .lines()
-                        .map_while(Result::ok)
-                        .collect();
-
-                    let _ = child.wait();
-                    let result = parse_child_output(&entry.display_name, entry.expectation, &lines);
-
-                    let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                    eprintln!("[{n}/{total}] {}", entry.display_name);
-
-                    *slots[idx].lock().unwrap() = Some(result);
                 }
             });
         }
@@ -976,7 +1140,7 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
     if analyze {
         for r in &results {
             if let Some(stats) = &r.analysis_stats {
-                println!("{}: {stats}", r.name);
+                println!("{} [{}]: {stats}", r.name, field_name(r.field));
             }
         }
     }
@@ -1009,6 +1173,7 @@ fn ignored_test_result(name: &str) -> TestResult {
 
     TestResult {
         name: name.to_string(),
+        field: FieldId::Bn254,
         steps,
         rows: None,
         cols: None,
@@ -1024,6 +1189,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
     let mut started = HashMap::<String, bool>::default();
     let mut ended = HashMap::<String, bool>::default();
     let mut rejected = HashMap::<String, bool>::default();
+    let mut errors = HashMap::<String, String>::default();
     let mut rows = None;
     let mut cols = None;
     let mut analysis_stats = None;
@@ -1063,6 +1229,13 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
             ["END", key, "reject"] => {
                 rejected.insert(key.to_string(), true);
             }
+            [
+                "END",
+                key,
+                kind @ ("error" | "input-error" | "return-mismatch"),
+            ] => {
+                errors.insert(key.to_string(), kind.to_string());
+            }
             ["END", key, "fail"] => {
                 ended.insert(key.to_string(), false);
             }
@@ -1082,6 +1255,19 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
         .enumerate()
         .map(|(idx, &key)| {
             let raw_status = raw_step_status(key, &started, &ended, &rejected);
+            if let Some(kind) = errors.get(key) {
+                // Only fixtures specifically testing this host rejection may accept it.
+                let expected = matches!(key, "WITGEN_RUN" | "WITGEN_WASM_RUN")
+                    && matches!(
+                        (expectation, kind.as_str()),
+                        (TestExpectation::InputFailure, "input-error")
+                            | (TestExpectation::ReturnMismatch, "return-mismatch")
+                    );
+                return (
+                    key.to_string(),
+                    if expected { Status::Pass } else { Status::Fail },
+                );
+            }
             (
                 key.to_string(),
                 expected_step_status(idx, key, raw_status, expectation, reject_idx),
@@ -1091,6 +1277,7 @@ fn parse_child_output(name: &str, expectation: TestExpectation, lines: &[String]
 
     TestResult {
         name: name.to_string(),
+        field: FieldId::Bn254,
         steps,
         rows,
         cols,
@@ -1434,11 +1621,17 @@ fn expected_step_status(
                 std::cmp::Ordering::Greater => Status::NotApplicable,
             }
         }
-        TestExpectation::ExecutionFailure => match key {
+        TestExpectation::ExecutionFailure
+        | TestExpectation::InputFailure
+        | TestExpectation::ReturnMismatch => match key {
             "WITGEN_RUN" | "WITGEN_WASM_RUN" => match raw_status {
-                Status::Fail | Status::Crash => Status::Pass,
-                Status::Pass => Status::Fail,
-                Status::Skip | Status::NotApplicable | Status::Rejected => raw_status,
+                Status::Fail | Status::Crash
+                    if expectation == TestExpectation::ExecutionFailure =>
+                {
+                    Status::Pass
+                }
+                Status::Pass | Status::Rejected => Status::Fail,
+                other => other,
             },
             // Correctness/leak checks need a witness, and the native AD
             // pipeline only feeds proving; neither is meaningful for a program
@@ -1451,7 +1644,10 @@ fn expected_step_status(
             | "AD_RUN"
             | "AD_CORRECT"
             | "AD_NOLEAK" => Status::NotApplicable,
-            _ => raw_status,
+            _ => match raw_status {
+                Status::Rejected => Status::Fail,
+                other => other,
+            },
         },
     }
 }
@@ -1460,6 +1656,7 @@ fn expected_step_status(
 
 struct ParsedRow {
     name: String,
+    field: String,
     cells: Vec<String>,
     rows: Option<usize>,
     cols: Option<usize>,
@@ -1493,6 +1690,7 @@ const STATUS_COLUMNS: &[&str] = &[
     "AD WASM Run",
     "AD WASM Correct",
     "AD WASM No Leak",
+    "Field",
 ];
 
 fn markdown_cells(line: &str) -> Vec<String> {
@@ -1544,6 +1742,8 @@ fn parse_status_content(content: &str) -> StatusTable {
         let parse_count = |name: &str| get(name).and_then(|cell| cell.parse::<usize>().ok());
         rows.push(ParsedRow {
             name: get("Test").unwrap_or_default().to_string(),
+            // Reports before field selection contain BN254 results only.
+            field: get("Field").unwrap_or("bn254").to_string(),
             rows: parse_count("Rows"),
             cols: parse_count("Cols"),
             size_bytes: parse_count("Bytecode Size"),
@@ -1554,6 +1754,76 @@ fn parse_status_content(content: &str) -> StatusTable {
         });
     }
     StatusTable { columns, rows }
+}
+
+/// Merge one complete report per supported field. Refuse missing fields, duplicate rows and
+/// different test inventories so CI never publishes a partial corpus as a complete result.
+fn merge_status_reports(reports: &[String]) -> Result<String, String> {
+    if reports.len() != SUPPORTED_FIELDS.len() {
+        return Err("expected one report per supported field".into());
+    }
+    let mut seen_fields = Vec::new();
+    let mut order = HashMap::default();
+    let mut results = Vec::new();
+    for (report_index, report) in reports.iter().enumerate() {
+        let table = parse_status_content(report);
+        validate_layout(&table, Path::new("field report"));
+        if table.rows.is_empty() || !table.columns.contains_key("Field") {
+            return Err("field report must contain a Field column and test rows".into());
+        }
+        let field = match table.rows[0].field.as_str() {
+            "bn254" => FieldId::Bn254,
+            "goldilocks" => FieldId::Goldilocks,
+            other => return Err(format!("unsupported report field: {other}")),
+        };
+        if seen_fields.contains(&field) {
+            return Err(format!("duplicate report for {}", field_name(field)));
+        }
+        seen_fields.push(field);
+        let mut names = HashMap::default();
+        for (index, row) in table.rows.iter().enumerate() {
+            if row.field != field_name(field) {
+                return Err("each input report must contain exactly one field".into());
+            }
+            if names.insert(row.name.clone(), index).is_some() {
+                return Err(format!("duplicate test row: {}", row.name));
+            }
+            let steps = STEP_KEYS
+                .iter()
+                .zip(REGRESSION_COLS)
+                .map(|(&key, &column)| {
+                    let status = match table.cell(row, column).unwrap() {
+                        "✅" => Status::Pass,
+                        "❌" => Status::Fail,
+                        "💥" => Status::Crash,
+                        "➖" => Status::Skip,
+                        "N/A" => Status::NotApplicable,
+                        other => return Err(format!("invalid status {other:?} for {column}")),
+                    };
+                    Ok((key.to_string(), status))
+                })
+                .collect::<Result<_, String>>()?;
+            results.push(TestResult {
+                name: row.name.clone(),
+                field,
+                steps,
+                rows: row.rows,
+                cols: row.cols,
+                binary_bytes: row.size_bytes,
+                vm_debug_bytes: row.vm_debug_size_bytes,
+                wasm_bytes: row.wasm_size_bytes,
+                wasm_debug_bytes: row.wasm_debug_size_bytes,
+                analysis_stats: None,
+            });
+        }
+        if report_index == 0 {
+            order = names;
+        } else if names.len() != order.len() || names.keys().any(|name| !order.contains_key(name)) {
+            return Err("field reports contain different test inventories".into());
+        }
+    }
+    results.sort_by_key(|result| (order[&result.name], result.field.code()));
+    Ok(render_markdown(&results))
 }
 
 /// The stage columns compared by the regression/growth checks, by header name.
@@ -1616,15 +1886,18 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
     validate_layout(&baseline, baseline_path);
     validate_layout(&current, current_path);
 
-    let base_map: HashMap<&str, &ParsedRow> =
-        baseline.rows.iter().map(|r| (r.name.as_str(), r)).collect();
+    let base_map: HashMap<(&str, &str), &ParsedRow> = baseline
+        .rows
+        .iter()
+        .map(|r| ((r.field.as_str(), r.name.as_str()), r))
+        .collect();
 
     let mut regressions = Vec::new();
     for cur in &current.rows {
         if row_is_ignored(&current, cur) {
             continue;
         }
-        let Some(base) = base_map.get(cur.name.as_str()) else {
+        let Some(base) = base_map.get(&(cur.field.as_str(), cur.name.as_str())) else {
             continue;
         };
         for &col_name in REGRESSION_COLS {
@@ -1634,7 +1907,10 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
             // `✅ → N/A` is not a regression: it means the stage stopped being applicable (e.g. a
             // failure test whose rejection now happens earlier), which is still a handled cell.
             if base_val == "✅" && !cell_is_handled(cur_val) {
-                regressions.push(format!("  {} / {}: ✅ → {}", cur.name, col_name, cur_val));
+                regressions.push(format!(
+                    "  {} [{}] / {}: ✅ → {}",
+                    cur.name, cur.field, col_name, cur_val
+                ));
             }
         }
     }
@@ -1657,8 +1933,21 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     validate_layout(&baseline, baseline_path);
     validate_layout(&current, current_path);
 
-    let base_map: HashMap<&str, &ParsedRow> =
-        baseline.rows.iter().map(|r| (r.name.as_str(), r)).collect();
+    for &field in SUPPORTED_FIELDS {
+        let name = field_name(field);
+        if current.rows.iter().any(|row| row.field == name) {
+            println!("## {name}\n");
+            check_growth_for_field(&baseline, &current, name);
+        }
+    }
+}
+
+fn check_growth_for_field(baseline: &StatusTable, current: &StatusTable, field: &str) {
+    let base_map: HashMap<(&str, &str), &ParsedRow> = baseline
+        .rows
+        .iter()
+        .map(|r| ((r.field.as_str(), r.name.as_str()), r))
+        .collect();
 
     // Track stats for existing tests (tests in both baseline and current)
     let mut new_checkmarks: Vec<(String, &str)> = Vec::new(); // (test_name, col_name)
@@ -1679,10 +1968,10 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
     let mut wasm_changes = MetricChanges::new("WASM Size (bytes)");
     let mut wasm_debug_changes = MetricChanges::new("WASM Debug Sidecar Size (bytes)");
 
-    for cur in &current.rows {
+    for cur in current.rows.iter().filter(|row| row.field == field) {
         // An ignored test is outside the comparison rather than sixteen failed stages. Excluding
         // the row also keeps it from diluting the success-rate summary.
-        if row_is_ignored(&current, cur) {
+        if row_is_ignored(current, cur) {
             continue;
         }
 
@@ -1696,7 +1985,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
             }
         }
 
-        let Some(base) = base_map.get(cur.name.as_str()) else {
+        let Some(base) = base_map.get(&(cur.field.as_str(), cur.name.as_str())) else {
             continue;
         };
 
@@ -1762,7 +2051,7 @@ fn check_growth(baseline_path: &Path, current_path: &Path) {
 
     // Always print overall success rate
     println!(
-        "**Overall success rate on test cases: {:.1}%**\n",
+        "**{field} success rate on test cases: {:.1}%**\n",
         total_current_pct
     );
 
@@ -1918,7 +2207,7 @@ fn render_markdown(results: &[TestResult]) -> String {
             .wasm_debug_bytes
             .map_or("-".to_string(), |v| v.to_string());
         md.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             r.name,
             s("COMPILED"),
             s("R1CS"),
@@ -1942,10 +2231,50 @@ fn render_markdown(results: &[TestResult]) -> String {
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
             s("AD_WASM_NOLEAK"),
+            field_name(r.field),
         ));
     }
 
+    md.push('\n');
+    md.push_str(
+        "Success rates count passed or not-applicable stages; ignored tests are excluded.\n\n",
+    );
+    for &field in SUPPORTED_FIELDS {
+        if !results.iter().any(|result| result.field == field) {
+            continue;
+        }
+        let (handled, total) = success_counts(results, field);
+        let percent = if total == 0 {
+            0.0
+        } else {
+            100.0 * handled as f64 / total as f64
+        };
+        md.push_str(&format!(
+            "- **{} success rate: {percent:.1}%** ({handled}/{total} stages)\n",
+            field_name(field)
+        ));
+    }
     md
+}
+
+fn success_counts(results: &[TestResult], field: FieldId) -> (usize, usize) {
+    let mut handled = 0;
+    let mut total = 0;
+    for result in results.iter().filter(|result| result.field == field) {
+        if result.steps.values().all(|status| *status == Status::Skip) {
+            continue;
+        }
+        for &key in STEP_KEYS {
+            total += 1;
+            if matches!(
+                result.steps.get(key),
+                Some(Status::Pass | Status::NotApplicable)
+            ) {
+                handled += 1;
+            }
+        }
+    }
+    (handled, total)
 }
 
 #[cfg(test)]
@@ -1954,6 +2283,268 @@ mod tests {
 
     fn lines(input: &[&str]) -> Vec<String> {
         input.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn corpus_field_selection_defaults_to_every_field() {
+        assert_eq!(parse_fields_arg(&lines(&["test-runner"])), SUPPORTED_FIELDS);
+        for &field in SUPPORTED_FIELDS {
+            assert_eq!(
+                parse_fields_arg(&lines(&["test-runner", "--field", field_name(field)])),
+                vec![field]
+            );
+        }
+    }
+
+    #[test]
+    fn separate_field_reports_merge_to_the_combined_report() {
+        let mut results = Vec::new();
+        for name in ["suite/z", "suite/a"] {
+            for &field in SUPPORTED_FIELDS {
+                let mut result = parse_child_output(
+                    name,
+                    TestExpectation::ExecutionSuccess,
+                    &lines(&[
+                        "START:COMPILED",
+                        "END:COMPILED:ok",
+                        "START:R1CS",
+                        "END:R1CS:ok:10:20",
+                        "START:COMPILE",
+                        "END:COMPILE:ok:30:40",
+                        "START:WITGEN_RUN",
+                        "END:WITGEN_RUN:error",
+                        "START:AD_RUN",
+                        "START:WASM_COMPILE",
+                        "END:WASM_COMPILE:ok:50:60",
+                    ]),
+                );
+                result.field = field;
+                result
+                    .steps
+                    .insert("AD_CORRECT".into(), Status::NotApplicable);
+                results.push(result);
+            }
+        }
+        let expected = render_markdown(&results);
+        let (bn254, mut goldilocks): (Vec<_>, Vec<_>) = results
+            .into_iter()
+            .partition(|result| result.field == FieldId::Bn254);
+        goldilocks.reverse();
+        let bn254 = render_markdown(&bn254);
+        assert!(!bn254.contains("goldilocks success rate"));
+        let goldilocks = render_markdown(&goldilocks);
+        assert!(!goldilocks.contains("bn254 success rate"));
+        assert_eq!(
+            merge_status_reports(&[bn254, goldilocks]).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn merging_refuses_incomplete_or_ambiguous_field_reports() {
+        let bn254 = single_row_status("suite/test", "✅");
+        let goldilocks = bn254.replace("bn254", "goldilocks");
+        assert!(merge_status_reports(&[]).is_err());
+        assert!(merge_status_reports(&[bn254.clone()]).is_err());
+        assert!(merge_status_reports(&[bn254.clone(), bn254.clone()]).is_err());
+        assert!(
+            merge_status_reports(&[bn254.clone(), goldilocks.replace("suite/test", "other")])
+                .is_err()
+        );
+        assert!(
+            merge_status_reports(&[bn254.clone(), goldilocks.replace("✅", "unknown")]).is_err()
+        );
+        let duplicate = format!("{goldilocks}{}\n", goldilocks.lines().nth(2).unwrap());
+        assert!(merge_status_reports(&[bn254.clone(), duplicate]).is_err());
+        let mixed = format!("{goldilocks}{}\n", bn254.lines().nth(2).unwrap());
+        assert!(merge_status_reports(&[bn254, mixed]).is_err());
+    }
+
+    #[test]
+    fn fields_have_independent_rates_and_round_trip_without_collisions() {
+        let mut bn254 = ignored_test_result("same/test");
+        bn254
+            .steps
+            .values_mut()
+            .for_each(|status| *status = Status::Pass);
+        let mut goldilocks = ignored_test_result("same/test");
+        goldilocks.field = FieldId::Goldilocks;
+        goldilocks.steps.insert("COMPILED".into(), Status::Fail);
+        let mut ignored = ignored_test_result("ignored/test");
+        ignored.field = FieldId::Goldilocks;
+        let results = [bn254, goldilocks, ignored];
+        assert_eq!(success_counts(&results, FieldId::Bn254), (16, 16));
+        assert_eq!(success_counts(&results, FieldId::Goldilocks), (0, 16));
+        let markdown = render_markdown(&results);
+        assert!(markdown.contains("bn254 success rate: 100.0%"));
+        assert!(markdown.contains("goldilocks success rate: 0.0%"));
+        let table = parse_status_content(&markdown);
+        assert_eq!(table.rows.len(), 3);
+        assert_eq!(table.rows[0].field, "bn254");
+        assert_eq!(table.rows[1].field, "goldilocks");
+        assert_eq!(table.rows[0].name, table.rows[1].name);
+    }
+
+    #[test]
+    fn regression_checks_match_fields_and_accept_legacy_bn254_baselines() {
+        let baseline = tempfile::NamedTempFile::new().unwrap();
+        let current = tempfile::NamedTempFile::new().unwrap();
+        let bn_pass = single_row_status("same/test", "✅");
+        let gold_pass = bn_pass.replace("bn254", "goldilocks");
+        let gold_fail = single_row_status("same/test", "❌").replace("bn254", "goldilocks");
+        let append_row =
+            |table: &str, other: &str| format!("{table}{}\n", other.lines().nth(2).unwrap());
+        fs::write(baseline.path(), append_row(&bn_pass, &gold_fail)).unwrap();
+        // Reversing the row order must not compare Goldilocks failures against BN254 passes.
+        fs::write(current.path(), append_row(&gold_fail, &bn_pass)).unwrap();
+        assert_eq!(check_regression(baseline.path(), current.path()), 0);
+        fs::write(baseline.path(), append_row(&bn_pass, &gold_pass)).unwrap();
+        assert_eq!(check_regression(baseline.path(), current.path()), 1);
+        let legacy: String = bn_pass
+            .lines()
+            .map(|line| {
+                let mut cells = markdown_cells(line);
+                cells.pop();
+                format!("| {} |\n", cells.join(" | "))
+            })
+            .collect();
+        fs::write(baseline.path(), legacy).unwrap();
+        assert_eq!(check_regression(baseline.path(), current.path()), 0);
+    }
+
+    #[test]
+    fn host_failure_fixtures_accept_only_their_intended_rejection() {
+        for (name, expected_kind) in [
+            ("prover_file_missing", "input-error"),
+            ("prover_missing_param", "input-error"),
+            ("return_wrong_value", "return-mismatch"),
+        ] {
+            let display_name = format!("noir_failure_tests/{name}");
+            let mut entries = vec![TestEntry {
+                path: PathBuf::from(&display_name),
+                fixture_name: display_name.clone(),
+                display_name: display_name.clone(),
+                expectation: TestExpectation::ExecutionFailure,
+            }];
+            apply_test_expectation_overrides(&mut entries);
+            let expectation = entries[0].expectation;
+            assert_ne!(expectation, TestExpectation::ExecutionFailure);
+            for kind in ["input-error", "return-mismatch", "error", "fail", "ok"] {
+                let result = parse_child_output(
+                    &display_name,
+                    expectation,
+                    &lines(&[
+                        "START:COMPILED",
+                        "END:COMPILED:ok",
+                        "START:WITGEN_RUN",
+                        &format!("END:WITGEN_RUN:{kind}"),
+                        "START:WITGEN_WASM_RUN",
+                        &format!("END:WITGEN_WASM_RUN:{kind}"),
+                    ]),
+                );
+                let status = if kind == expected_kind {
+                    Status::Pass
+                } else {
+                    Status::Fail
+                };
+                assert_eq!(result.steps["WITGEN_RUN"], status, "{name}: {kind}");
+                assert_eq!(result.steps["WITGEN_WASM_RUN"], status, "{name}: {kind}");
+                assert_eq!(result.steps["AD_RUN"], Status::NotApplicable);
+            }
+            let rejected = parse_child_output(
+                &display_name,
+                expectation,
+                &lines(&["START:COMPILED", "END:COMPILED:reject"]),
+            );
+            assert_eq!(rejected.steps["COMPILED"], Status::Fail);
+            let crashed = parse_child_output(
+                &display_name,
+                expectation,
+                &lines(&["START:WITGEN_RUN", "START:WITGEN_WASM_RUN"]),
+            );
+            assert_eq!(crashed.steps["WITGEN_RUN"], Status::Crash);
+            assert_eq!(crashed.steps["WITGEN_WASM_RUN"], Status::Crash);
+        }
+    }
+
+    #[test]
+    fn input_errors_do_not_satisfy_expected_runtime_failures() {
+        for kind in ["error", "input-error", "return-mismatch"] {
+            let result = parse_child_output(
+                "invalid_input",
+                TestExpectation::ExecutionFailure,
+                &lines(&["START:WITGEN_RUN", &format!("END:WITGEN_RUN:{kind}")]),
+            );
+            assert_eq!(result.steps["WITGEN_RUN"], Status::Fail);
+        }
+    }
+
+    #[test]
+    fn frontend_field_selection_reaches_the_noir_compiler() {
+        fn run<F: MavrosField>() {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::create_dir(tmp.path().join("src")).unwrap();
+            fs::write(
+                tmp.path().join("Nargo.toml"),
+                "[package]\nname = 'field_test'\ntype = 'bin'\nauthors = []\n",
+            )
+            .unwrap();
+            let modulus_minus_one = match F::ID {
+                FieldId::Bn254 => {
+                    "21888242871839275222246405745257275088548364400416034343698204186575808495616"
+                }
+                FieldId::Goldilocks => "18446744069414584320",
+            };
+            fs::write(
+                tmp.path().join("src/main.nr"),
+                format!(
+                    "fn main() {{ let x: Field = -1; assert(x == {modulus_minus_one}); \
+                 let wide: u256 = 0xffffffffffffffffffffffffffffffff; \
+                 assert(wide + 1 == 0x100000000000000000000000000000000); }}"
+                ),
+            )
+            .unwrap();
+            if F::ID == FieldId::Goldilocks {
+                // The injected replacements contain BN254-only casts. Until those libraries
+                // are ported, even this tiny program must expose their frontend diagnostics.
+                let project = Project::new(tmp.path().to_path_buf()).unwrap();
+                let mut driver = Driver::new(project, false);
+                let error = driver
+                    .run_noir_compiler_for_field(field_config(F::ID))
+                    .unwrap_err();
+                assert!(matches!(error, DriverError::NoirCompilerError { .. }));
+                let diagnostic = error.to_string();
+                assert!(diagnostic.contains("std/mavros/"));
+                assert!(diagnostic.contains("can exceed the field modulus"));
+                return;
+            }
+            let mut run = run_single_vm::<F>(tmp.path().to_path_buf(), false, false).unwrap();
+            let r1cs = run.r1cs.as_ref().expect("R1CS generation must succeed");
+            let artifact = run
+                .driver
+                .compile_bytecode_artifact(CodeGenOptions {
+                    check_constraints: true,
+                    include_debug_info: false,
+                })
+                .unwrap();
+            let result = interpreter::run::<F>(
+                &artifact.binary,
+                r1cs.witness_layout,
+                r1cs.constraints_layout,
+                &[],
+                None,
+            )
+            .unwrap();
+            assert!(r1cs.check_witgen_output(
+                &result.out_wit_pre_comm,
+                &result.out_wit_post_comm,
+                &result.out_a,
+                &result.out_b,
+                &result.out_c
+            ));
+        }
+        run::<RawField>();
+        run::<Goldilocks>();
     }
 
     fn write_discovery_workspace(base: &Path, name: &str) -> PathBuf {
@@ -2453,6 +3044,7 @@ mod tests {
             .iter()
             .map(|column| match *column {
                 "Test" => name,
+                "Field" => "bn254",
                 "Rows"
                 | "Cols"
                 | "Bytecode Size"
@@ -2533,6 +3125,7 @@ mod tests {
             .collect();
         let results = vec![TestResult {
             name: "suite/case".to_string(),
+            field: FieldId::Bn254,
             steps,
             rows: Some(200),
             cols: Some(80),

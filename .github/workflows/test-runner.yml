@@ -95,7 +95,7 @@ jobs:
             ~/.cargo/registry
             target/release
             target/wasm32-unknown-unknown/release
-          # Keep test and release caches separate. Both release jobs can share this entry.
+          # Keep test and release caches separate. Release jobs share this entry.
           # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-
@@ -140,8 +140,61 @@ jobs:
       - name: Run Unit Tests
         run: make unit-test
 
+  corpus-field:
+    name: Corpus (${{ matrix.field }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        field: [bn254, goldilocks]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Download Nix Dependencies
+        run: nix develop
+
+      - name: Cache Cargo Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target/release
+            target/wasm32-unknown-unknown/release
+          # Keep test and release caches separate. Release jobs share this entry.
+          # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-
+
+      - name: Build Test Runner
+        run: make build-test-runner
+
+      - name: Run Tests
+        run: >-
+          nix develop --command cargo run --release --bin test-runner --
+          --field ${{ matrix.field }} --output STATUS-${{ matrix.field }}.md --jobs 4
+
+      - name: Upload Field Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: status-${{ matrix.field }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: STATUS-${{ matrix.field }}.md
+          if-no-files-found: error
+          retention-days: 90
+
   regression-test:
     name: Run Regression Tests
+    needs: corpus-field
     runs-on: ubuntu-latest
     steps:
       - name: Generate MavrosBot Token
@@ -176,7 +229,7 @@ jobs:
             ~/.cargo/registry
             target/release
             target/wasm32-unknown-unknown/release
-          # Keep test and release caches separate. Both release jobs can share this entry.
+          # Keep test and release caches separate. Release jobs share this entry.
           # Include the profile and pinned rustc/LLVM toolchain in the fallback prefix too.
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-${{ hashFiles('flake.lock') }}-
@@ -184,8 +237,20 @@ jobs:
       - name: Build Test Runner
         run: make build-test-runner
 
-      - name: Run Tests
-        run: nix develop --command cargo run --release --bin test-runner -- --output STATUS.md --jobs 4
+      - name: Download BN254 Report
+        uses: actions/download-artifact@v4
+        with:
+          name: status-bn254-${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Download Goldilocks Report
+        uses: actions/download-artifact@v4
+        with:
+          name: status-goldilocks-${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Merge Field Reports
+        run: >-
+          nix develop --command cargo run --release --bin test-runner --
+          --merge-status STATUS-bn254.md STATUS-goldilocks.md --output STATUS.md
 
       - name: Upload STATUS.md
         uses: actions/upload-artifact@v4
