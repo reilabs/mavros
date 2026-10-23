@@ -108,7 +108,7 @@ pub fn locate_or_build() -> Result<PathBuf, ToolchainError> {
 
     let metadata = cargo_metadata::MetadataCommand::new()
         .exec()
-        .expect("Failed to get cargo metadata");
+        .map_err(|error| ToolchainError::new(format!("Failed to get cargo metadata: {error}")))?;
 
     let workspace_root = metadata.workspace_root.as_std_path();
     let wasm_runtime_dir = workspace_root.join("wasm-runtime");
@@ -117,7 +117,11 @@ pub fn locate_or_build() -> Result<PathBuf, ToolchainError> {
         .current_dir(&wasm_runtime_dir)
         .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
         .output()
-        .expect("Failed to run cargo build for wasm-runtime");
+        .map_err(|error| {
+            ToolchainError::new(format!(
+                "Failed to run cargo build for wasm-runtime: {error}"
+            ))
+        })?;
 
     if !output.status.success() {
         eprintln!(
