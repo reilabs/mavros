@@ -1,7 +1,6 @@
 use thiserror::Error;
 
-/// A failure to locate or build the WASM runtime library: `MAVROS_WASM_RUNTIME_LIB` names a
-/// missing file, or cargo fails or produces no archive.
+/// A failure to locate or build the WASM runtime library, from misconfiguration or a failed tool.
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct ToolchainError(String);
