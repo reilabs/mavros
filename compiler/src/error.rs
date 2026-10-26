@@ -1,6 +1,7 @@
 use thiserror::Error;
 
-/// A failure to locate or build the WASM runtime library, from misconfiguration or a failed tool.
+/// A failure in the WASM toolchain, from misconfiguration or a failed tool: locating or building
+/// the runtime library, or linking a module and writing its outputs.
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct ToolchainError(String);

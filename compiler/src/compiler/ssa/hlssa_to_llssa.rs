@@ -4704,7 +4704,9 @@ mod tests {
             codegen.compile(&llssa, &FlowAnalysis::run(&llssa));
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("bounds.wasm");
-            codegen.compile_to_wasm(&path, WasmCompileOpts::fast(runtime.clone()));
+            codegen
+                .compile_to_wasm(&path, WasmCompileOpts::fast(runtime.clone()))
+                .unwrap();
             let engine = wasmtime::Engine::default();
             let module = wasmtime::Module::from_file(&engine, &path).unwrap();
             let len = if name == "blob_get" { 3 } else { 2 };
@@ -4942,7 +4944,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("subject.wasm");
         let runtime = crate::wasm_runtime::locate_or_build().unwrap();
-        codegen.compile_to_wasm(&path, WasmCompileOpts::fast(runtime));
+        codegen
+            .compile_to_wasm(&path, WasmCompileOpts::fast(runtime))
+            .unwrap();
 
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, &path).unwrap();

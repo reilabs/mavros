@@ -526,9 +526,7 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
             info!(message = %"Generating LLVM IR");
         }
 
-        driver
-            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config, codegen_options)
-            .unwrap();
+        driver.compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config, codegen_options)?;
     }
 
     // Skip VM execution if requested
