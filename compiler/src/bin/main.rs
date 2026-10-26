@@ -66,7 +66,8 @@ pub struct ProgramOptions {
     #[arg(long, value_name = "PATH", requires = "verify")]
     pub w: Option<PathBuf>,
 
-    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the Noir package root.
+    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the
+    /// Noir package root.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub absolute_paths: bool,
 
@@ -78,9 +79,9 @@ pub struct ProgramOptions {
     #[arg(long, conflicts_with = "skip_vm", action = clap::ArgAction::SetTrue)]
     pub profile: bool,
 
-    /// Target LogUp lookup-argument soundness, in bits of security. The compiler computes the
-    /// minimum number of challenges needed to reach it and reports the result. On bn254 a
-    /// single challenge suffices for any realistic target.
+    /// Target LogUp lookup-argument soundness, in bits of security. The compiler repeats the
+    /// argument at independent challenges as many times as needed (at most 16) and reports the
+    /// count. The LLVM and WASM outputs refuse a target that needs more than one repetition.
     #[arg(long, value_name = "BITS", global = true, default_value_t = DEFAULT_LOGUP_SOUNDNESS_BITS)]
     pub logup_soundness: u32,
 
@@ -532,9 +533,7 @@ fn run_package(args: &ProgramOptions, runtime_lib: Option<&Path>) -> Result<Exit
             info!(message = %"Generating LLVM IR");
         }
 
-        driver
-            .compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config, codegen_options)
-            .unwrap();
+        driver.compile_llvm_targets(args.emit_llvm, &r1cs, wasm_config, codegen_options)?;
     }
 
     // Skip VM execution if requested
