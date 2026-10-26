@@ -16,7 +16,7 @@ fn immutable_reference_boundary_preserves_values_and_constraints() {
             include_debug_info: true,
         })
         .unwrap();
-    let inputs = api::read_prover_inputs(driver.package_root(), driver.abi()).unwrap();
+    let (inputs, _) = api::read_prover_inputs(driver.package_root(), driver.abi()).unwrap();
     let result =
         api::run_witgen_from_binary(&mut artifact.binary, &r1cs, &inputs, artifact.debug_info)
             .unwrap();

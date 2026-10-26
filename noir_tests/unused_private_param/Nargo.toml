@@ -1,0 +1,6 @@
+[package]
+name = "unused_private_param"
+type = "bin"
+authors = [""]
+
+[dependencies]

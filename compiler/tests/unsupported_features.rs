@@ -125,7 +125,7 @@ fn witness_holds_for_each(source: &str, values: &[u32]) -> Vec<bool> {
         .iter()
         .map(|x| {
             std::fs::write(dir.path().join("Prover.toml"), format!("x = {x}")).unwrap();
-            let params = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+            let (params, _) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
             api::run_witgen_from_binary(&mut binary, &r1cs, &params, None)
                 .is_ok_and(|result| api::check_witgen(&r1cs, &result))
         })

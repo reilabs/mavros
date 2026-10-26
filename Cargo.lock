@@ -2311,8 +2311,11 @@ dependencies = [
  "ark-bn254",
  "ark-ff",
  "ark-std",
+ "bincode",
  "num-traits",
  "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
  "tracing",
 ]
 

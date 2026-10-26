@@ -1,5 +1,5 @@
 [package]
-name = "return_guard_wrong_value"
+name = "return_wrong_value"
 type = "bin"
 authors = [""]
 

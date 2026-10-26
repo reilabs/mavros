@@ -85,13 +85,7 @@ fn assert_returns(
     *block.last_mut().unwrap() = wrong;
     let verdict = compiled.run(&block);
     assert!(
-        matches!(
-            verdict,
-            Verdict::Trapped {
-                in_return_check: true,
-                ..
-            }
-        ),
+        matches!(verdict, Verdict::ReturnMismatch { .. }),
         "{what}: a wrong return gave {verdict:?}"
     );
 }

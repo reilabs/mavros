@@ -681,9 +681,10 @@ impl Types {
                 let witness_type = function_info.values.get(value).ok_or_else(|| {
                     format!("Witness value {:?} not found in type assignments", value)
                 })?;
+                // Computed return hints may already be witness-typed; avoid nesting WitnessOf.
                 function_info
                     .values
-                    .insert(*result, Type::witness_of(witness_type.clone()));
+                    .insert(*result, Type::witness_of_collapsed(witness_type.clone()));
                 Ok(())
             }
             OpCode::FreshWitness {
