@@ -96,9 +96,8 @@ pub struct EntryColumns {
     pub returns: Option<usize>,
 }
 
-/// Default LogUp bits-of-security target when `--logup-soundness` is not given. On bn254 a
-/// single challenge already exceeds this, so the default is a byte-identical no-op; it becomes
-/// the forward tripwire once a small field (goldilocks) needs more than one challenge.
+/// Default LogUp bits-of-security target when `--logup-soundness` is not given: one repetition on
+/// bn254; on Goldilocks three up to `D = 2^20` table entries and lookups, and four up to `2^31`.
 pub const DEFAULT_LOGUP_SOUNDNESS_BITS: u32 = 128;
 
 /// Recorded in every artifact: the release version of the Mavros workspace.
@@ -129,7 +128,7 @@ pub struct Driver {
     entry_columns: Option<EntryColumns>,
     draw_cfg: bool,
     main_is_unconstrained: bool,
-    /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the challenge count.
+    /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the LogUp repetitions.
     logup_soundness: u32,
 }
 
@@ -148,9 +147,10 @@ pub enum Error {
     /// assertion failures do not retain their spans.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
-    /// The requested `--logup-soundness` target needs more than one LogUp challenge on this field,
-    /// and the compiler implements single-challenge LogUp only (see `docs/field-agnosticism.md`,
-    /// `L4-logup-challenges`). Rejected: emitting it would silently under-provision the circuit.
+    /// The `--logup-soundness` target is out of reach: the field is too small for any number of
+    /// LogUp repetitions (one distinguishes less than a bit at the argument's degree), or the
+    /// target needs more than
+    /// [`MAX_LOGUP_REPETITIONS`](crate::compiler::codegen::hlssa_to_r1cs::MAX_LOGUP_REPETITIONS).
     LogupSoundnessUnsupported(String),
 
     /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
@@ -160,6 +160,10 @@ pub enum Error {
 
     /// A program to compile to WASM over a field the runtime archive has no instance for.
     WasmFieldUnsupported(FieldId),
+
+    /// A program to compile to LLVM or WASM whose LogUp argument repeats: the LLSSA AD emitters
+    /// bind a single repetition's challenges.
+    WasmLogupRepetitionsUnsupported(usize),
 
     /// R1CS coefficients requested in a field other than the program's.
     R1csFieldMismatch { requested: FieldId, program: FieldId },
@@ -178,6 +182,11 @@ impl std::fmt::Display for Error {
             Error::WasmFieldUnsupported(field) => {
                 write!(f, "the WASM backend does not support the {field:?} field")
             }
+            Error::WasmLogupRepetitionsUnsupported(repetitions) => write!(
+                f,
+                "the LLVM and WASM backends run one LogUp repetition, but --logup-soundness \
+                 needs {repetitions} for this program; lower it or use the VM"
+            ),
             Error::R1csFieldMismatch { requested, program } => write!(
                 f,
                 "R1CS generation in {requested:?} was requested for a program over {program:?}"
@@ -268,8 +277,7 @@ impl Driver {
     }
 
     /// Override the LogUp bits-of-security target (defaults to
-    /// [`DEFAULT_LOGUP_SOUNDNESS_BITS`]). Only the CLI sets this; library/test callers keep
-    /// the default, which is a no-op on bn254.
+    /// [`DEFAULT_LOGUP_SOUNDNESS_BITS`]).
     pub fn set_logup_soundness(&mut self, bits: u32) {
         self.logup_soundness = bits;
     }
@@ -764,6 +772,7 @@ impl Driver {
         if self.r1cs_profiling {
             r1cs_gen.enable_profile();
         }
+
         r1cs_gen.run(&r1cs_ssa, &type_info).map_err(|e| {
             Error::UnsatisfiableProgram(vec![
                 self.attach_compiled_source(Diagnostic::error(
@@ -773,16 +782,20 @@ impl Driver {
                 )),
             ])
         })?;
-        // Captured before `seal` consumes `r1cs_gen`; feeds the LogUp soundness degree D.
-        let num_lookups = r1cs_gen.num_lookups();
-        // Captured before `r1cs_ssa` is stored away; sizes the LogUp per-challenge soundness.
-        let field = r1cs_ssa.field();
+
+        let logup_repetitions = if r1cs_gen.has_lookup_tables() {
+            self.logup_repetitions(&r1cs_gen, r1cs_ssa.field())?
+        } else {
+            1
+        };
+
         // Captured before `seal` consumes `r1cs_gen`: where the wrapper's writes landed.
         self.entry_columns = Some(self.resolve_entry_columns(r1cs_gen.entry_columns()));
-        let (r1cs, profile) = match r1cs_gen.seal_with_profile() {
+        let (r1cs, profile) = match r1cs_gen.seal_with_profile(logup_repetitions) {
             Ok((r1cs, profile)) => (r1cs, Some(profile)),
             Err(error) => (error.into_r1cs(), None),
         };
+
         let mut num_non_zero_terms = 0;
         for r1c in r1cs.constraints.iter() {
             for (_, coeff) in r1c.a.iter() {
@@ -801,12 +814,14 @@ impl Driver {
                 }
             }
         }
+
         self.r1cs_ssa = Some(r1cs_ssa);
         self.constraint_layouts = Some(crate::vm::bytecode::ConstraintLayouts::new(
             r1cs.witness_layout,
             r1cs.constraints_layout,
         ));
         self.r1cs_profile = profile;
+
         info!(
             message = %"R1CS generated",
             num_constraints = r1cs.constraints.len(),
@@ -818,34 +833,38 @@ impl Driver {
 
         );
 
-        // Report the LogUp challenge count for the requested bits-of-security, and reject targets
-        // that would need more than one challenge (only single-challenge LogUp is implemented).
-        // Only relevant when the program actually has a lookup argument, i.e. at least one
-        // challenge was allocated. On bn254 a single challenge exceeds any sane target, so K is
-        // always 1 here and the emitted circuit is unchanged.
-        if r1cs.witness_layout.challenges_size > 0 {
-            let degree = r1cs.witness_layout.multiplicities_size + num_lookups;
-            let report = logup_soundness_report(field, self.logup_soundness, degree)
-                .map_err(Error::LogupSoundnessUnsupported)?;
-            info!(
-                message = %"LogUp soundness",
-                requested_bits = report.requested_bits,
-                field_bits = report.field_bits,
-                table_entries = r1cs.witness_layout.multiplicities_size,
-                lookups = num_lookups,
-                soundness_degree_d = report.soundness_degree,
-                per_challenge_bits = report.per_challenge_bits,
-                challenges = report.challenges,
-                achieved_bits = report.achieved_bits,
-            );
-            if report.challenges > 1 {
-                return Err(Error::LogupSoundnessUnsupported(
-                    report.unsupported_message(),
-                ));
-            }
-        }
-
         Ok(SealedR1CS::new(r1cs))
+    }
+
+    /// The LogUp repetitions `--logup-soundness` asks for, sized by the argument's degree `D`.
+    fn logup_repetitions<F: MavrosField>(
+        &self,
+        r1cs_gen: &R1CGen<F>,
+        field: FieldConfig,
+    ) -> Result<usize, Error> {
+        let table_entries = r1cs_gen.num_table_entries();
+        let lookups = r1cs_gen.num_lookups();
+        let report = logup_soundness_report(field, self.logup_soundness, table_entries + lookups)
+            .map_err(Error::LogupSoundnessUnsupported)?;
+        info!(
+            message = %"LogUp soundness",
+            requested_bits = report.requested_bits,
+            field_bits = report.field_bits,
+            table_entries,
+            lookups,
+            soundness_degree_d = report.soundness_degree,
+            per_repetition_bits = report.per_repetition_bits,
+            repetitions = report.repetitions,
+            achieved_bits = report.achieved_bits,
+        );
+        if let Some((repetitions, bits)) = report.near_optimal_alternative {
+            info!(
+                message = %"LogUp soundness: a lower target saves a repetition",
+                target_bits = bits,
+                repetitions,
+            );
+        }
+        Ok(report.repetitions as usize)
     }
 
     /// Only `pub` pins; a `call_data` parameter is private.
@@ -1200,6 +1219,11 @@ impl Driver {
             .field();
         if FieldRuntimeSymbols::of(field).is_none() {
             return Err(Error::WasmFieldUnsupported(field.id()));
+        }
+        if r1cs.witness_layout.logup_repetitions > 1 {
+            return Err(Error::WasmLogupRepetitionsUnsupported(
+                r1cs.witness_layout.logup_repetitions,
+            ));
         }
 
         self.prepare_program_ssa();

@@ -8,7 +8,7 @@ use tracing::instrument;
 pub use crate::InputValueOrdered;
 
 use crate::{
-    ConstraintsLayout, TableKind, WitnessLayout,
+    ConstraintsLayout, LogupStrides, TableKind, WitnessLayout,
     array::BoxedValue,
     bytecode::{
         self, AllocationInstrumenter, AllocationType, Arrays, ENTRY_AD, ENTRY_VERIFIER,
@@ -586,14 +586,63 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
         phase1.out_wit_post_comm[i] = *challenge;
     }
 
-    // FIELD-ASSUMPTION: L4-logup-challenges (6 sites)
-    // Phase 2 reads the single LogUp challenge at the hardcoded post-commitment indices
-    // [0] (alpha) and [1] (beta) throughout this function. A small field needs K challenges;
-    // these reads become [2k]/[2k+1] inside a `for k in 0..K` loop (see docs/field-agnosticism.md).
+    let strides = LogupStrides::new(&witness_layout, &constraints_layout);
+
+    // Phase 1 leaves the tables' and lookups' metadata in repetition 0's rows, which filling a
+    // repetition overwrites. We have to copy it to the other repetitions first.
+    for (start, stride) in [
+        (
+            constraints_layout.tables_data_start(),
+            strides.constraint_tables,
+        ),
+        (
+            constraints_layout.lookups_data_start(),
+            strides.constraint_lookups,
+        ),
+    ] {
+        for out in [&mut phase1.out_a, &mut phase1.out_b, &mut phase1.out_c] {
+            for repetition in 1..strides.repetitions {
+                out.copy_within(start..start + stride, start + repetition * stride);
+            }
+        }
+    }
+    for repetition in 0..strides.repetitions {
+        fill_repetition(
+            &mut phase1,
+            repetition,
+            strides,
+            witness_layout,
+            constraints_layout,
+        );
+    }
+
+    WitgenResult {
+        out_wit_pre_comm: phase1.out_wit_pre_comm,
+        out_wit_post_comm: phase1.out_wit_post_comm,
+        out_a: phase1.out_a,
+        out_b: phase1.out_b,
+        out_c: phase1.out_c,
+        instrumenter: phase1.instrumenter,
+    }
+}
+
+/// Completes repetition `repetition` of the LogUp argument from its challenges and the phase-1
+/// metadata in its rows.
+fn fill_repetition<F: mavros_artifacts::MavrosField>(
+    phase1: &mut Phase1Result<F>,
+    repetition: usize,
+    strides: LogupStrides,
+    witness_layout: WitnessLayout,
+    constraints_layout: ConstraintsLayout,
+) {
+    // The repetition's rows sit whole strides past repetition 0's.
+    let alpha_index = strides.alpha(repetition);
+    let table_rows = repetition * strides.constraint_tables;
+    let table_witnesses = repetition * strides.witness_tables;
     let mut running_prod = F::ONE;
     for tbl in phase1.tables.iter() {
-        let alpha = phase1.out_wit_post_comm[0];
-        let base = tbl.elem_inverses_constraint_section_offset;
+        let alpha = phase1.out_wit_post_comm[alpha_index];
+        let base = tbl.elem_inverses_constraint_section_offset + table_rows;
 
         match tbl.kind {
             TableKind::RangeCheck => {
@@ -614,7 +663,7 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
                 // value=spread(i)) are constants, so β·spread(i) folds into the
                 // denominator: denom_i = α - i + β·spread(i). Phase 2 recomputes spread(i)
                 // from the row index, so the VM dumps nothing for it.
-                let beta = phase1.out_wit_post_comm[1];
+                let beta = phase1.out_wit_post_comm[strides.beta(repetition)];
                 for i in 0..tbl.length {
                     let multiplicity = phase1.out_wit_pre_comm[tbl.multiplicities_offset + i];
                     let spread_i = F::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
@@ -631,7 +680,7 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
                 // One folded constraint per entry, exactly like the spread table above: both
                 // operands (key=n, value=2^n) are constants, so β·2^n folds into the denominator.
                 // Phase 2 recomputes 2^n from the row index, so the VM dumps nothing for it.
-                let beta = phase1.out_wit_post_comm[1];
+                let beta = phase1.out_wit_post_comm[strides.beta(repetition)];
                 for (n, pow) in pow2_rows::<F>(tbl.length).enumerate() {
                     let multiplicity = phase1.out_wit_pre_comm[tbl.multiplicities_offset + n];
                     let denom = alpha - F::from(n as u64) + beta * pow;
@@ -645,7 +694,7 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
             }
             TableKind::Array => {
                 // Two constraints per entry: x_i = -β*v_i, denom_i = α - i - x_i
-                let beta = phase1.out_wit_post_comm[1];
+                let beta = phase1.out_wit_post_comm[strides.beta(repetition)];
                 for i in 0..tbl.length {
                     let multiplicity = phase1.out_wit_pre_comm[tbl.multiplicities_offset + i];
 
@@ -674,7 +723,7 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
     let mut running_inv = running_prod.inverse().unwrap();
 
     for tbl in phase1.tables.iter().rev() {
-        let base = tbl.elem_inverses_constraint_section_offset;
+        let base = tbl.elem_inverses_constraint_section_offset + table_rows;
 
         if matches!(
             tbl.kind,
@@ -708,16 +757,20 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
 
     let mut current_lookup_off = 0;
 
-    while current_lookup_off < constraints_layout.lookups_data_size {
-        let cnst_off = constraints_layout.lookups_data_start() + current_lookup_off;
+    while current_lookup_off < strides.constraint_lookups {
+        let cnst_off = constraints_layout.lookups_data_start()
+            + repetition * strides.constraint_lookups
+            + current_lookup_off;
         let wit_off = witness_layout.lookups_data_start() - witness_layout.challenges_start()
+            + repetition * strides.witness_lookups
             + current_lookup_off;
 
         // Peek at which table this lookup belongs to, to determine width
         let table_ix = phase1.out_a[cnst_off].storage_cell0();
         let table = &phase1.tables[table_ix as usize];
+        let table_base = table.elem_inverses_constraint_section_offset + table_rows;
 
-        let alpha = phase1.out_wit_post_comm[0];
+        let alpha = phase1.out_wit_post_comm[alpha_index];
 
         if table.kind == TableKind::RangeCheck {
             // Key-only lookup (rangecheck): 1 constraint per lookup
@@ -732,14 +785,11 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
                 phase1.out_wit_post_comm[wit_off] = F::ZERO;
             } else {
                 let ix_in_table = phase1.out_b[cnst_off].storage_cell0();
-                phase1.out_a[cnst_off] = phase1.out_a
-                    [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
-                phase1.out_b[cnst_off] = phase1.out_b
-                    [table.elem_inverses_constraint_section_offset + ix_in_table as usize];
+                phase1.out_a[cnst_off] = phase1.out_a[table_base + ix_in_table as usize];
+                phase1.out_b[cnst_off] = phase1.out_b[table_base + ix_in_table as usize];
                 phase1.out_c[cnst_off] = F::from(flag_u64);
                 phase1.out_wit_post_comm[wit_off] = phase1.out_a[cnst_off];
-                phase1.out_c[table.elem_inverses_constraint_section_offset + table.length] +=
-                    phase1.out_a[cnst_off];
+                phase1.out_c[table_base + table.length] += phase1.out_a[cnst_off];
             }
 
             current_lookup_off += 1;
@@ -754,7 +804,7 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
                 TableKind::Spread | TableKind::Pow2 => 1,
                 _ => 2,
             };
-            let beta = phase1.out_wit_post_comm[1];
+            let beta = phase1.out_wit_post_comm[strides.beta(repetition)];
             let result_value = phase1.out_b[cnst_off];
             let flag_u64 = phase1.out_c[cnst_off + 1].storage_cell0();
 
@@ -778,16 +828,15 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
                 phase1.out_wit_post_comm[y_wit_off] = F::ZERO;
             } else {
                 let ix_in_table = phase1.out_b[y_cnst_off].storage_cell0();
-                let tbl_base = table.elem_inverses_constraint_section_offset;
                 // Copy precomputed inverse from the table entry's y-slot
                 // (array: 2*ix+1; spread: ix).
-                let y_slot = tbl_base + entry_stride * ix_in_table as usize + (entry_stride - 1);
+                let y_slot = table_base + entry_stride * ix_in_table as usize + (entry_stride - 1);
                 phase1.out_a[y_cnst_off] = phase1.out_a[y_slot];
                 phase1.out_b[y_cnst_off] = phase1.out_b[y_slot];
                 phase1.out_c[y_cnst_off] = F::from(flag_u64);
                 phase1.out_wit_post_comm[y_wit_off] = phase1.out_a[y_cnst_off];
                 // Add to sum constraint (array: 2*n; spread: n).
-                let sum_off = tbl_base + entry_stride * table.length;
+                let sum_off = table_base + entry_stride * table.length;
                 phase1.out_c[sum_off] += phase1.out_a[y_cnst_off];
             }
 
@@ -796,8 +845,8 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
     }
 
     for tbl in phase1.tables.iter() {
-        let base = tbl.elem_inverses_constraint_section_offset;
-        let wit_base = tbl.elem_inverses_witness_section_offset;
+        let base = tbl.elem_inverses_constraint_section_offset + table_rows;
+        let wit_base = tbl.elem_inverses_witness_section_offset + table_witnesses;
 
         if matches!(
             tbl.kind,
@@ -831,15 +880,6 @@ pub fn run_phase2<F: mavros_artifacts::MavrosField>(
             }
             phase1.out_b[base + 2 * tbl.length] = F::ONE;
         }
-    }
-
-    WitgenResult {
-        out_wit_pre_comm: phase1.out_wit_pre_comm,
-        out_wit_post_comm: phase1.out_wit_post_comm,
-        out_a: phase1.out_a,
-        out_b: phase1.out_b,
-        out_c: phase1.out_c,
-        instrumenter: phase1.instrumenter,
     }
 }
 
@@ -1254,6 +1294,7 @@ mod tests {
                 algebraic_size: 2,
                 multiplicities_size: 2,
                 challenges_size: 1,
+                logup_repetitions: 1,
                 tables_data_size: 2,
                 lookups_data_size: 1,
             };
@@ -1375,12 +1416,14 @@ mod tests {
         assert_eq!(frame.read_u64(7), 0xbeef, "the write ran off the high end");
     }
 
-    /// A program over `F` (its field opcodes chosen by `pick`). Its witgen entry reads six inputs
-    /// from its blob, writes one algebraic row and looks up into a table of every kind, the
-    /// rangecheck table three times (once with a zero flag); its AD entry bumps two fresh
-    /// witnesses by the first two coefficients.
+    /// A program over `F` (its field opcodes chosen by `pick`) repeating its LogUp argument
+    /// `repetitions` times.
+    /// Its witgen entry reads six inputs from its blob, writes one algebraic row and looks up into
+    /// a table of every kind, the rangecheck table three times (once with a zero flag); its AD
+    /// entry bumps two fresh witnesses by the first two coefficients.
     fn every_table_program<F: mavros_artifacts::MavrosField>(
         pick: fn(bytecode::FieldOpCode) -> OpCode,
+        repetitions: usize,
     ) -> Vec<u64> {
         use bytecode::{ELEM_WORD, FieldOpCode, FramePosition as P, Function, Program};
 
@@ -1471,7 +1514,7 @@ mod tests {
             source_locations: vec![bytecode::SourceLocation::new("<test>", 1, 1); code.len()],
             code,
         };
-        let (wl, cl) = every_table_layouts();
+        let (wl, cl) = every_table_layouts(repetitions);
         Program {
             field: F::ID,
             constraint_layouts: Some(bytecode::ConstraintLayouts::new(wl, cl)),
@@ -1485,18 +1528,19 @@ mod tests {
     }
 
     /// The layouts [`every_table_program`] fills exactly.
-    fn every_table_layouts() -> (WitnessLayout, ConstraintsLayout) {
+    fn every_table_layouts(repetitions: usize) -> (WitnessLayout, ConstraintsLayout) {
         let witness_layout = WitnessLayout {
             algebraic_size: 3,
             multiplicities_size: 11,
-            challenges_size: 2,
-            tables_data_size: 14,
-            lookups_data_size: 9,
+            challenges_size: 2 * repetitions,
+            logup_repetitions: repetitions,
+            tables_data_size: 14 * repetitions,
+            lookups_data_size: 9 * repetitions,
         };
         let constraints_layout = ConstraintsLayout {
             algebraic_size: 1,
-            tables_data_size: 18,
-            lookups_data_size: 9,
+            tables_data_size: 18 * repetitions,
+            lookups_data_size: 9 * repetitions,
         };
         (witness_layout, constraints_layout)
     }
@@ -1527,8 +1571,8 @@ mod tests {
     ) -> EveryTableRun {
         use crate::test_field::signed;
 
-        let binary = every_table_program::<F>(pick);
-        let (witness_layout, constraints_layout) = every_table_layouts();
+        let binary = every_table_program::<F>(pick, 1);
+        let (witness_layout, constraints_layout) = every_table_layouts(1);
         let inputs = every_table_inputs::<F>();
         let result = run(&binary, witness_layout, constraints_layout, &inputs, None)
             .expect("every flagged lookup is in range");
@@ -1610,12 +1654,82 @@ mod tests {
         assert_eq!(challenges, [3690730912593434115, 2291418963929149985]);
     }
 
+    /// Phase 2 completes each LogUp repetition from its challenges: every row holds, each
+    /// repetition's rangecheck rows and first lookup solve against that repetition's `alpha`, its
+    /// spread and powers-of-two rows against its `alpha` and `beta`, and repetition 0 is the
+    /// single-repetition run's.
+    #[test]
+    fn phase_two_fills_every_repetition() {
+        fn check<F: mavros_artifacts::MavrosField>(pick: fn(bytecode::FieldOpCode) -> OpCode) {
+            let single = {
+                let (wl, cl) = every_table_layouts(1);
+                let binary = every_table_program::<F>(pick, 1);
+                run(&binary, wl, cl, &every_table_inputs::<F>(), None).unwrap()
+            };
+            for repetitions in [2, 3] {
+                let (wl, cl) = every_table_layouts(repetitions);
+                let binary = every_table_program::<F>(pick, repetitions);
+                let result = run(&binary, wl, cl, &every_table_inputs::<F>(), None)
+                    .expect("every flagged lookup is in range");
+                for (row, ((a, b), c)) in result
+                    .out_a
+                    .iter()
+                    .zip(&result.out_b)
+                    .zip(&result.out_c)
+                    .enumerate()
+                {
+                    assert_eq!(*a * *b, *c, "constraint row {row} at K = {repetitions}");
+                }
+                let post = &result.out_wit_post_comm;
+                let challenges = 2 * repetitions;
+                assert_eq!(post[..challenges], fake_challenges::<F>(challenges));
+                let lookups = challenges + 14 * repetitions;
+                for repetition in 0..repetitions {
+                    let (alpha, beta) = (post[2 * repetition], post[2 * repetition + 1]);
+                    let tables = challenges + 14 * repetition;
+                    for (row, multiplicity) in [0u64, 0, 2, 0].into_iter().enumerate() {
+                        let denominator = alpha - F::from(row as u64);
+                        assert_eq!(
+                            post[tables + row] * denominator,
+                            F::from(multiplicity),
+                            "repetition {repetition}'s table row {row}"
+                        );
+                    }
+                    // Row 1 of the spread table (value 1) and of the powers-of-two table (value 2),
+                    // each looked up once.
+                    for (column, value) in [(5, 1u64), (7, 2)] {
+                        let denominator = alpha - F::ONE + beta * F::from(value);
+                        assert_eq!(
+                            post[tables + column] * denominator,
+                            F::ONE,
+                            "repetition {repetition}'s value-column row at {column}"
+                        );
+                    }
+                    assert_eq!(
+                        post[lookups + 9 * repetition] * (alpha - F::from(2u64)),
+                        F::ONE,
+                        "repetition {repetition}'s first lookup"
+                    );
+                }
+                // Repetition 0 matches the single-repetition run's, shifted by the extra
+                // challenges.
+                assert_eq!(
+                    post[challenges..challenges + 14],
+                    single.out_wit_post_comm[2..16]
+                );
+                assert_eq!(post[lookups..lookups + 9], single.out_wit_post_comm[16..25]);
+            }
+        }
+        check::<Field>(bytecode::FieldOpCode::bn254);
+        check::<mavros_artifacts::Goldilocks>(bytecode::FieldOpCode::goldilocks);
+    }
+
     /// Phase 1's tables locate their multiplicities by offset, so a clone completes after the
     /// original is gone.
     #[test]
     fn a_cloned_phase_one_result_completes_on_its_own() {
-        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254);
-        let (witness_layout, constraints_layout) = every_table_layouts();
+        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254, 1);
+        let (witness_layout, constraints_layout) = every_table_layouts(1);
         let phase1 = run_phase1(
             &binary,
             witness_layout,
@@ -1636,8 +1750,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "phase 2 takes one challenge per challenge witness")]
     fn phase_two_refuses_a_challenge_count_off_the_layout() {
-        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254);
-        let (witness_layout, constraints_layout) = every_table_layouts();
+        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254, 1);
+        let (witness_layout, constraints_layout) = every_table_layouts(1);
         let phase1 = run_phase1(
             &binary,
             witness_layout,
@@ -1684,6 +1798,7 @@ mod tests {
             algebraic_size: 0,
             multiplicities_size: 0,
             challenges_size: 0,
+            logup_repetitions: 0,
             tables_data_size: 0,
             lookups_data_size: 0,
         };

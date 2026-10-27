@@ -69,9 +69,6 @@ pub trait HarnessField: MavrosField {
     /// The field's configuration, which a program built for it carries.
     const CONFIG: FieldConfig;
 
-    /// The LogUp soundness target the harness compiles at, or [`None`] for the driver's default.
-    const LOGUP_SOUNDNESS_BITS: Option<u32>;
-
     /// A random element, for the coefficients of the AD check.
     fn random(rng: &mut StdRng) -> Self;
 
@@ -82,7 +79,6 @@ pub trait HarnessField: MavrosField {
 
 impl HarnessField for Field {
     const CONFIG: FieldConfig = FieldConfig::bn254();
-    const LOGUP_SOUNDNESS_BITS: Option<u32> = None;
 
     fn random(rng: &mut StdRng) -> Self {
         Field::rand(rng)
@@ -95,12 +91,6 @@ impl HarnessField for Field {
 
 impl HarnessField for Goldilocks {
     const CONFIG: FieldConfig = FieldConfig::goldilocks();
-
-    // A program with an integer parameter range-checks it, so it has a lookup argument, and the
-    // driver's default target needs more LogUp challenges on a 64-bit field than R1CS generation
-    // implements. 40 bits takes one challenge for any argument of degree up to `2^23`. This
-    // under-provisions the argument by design and is for testing the arithmetic only.
-    const LOGUP_SOUNDNESS_BITS: Option<u32> = Some(40);
 
     // A uniform 128-bit integer reduced modulo `p < 2^64` is within `2^-64` of uniform.
     fn random(rng: &mut StdRng) -> Self {
@@ -461,9 +451,6 @@ impl<F: HarnessField> Compiled<F> {
             .sum::<usize>();
 
         let mut driver = Driver::from_ssa(ssa, debug_output_dir.clone(), false);
-        if let Some(bits) = F::LOGUP_SOUNDNESS_BITS {
-            driver.set_logup_soundness(bits);
-        }
         driver.make_struct_access_static()?;
         driver.monomorphize()?;
         driver.spill_witness()?;

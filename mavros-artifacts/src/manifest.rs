@@ -17,10 +17,12 @@
 //! Reading also checks the manifest and the bytecode header against the R1CS and refuses bytes after
 //! the body.
 //!
-//! The manifest records only what the R1CS cannot say: each parameter's name, visibility, width
-//! and witness columns, and the return's. Witness and constraint counts come from the R1CS
-//! layouts, and LogUp challenge `i` sits at `witness_layout.challenges_start() + i`, which is
-//! offset `i` into the post-commitment witness.
+//! The manifest records only what the R1CS cannot say: each parameter's name, visibility, width and
+//! witness columns, and the return's. Witness and constraint counts come from the R1CS layouts, and
+//! LogUp challenge `i` sits at `witness_layout.challenges_start() + i`, which is offset `i` into
+//! the post-commitment witness. The argument repeats `logup_repetitions` times: repetition `k`
+//! reads challenges `k·c` to `k·c + c − 1`, where `c = challenges_size / logup_repetitions` is 2
+//! when a table has a value column and 1 otherwise. The prover draws every challenge independently.
 //!
 //! The entry blob holds the parameters only, in ABI order. Witness columns follow the wrapper's
 //! write order instead: column 0 is the constant one, then the public parameters in ABI order,
@@ -34,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    Field, FieldId, MavrosField, R1CS, SealedR1CS, field_tag,
+    Field, FieldId, LogupStrides, MavrosField, R1CS, SealedR1CS, field_tag,
     program_header::{ENTRY_AD, ENTRY_WITGEN, NO_ENTRY_POINT, ProgramHeader},
 };
 
@@ -159,9 +161,10 @@ impl WitnessManifest {
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 2;
-/// The first format whose header records the compiler version; format 1 recorded none.
-const COMPILER_SINCE_VERSION: u32 = 2;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
+/// The first format whose header records the compiler version; the two `r1cs.bin` formats
+/// recorded none.
+const COMPILER_SINCE_VERSION: u32 = 3;
 
 /// Domain separator of [`Artifact::circuit_digest`]. Its bytes and preimage are those of the
 /// `r1cs.bin` digest this format replaced, so a circuit keeps the digest it had there. Bump when
@@ -418,8 +421,9 @@ impl<F: MavrosField> Artifact<F> {
         Ok(bytes)
     }
 
-    /// Reads an artifact, verifying its digest, then the manifest and the bytecode header against
-    /// the R1CS. Trailing bytes are an error.
+    /// Reads an artifact, verifying its digest, then the manifest and the LogUp layout
+    /// ([`LogupStrides::try_new`]) against the R1CS, and the bytecode header against both.
+    /// Trailing bytes are an error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArtifactError> {
         let preamble = ArtifactPreamble::peek(bytes)?;
         if preamble.format_version != ARTIFACT_FORMAT_VERSION {
@@ -462,10 +466,17 @@ impl<F: MavrosField> Artifact<F> {
                 actual: hex(&artifact.digest),
             });
         }
+
         artifact
             .manifest
             .validate(&artifact.r1cs)
             .map_err(ArtifactError::Invalid)?;
+
+        LogupStrides::try_new(
+            &artifact.r1cs.witness_layout,
+            &artifact.r1cs.constraints_layout,
+        )
+        .map_err(ArtifactError::Invalid)?;
         check_bytecode::<F>(&artifact.bytecode, &artifact.r1cs, &artifact.manifest)
             .map_err(ArtifactError::Bytecode)?;
         Ok(artifact)
@@ -523,7 +534,7 @@ fn check_bytecode<F: MavrosField>(
 mod tests {
     use super::*;
     use crate::{
-        ConstraintsLayout, Field, R1C, WitnessLayout,
+        ConstraintsLayout, Field, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout,
         program_header::{ConstraintLayouts, PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC},
     };
 
@@ -535,6 +546,7 @@ mod tests {
                 algebraic_size: 6,
                 multiplicities_size: 0,
                 challenges_size: 0,
+                logup_repetitions: 0,
                 tables_data_size: 0,
                 lookups_data_size: 0,
             },
@@ -765,6 +777,65 @@ mod tests {
         }
     }
 
+    /// A LogUp layout is refused at load unless it is `logup_repetitions` equal copies of a
+    /// repetition the compiler emits, before phase 2 would trip over it.
+    #[test]
+    fn artifact_rejects_logup_layouts_the_compiler_does_not_emit() {
+        // Two repetitions of a two-entry range table looked up once: one challenge, two inverse
+        // columns, two entry rows and the sum row, and one lookup column and row.
+        let repeated = |r: &mut R1CS| {
+            r.witness_layout.multiplicities_size = 2;
+            r.witness_layout.logup_repetitions = 2;
+            r.witness_layout.challenges_size = 2;
+            r.witness_layout.tables_data_size = 4;
+            r.witness_layout.lookups_data_size = 2;
+            r.constraints_layout.tables_data_size = 6;
+            r.constraints_layout.lookups_data_size = 2;
+        };
+        let accepted: [fn(&mut R1CS); 2] = [|_| {}, |r| r.witness_layout.challenges_size = 4];
+        for (case, mutate) in accepted.into_iter().enumerate() {
+            let mut r = r1cs();
+            repeated(&mut r);
+            mutate(&mut r);
+            assert!(
+                round_trip(manifest(), r).is_ok(),
+                "accepted LogUp layout case {case}"
+            );
+        }
+
+        let refused: [fn(&mut R1CS); 11] = [
+            |r| r.witness_layout.logup_repetitions = 0,
+            |r| r.witness_layout.logup_repetitions = 3,
+            |r| r.witness_layout.multiplicities_size = 0,
+            // Every section splits into 17 repetitions, one past the cap.
+            |r| {
+                let w = &mut r.witness_layout;
+                w.logup_repetitions = MAX_LOGUP_REPETITIONS + 1;
+                w.challenges_size = w.logup_repetitions;
+                w.tables_data_size = 2 * w.logup_repetitions;
+                w.lookups_data_size = w.logup_repetitions;
+                r.constraints_layout.tables_data_size = 3 * w.logup_repetitions;
+                r.constraints_layout.lookups_data_size = w.logup_repetitions;
+            },
+            |r| r.witness_layout.challenges_size = 3,
+            |r| r.witness_layout.challenges_size = 6,
+            |r| r.witness_layout.tables_data_size = 2,
+            |r| r.witness_layout.lookups_data_size = 1,
+            |r| r.witness_layout.lookups_data_size = 4,
+            |r| r.constraints_layout.tables_data_size = 5,
+            |r| r.constraints_layout.lookups_data_size = 3,
+        ];
+        for (case, mutate) in refused.into_iter().enumerate() {
+            let mut r = r1cs();
+            repeated(&mut r);
+            mutate(&mut r);
+            assert!(
+                matches!(round_trip(manifest(), r), Err(ArtifactError::Invalid(_))),
+                "refused LogUp layout case {case}"
+            );
+        }
+    }
+
     #[test]
     fn artifact_rejects_overflowing_ranges_and_totals() {
         let cases: [fn(&mut WitnessManifest, &mut R1CS); 2] = [
@@ -794,12 +865,12 @@ mod tests {
             ("another format version", |b| b[1] += 1),
             ("another field", |b| b[2] = FieldId::Goldilocks.code()),
             ("another algebraic size", |b| b[4] += 1),
-            ("another entry blob", |b| b[14] += 1),
-            ("entry past the end", |b| b[16] = 99),
-            ("no code after the header", |b| b.truncate(18)),
-            ("no AD entry", |b| b[17] = NO_ENTRY_POINT as u64),
+            ("another entry blob", |b| b[15] += 1),
+            ("entry past the end", |b| b[17] = 99),
+            ("no code after the header", |b| b.truncate(19)),
+            ("no AD entry", |b| b[18] = NO_ENTRY_POINT as u64),
             ("witgen entry only", |b| {
-                b[15] = 1;
+                b[16] = 1;
                 b.remove(17);
             }),
         ];
@@ -819,17 +890,17 @@ mod tests {
     fn digest_encoding_is_pinned() {
         assert_eq!(
             hex(&r1cs().digest()),
-            "a1826c2cf819ba7805777209988b33f98071393e14c2671b9ddb3fe9fafe2c52"
+            "19a818fdfde1381d0a34923b663aeb61e431643eaf0cc3d8e435cd944a7289f4"
         );
         let pinned = artifact(manifest(), r1cs());
         // The digest the r1cs.bin artifact carried for this circuit.
         assert_eq!(
             hex(&pinned.circuit_digest()),
-            "91938a47b4fbf034bad07ba83f8289ca1703176a63fae4867f05c0cd4505de18"
+            "2192560a2e938f3ae252363dad5eedb0f1c5de48c88201be9d5f51bd2c19229e"
         );
         assert_eq!(
             hex(&pinned.digest()),
-            "9c577fef5ebe660bad1ad1974cc92d98c4655bcafaad820615679b897ac90b6c"
+            "b9c22073231d955fba155a857fb6f5cbf099f28df986f8c2065b1e2fc63ac0e5"
         );
 
         // The compiler version stays outside both digests.

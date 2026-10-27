@@ -8,7 +8,8 @@ use std::{any::TypeId, collections::BTreeMap, fmt::Display, ptr};
 use mavros_artifacts::FieldId;
 
 use crate::{
-    ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, TableKind, WitnessLayout,
+    ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, LogupStrides, TableKind,
+    WitnessLayout,
     array::{BoxedLayout, BoxedValue, DataType},
     int_limbs,
     interpreter::{Frame, Handler},
@@ -1013,13 +1014,30 @@ pub struct AdArrays {
     pub out_dc: Tape,
     pub ad_coeffs: Tape,
     pub current_wit_off: usize,
+    /// The first repetition's `alpha`.
     pub logup_wit_challenge_off: usize,
+    /// The table and lookup cursors below run over repetition 0; repetition `k` of a row sits `k`
+    /// strides past it.
+    pub logup: LogupStrides,
     pub current_wit_multiplicities_off: usize,
     pub current_wit_tables_off: usize,
     pub current_wit_lookups_off: usize,
     pub current_cnst_off: usize,
     pub current_cnst_tables_off: usize,
     pub current_cnst_lookups_off: usize,
+}
+
+impl AdArrays {
+    /// The column of repetition `repetition`'s `alpha`.
+    pub fn alpha(&self, repetition: usize) -> usize {
+        self.logup_wit_challenge_off + self.logup.alpha(repetition)
+    }
+
+    /// The column of repetition `repetition`'s `beta`, which only a layout with a value-column
+    /// table has.
+    pub fn beta(&self, repetition: usize) -> usize {
+        self.logup_wit_challenge_off + self.logup.beta(repetition)
+    }
 }
 
 pub union Arrays {
@@ -1159,11 +1177,8 @@ impl VM {
                     out_dc: Tape::of(out_dc),
                     ad_coeffs: Tape::of(ad_coeffs as *mut F),
                     current_wit_off: 0,
-                    // FIELD-ASSUMPTION: L4-logup-challenges (10 sites)
-                    // The AD pass reads the single challenge at `logup_wit_challenge_off`
-                    // (alpha) and `+1` (beta). For K challenges these become
-                    // `off + 2k`/`off + 2k + 1`, looped over the K inverse-witness copies.
                     logup_wit_challenge_off: witness_layout.challenges_start(),
+                    logup: LogupStrides::new(&witness_layout, &constraints_layout),
                     current_wit_multiplicities_off: witness_layout.multiplicities_start(),
                     current_wit_tables_off: witness_layout.tables_data_start(),
                     current_wit_lookups_off: witness_layout.lookups_data_start(),
@@ -1360,7 +1375,9 @@ fn program_offset(program_base: *const u64, program_len: usize, pc: *const u64) 
 /// same column independently and must agree at every row or the backends disagree about the
 /// table's contents: `hlssa_to_llssa::emit_pow2_ad_init_body` carries this same accumulator through
 /// the loop it generates, and `hlssa_to_r1cs`'s `Table::Pow2` arm exponentiates instead.
-pub(crate) fn pow2_rows<F: mavros_artifacts::MavrosField>(len: usize) -> impl Iterator<Item = F> {
+pub(crate) fn pow2_rows<F: mavros_artifacts::MavrosField>(
+    len: usize,
+) -> impl Iterator<Item = F> + Clone {
     let mut acc = F::ONE;
     (0..len).map(move |_| {
         let row = acc;
@@ -1457,7 +1474,68 @@ unsafe fn forward_kv_lookup_emit<F: mavros_artifacts::MavrosField>(
     true
 }
 
-/// Emit AD bumps for a key-value lookup (x-constraint + y-constraint + sum).
+/// Registers a rangecheck, spread or powers-of-two table for AD and emits the bumps of its rows in
+/// every LogUp repetition: one folded row `y · (α - i + β·valueᵢ) = mᵢ` per entry, then the sum
+/// row `Σ y · 1 = Σ lookups`. A rangecheck table has no value column, so no `β` term. Returns the
+/// table's index in `vm.tables`.
+unsafe fn ad_constant_table<F: mavros_artifacts::MavrosField>(
+    kind: TableKind,
+    length: usize,
+    values: impl Iterator<Item = F> + Clone,
+    vm: &mut VM,
+) -> usize {
+    let (constraints, witnesses, multiplicities, strides) = unsafe {
+        let ad = &mut vm.data.as_ad;
+        let offsets = (
+            ad.current_cnst_tables_off,
+            ad.current_wit_tables_off,
+            ad.current_wit_multiplicities_off,
+            ad.logup,
+        );
+        // One constraint per entry and the sum constraint; one witness per entry.
+        ad.current_wit_multiplicities_off += length;
+        ad.current_wit_tables_off += length;
+        ad.current_cnst_tables_off += length + 1;
+        offsets
+    };
+    let table_idx = vm.tables.len();
+    vm.tables.push(TableInfo {
+        multiplicities_wit: Tape::NONE,
+        kind,
+        length,
+        elem_inverses_witness_section_offset: witnesses,
+        elem_inverses_constraint_section_offset: constraints,
+    });
+
+    for repetition in 0..strides.repetitions {
+        let constraints = constraints + repetition * strides.constraint_tables;
+        let witnesses = witnesses + repetition * strides.witness_tables;
+        unsafe {
+            let ad = &mut vm.data.as_ad;
+            let alpha = ad.alpha(repetition);
+            let beta = (kind != TableKind::RangeCheck).then(|| ad.beta(repetition));
+            let sum_coeff = *ad.ad_coeffs.at::<F>(constraints + length);
+            for (i, value) in values.clone().enumerate() {
+                //   A = (y), B = (α) + (w0, -i) + (β, valueᵢ), C = (m)
+                let coeff = *ad.ad_coeffs.at::<F>(constraints + i);
+                // y sits in A of its own row and of the sum row.
+                *ad.out_da.at::<F>(witnesses + i) += coeff + sum_coeff;
+                *ad.out_db.at::<F>(alpha) += coeff;
+                *ad.out_db.slot::<F>() -= coeff * F::from(i as u64);
+                if let Some(beta) = beta {
+                    *ad.out_db.at::<F>(beta) += coeff * value;
+                }
+                *ad.out_dc.at::<F>(multiplicities + i) += coeff;
+            }
+            // The sum row's B is the constant one.
+            *ad.out_db.slot::<F>() += sum_coeff;
+        }
+    }
+    table_idx
+}
+
+/// Emit AD bumps for a key-value lookup (x-constraint + y-constraint + sum), in every LogUp
+/// repetition.
 unsafe fn ad_kv_lookup_emit<F: mavros_artifacts::MavrosField>(
     table_idx: usize,
     key: BoxedValue,
@@ -1477,63 +1555,56 @@ unsafe fn ad_kv_lookup_emit<F: mavros_artifacts::MavrosField>(
         TableKind::RangeCheck => panic!("ad_kv_lookup_emit called on a rangecheck table"),
     };
 
-    let x_coeff = unsafe {
-        let r = *vm
-            .data
-            .as_ad
-            .ad_coeffs
-            .at::<F>(vm.data.as_ad.current_cnst_lookups_off);
-        vm.data.as_ad.current_cnst_lookups_off += 1;
-        r
+    // Repetition 0's x and y rows and columns; the cursors move past them.
+    let (cnst_lookup_off, wit_lookup_off, strides) = unsafe {
+        let ad = &mut vm.data.as_ad;
+        let offsets = (
+            ad.current_cnst_lookups_off,
+            ad.current_wit_lookups_off,
+            ad.logup,
+        );
+        ad.current_cnst_lookups_off += 2;
+        ad.current_wit_lookups_off += 2;
+        offsets
     };
-    let x_wit_off = unsafe {
-        let r = vm.data.as_ad.current_wit_lookups_off;
-        vm.data.as_ad.current_wit_lookups_off += 1;
-        r
-    };
-    let y_coeff = unsafe {
-        let r = *vm
-            .data
-            .as_ad
-            .ad_coeffs
-            .at::<F>(vm.data.as_ad.current_cnst_lookups_off);
-        vm.data.as_ad.current_cnst_lookups_off += 1;
-        r
-    };
-    let y_wit_off = unsafe {
-        let r = vm.data.as_ad.current_wit_lookups_off;
-        vm.data.as_ad.current_wit_lookups_off += 1;
-        r
-    };
-    let inv_sum_coeff = unsafe { *vm.data.as_ad.ad_coeffs.at::<F>(sum_off) };
 
-    // x-constraint: beta * result - x_lookup = 0
-    unsafe {
-        *vm.data
-            .as_ad
-            .out_da
-            .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) += x_coeff;
-    }
-    result.bump_db(x_coeff, vm);
-    unsafe {
-        *vm.data.as_ad.out_dc.at::<F>(x_wit_off) -= x_coeff;
-    }
+    for repetition in 0..strides.repetitions {
+        let x_cnst_off = cnst_lookup_off + repetition * strides.constraint_lookups;
+        let x_wit_off = wit_lookup_off + repetition * strides.witness_lookups;
+        let (y_cnst_off, y_wit_off) = (x_cnst_off + 1, x_wit_off + 1);
+        let alpha = unsafe { vm.data.as_ad.alpha(repetition) };
+        let beta = unsafe { vm.data.as_ad.beta(repetition) };
+        let (x_coeff, y_coeff, inv_sum_coeff) = unsafe {
+            let coeffs = vm.data.as_ad.ad_coeffs;
+            (
+                *coeffs.at::<F>(x_cnst_off),
+                *coeffs.at::<F>(y_cnst_off),
+                *coeffs.at::<F>(sum_off + repetition * strides.constraint_tables),
+            )
+        };
 
-    // y-constraint: y * (alpha - x_lookup - key) = flag
-    unsafe {
-        *vm.data.as_ad.out_da.at::<F>(y_wit_off) += y_coeff;
-        *vm.data
-            .as_ad
-            .out_db
-            .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
-        *vm.data.as_ad.out_db.at::<F>(x_wit_off) -= y_coeff;
-    }
-    key.bump_db(-y_coeff, vm);
-    flag.bump_dc(y_coeff, vm);
+        // x-constraint: beta * result + x_lookup = 0
+        unsafe {
+            *vm.data.as_ad.out_da.at::<F>(beta) += x_coeff;
+        }
+        result.bump_db(x_coeff, vm);
+        unsafe {
+            *vm.data.as_ad.out_dc.at::<F>(x_wit_off) -= x_coeff;
+        }
 
-    // Sum constraint
-    unsafe {
-        *vm.data.as_ad.out_dc.at::<F>(y_wit_off) += inv_sum_coeff;
+        // y-constraint: y * (alpha - x_lookup - key) = flag
+        unsafe {
+            *vm.data.as_ad.out_da.at::<F>(y_wit_off) += y_coeff;
+            *vm.data.as_ad.out_db.at::<F>(alpha) += y_coeff;
+            *vm.data.as_ad.out_db.at::<F>(x_wit_off) -= y_coeff;
+        }
+        key.bump_db(-y_coeff, vm);
+        flag.bump_dc(y_coeff, vm);
+
+        // Sum constraint
+        unsafe {
+            *vm.data.as_ad.out_dc.at::<F>(y_wit_off) += inv_sum_coeff;
+        }
     }
 }
 
@@ -3039,78 +3110,10 @@ mod def {
     ) {
         if vm.spread_tables[bits].is_none() {
             let length = 1usize << bits;
-            let inverses_constraint_section_offset =
-                unsafe { vm.data.as_ad.current_cnst_tables_off };
-            let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
-            let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
-            let table_info = TableInfo {
-                multiplicities_wit: Tape::NONE,
-                kind: TableKind::Spread,
-                length,
-                elem_inverses_witness_section_offset: inverses_witness_section_offset,
-                elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
-            };
-            vm.spread_tables[bits] = Some(vm.tables.len());
-            vm.tables.push(table_info);
-            unsafe {
-                // Folded allocation: one constraint per entry + one sum
-                // constraint; one witness per entry.
-                vm.data.as_ad.current_wit_multiplicities_off += length;
-                vm.data.as_ad.current_wit_tables_off += length;
-                vm.data.as_ad.current_cnst_tables_off += length + 1;
-            }
-
-            let inv_sum_coeff = unsafe {
-                *vm.data
-                    .as_ad
-                    .ad_coeffs
-                    .at::<F>(inverses_constraint_section_offset + length)
-            };
-
-            for i in 0..length {
-                // Single folded constraint: y · (α - i + β·spread(i)) - m = 0
-                //   A = (y), B = (α) + (w0, -i) + (β, spread(i)), C = (m)
-                let coeff = unsafe {
-                    *vm.data
-                        .as_ad
-                        .ad_coeffs
-                        .at::<F>(inverses_constraint_section_offset + i)
-                };
-                unsafe {
-                    // da[y_wit] += coeff
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + i) += coeff;
-
-                    // db[α] += coeff
-                    *vm.data
-                        .as_ad
-                        .out_db
-                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += coeff;
-                    // db[w0] -= coeff * i
-                    *vm.data.as_ad.out_db.slot::<F>() -= coeff * F::from(i as u64);
-                    // db[β] += coeff * spread(i)
-                    *vm.data
-                        .as_ad
-                        .out_db
-                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) +=
-                        coeff * F::from(mavros_limb_arith::spread_u32_to_u64(i as u32));
-
-                    // dc[m] += coeff
-                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += coeff;
-
-                    // Sum: inv goes into A position
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + i) += inv_sum_coeff;
-                }
-            }
-
-            unsafe {
-                *vm.data.as_ad.out_db.slot::<F>() += inv_sum_coeff;
-            }
+            let values =
+                (0..length).map(|i| F::from(mavros_limb_arith::spread_u32_to_u64(i as u32)));
+            let table_idx = unsafe { ad_constant_table(TableKind::Spread, length, values, vm) };
+            vm.spread_tables[bits] = Some(table_idx);
         }
 
         let table_idx = vm.spread_tables[bits].unwrap();
@@ -3187,77 +3190,9 @@ mod def {
     ) {
         if vm.pow2_tables[size].is_none() {
             let length = 1usize << size;
-            let inverses_constraint_section_offset =
-                unsafe { vm.data.as_ad.current_cnst_tables_off };
-            let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
-            let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
-            let table_info = TableInfo {
-                multiplicities_wit: Tape::NONE,
-                kind: TableKind::Pow2,
-                length,
-                elem_inverses_witness_section_offset: inverses_witness_section_offset,
-                elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
-            };
-            vm.pow2_tables[size] = Some(vm.tables.len());
-            vm.tables.push(table_info);
-            unsafe {
-                // Folded allocation: one constraint per entry + one sum
-                // constraint; one witness per entry.
-                vm.data.as_ad.current_wit_multiplicities_off += length;
-                vm.data.as_ad.current_wit_tables_off += length;
-                vm.data.as_ad.current_cnst_tables_off += length + 1;
-            }
-
-            let inv_sum_coeff = unsafe {
-                *vm.data
-                    .as_ad
-                    .ad_coeffs
-                    .at::<F>(inverses_constraint_section_offset + length)
-            };
-
-            for (i, pow) in pow2_rows::<F>(length).enumerate() {
-                // Single folded constraint: y · (α - i + β·2^i) - m = 0
-                //   A = (y), B = (α) + (w0, -i) + (β, 2^i), C = (m)
-                let coeff = unsafe {
-                    *vm.data
-                        .as_ad
-                        .ad_coeffs
-                        .at::<F>(inverses_constraint_section_offset + i)
-                };
-                unsafe {
-                    // da[y_wit] += coeff
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + i) += coeff;
-
-                    // db[α] += coeff
-                    *vm.data
-                        .as_ad
-                        .out_db
-                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += coeff;
-                    // db[w0] -= coeff * i
-                    *vm.data.as_ad.out_db.slot::<F>() -= coeff * F::from(i as u64);
-                    // db[β] += coeff * 2^i
-                    *vm.data
-                        .as_ad
-                        .out_db
-                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) += coeff * pow;
-
-                    // dc[m] += coeff
-                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += coeff;
-
-                    // Sum: inv goes into A position
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + i) += inv_sum_coeff;
-                }
-            }
-
-            unsafe {
-                *vm.data.as_ad.out_db.slot::<F>() += inv_sum_coeff;
-            }
+            let values = pow2_rows::<F>(length);
+            let table_idx = unsafe { ad_constant_table(TableKind::Pow2, length, values, vm) };
+            vm.pow2_tables[size] = Some(table_idx);
         }
 
         let table_idx = vm.pow2_tables[size].unwrap();
@@ -3423,115 +3358,54 @@ mod def {
     ) {
         let length = 1usize << bits;
         if vm.rgchk_tables[bits].is_none() {
-            let inverses_constraint_section_offset =
-                unsafe { vm.data.as_ad.current_cnst_tables_off };
-            let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
-            let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
-            let table_info = TableInfo {
-                multiplicities_wit: Tape::NONE,
-                kind: TableKind::RangeCheck,
-                length,
-                elem_inverses_witness_section_offset: inverses_witness_section_offset,
-                elem_inverses_constraint_section_offset: inverses_constraint_section_offset,
-            };
-            vm.rgchk_tables[bits] = Some(vm.tables.len());
-            vm.tables.push(table_info);
-            unsafe {
-                vm.data.as_ad.current_wit_multiplicities_off += length;
-                vm.data.as_ad.current_wit_tables_off += length;
-                vm.data.as_ad.current_cnst_tables_off += length + 1;
-            }
-            let inv_sum_coeff = unsafe {
-                *vm.data
-                    .as_ad
-                    .ad_coeffs
-                    .at::<F>(inverses_constraint_section_offset + length)
-            };
-
-            for i in 0..length {
-                // For each element in the table, we have constraint `elem_inv_witness * (alpha - i) - multiplicity_witness = 0`
-                let coeff = unsafe {
-                    *vm.data
-                        .as_ad
-                        .ad_coeffs
-                        .at::<F>(inverses_constraint_section_offset + i)
-                };
-                unsafe {
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + i) += coeff;
-                    // if i == 0 {
-                    //     println!("bump da at {} from inv by {coeff}", inverses_witness_section_offset as isize + i);
-                    // }
-
-                    *vm.data
-                        .as_ad
-                        .out_db
-                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += coeff;
-                    *vm.data.as_ad.out_db.slot::<F>() -= coeff * F::from(i as u64);
-
-                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += coeff;
-                }
-
-                // Also each inv goes into the A position of the total sum
-                unsafe {
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + i) += inv_sum_coeff;
-                }
-            }
-
-            // The coeff at B on the sum constraint is just `1` so we bump it.
-            unsafe {
-                *vm.data.as_ad.out_db.slot::<F>() += inv_sum_coeff;
-            }
+            let values = (0..length).map(|_| F::ZERO);
+            let table_idx = unsafe { ad_constant_table(TableKind::RangeCheck, length, values, vm) };
+            vm.rgchk_tables[bits] = Some(table_idx);
         }
         let table_idx = vm.rgchk_tables[bits].unwrap();
-        let table_info = &vm.tables[table_idx];
+        let table_cnst_off = vm.tables[table_idx].elem_inverses_constraint_section_offset;
 
-        let inv_coeff = unsafe {
-            let r = *vm
-                .data
-                .as_ad
-                .ad_coeffs
-                .at::<F>(vm.data.as_ad.current_cnst_lookups_off);
-            vm.data.as_ad.current_cnst_lookups_off += 1;
-            r
+        // Repetition 0's row and column; the cursors move past them.
+        let (cnst_lookup_off, wit_lookup_off, strides) = unsafe {
+            let ad = &mut vm.data.as_ad;
+            let offsets = (
+                ad.current_cnst_lookups_off,
+                ad.current_wit_lookups_off,
+                ad.logup,
+            );
+            ad.current_cnst_lookups_off += 1;
+            ad.current_wit_lookups_off += 1;
+            offsets
         };
 
-        let inv_sum_coeff = unsafe {
-            *vm.data
-                .as_ad
-                .ad_coeffs
-                .at::<F>(table_info.elem_inverses_constraint_section_offset + length)
-        };
+        for repetition in 0..strides.repetitions {
+            let inv_wit_off = wit_lookup_off + repetition * strides.witness_lookups;
+            let alpha = unsafe { vm.data.as_ad.alpha(repetition) };
+            let (inv_coeff, inv_sum_coeff) = unsafe {
+                let coeffs = vm.data.as_ad.ad_coeffs;
+                (
+                    *coeffs.at::<F>(cnst_lookup_off + repetition * strides.constraint_lookups),
+                    *coeffs
+                        .at::<F>(table_cnst_off + repetition * strides.constraint_tables + length),
+                )
+            };
 
-        let current_inv_wit_offset = unsafe {
-            let r = vm.data.as_ad.current_wit_lookups_off;
-            vm.data.as_ad.current_wit_lookups_off += 1;
-            r
-        };
+            unsafe {
+                // bump for the RHS of the sum
+                *vm.data.as_ad.out_dc.at::<F>(inv_wit_off) += inv_sum_coeff;
 
-        unsafe {
-            // bump for the RHS of the sum
-            *vm.data.as_ad.out_dc.at::<F>(current_inv_wit_offset) += inv_sum_coeff;
+                // bumps for the inversion assert: y*(α-key) = flag
+                // da[y] += inv_coeff
+                *vm.data.as_ad.out_da.at::<F>(inv_wit_off) += inv_coeff;
 
-            // bumps for the inversion assert: y*(α-key) = flag
-            // da[y] += inv_coeff
-            *vm.data.as_ad.out_da.at::<F>(current_inv_wit_offset) += inv_coeff;
+                // db[α] += inv_coeff
+                *vm.data.as_ad.out_db.at::<F>(alpha) += inv_coeff;
+                // db[key] -= inv_coeff
+                val.bump_db(-inv_coeff, vm);
 
-            // db[α] += inv_coeff
-            *vm.data
-                .as_ad
-                .out_db
-                .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += inv_coeff;
-            // db[key] -= inv_coeff
-            val.bump_db(-inv_coeff, vm);
-
-            // dc[flag] += inv_coeff  (RHS is flag, not constant 1)
-            flag.bump_dc(inv_coeff, vm);
+                // dc[flag] += inv_coeff
+                flag.bump_dc(inv_coeff, vm);
+            }
         }
     }
 
@@ -3556,75 +3430,84 @@ mod def {
             let inverses_witness_section_offset = unsafe { vm.data.as_ad.current_wit_tables_off };
             let multiplicities_wit_offset = unsafe { vm.data.as_ad.current_wit_multiplicities_off };
 
+            let strides = unsafe { vm.data.as_ad.logup };
             let length = unsafe {
                 for_each_array_leaf(array, stride, |i, elem_ptr| {
-                    // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
-                    let x_coeff = *vm
-                        .data
-                        .as_ad
-                        .ad_coeffs
-                        .at::<F>(inverses_constraint_section_offset + 2 * i);
-                    // da[beta] += x_coeff (A entry: (beta, 1))
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off + 1) += x_coeff;
-                    // db[v_i] += x_coeff (B entry: element value)
-                    lookup_elem_bump_db(elem_ptr, elem_kind, stride, x_coeff, vm);
-                    // dc[x_wit] -= x_coeff (C entry: (x, -1))
-                    *vm.data
-                        .as_ad
-                        .out_dc
-                        .at::<F>(inverses_witness_section_offset + 2 * i) -= x_coeff;
+                    for repetition in 0..strides.repetitions {
+                        let inverses_constraint_section_offset = inverses_constraint_section_offset
+                            + repetition * strides.constraint_tables;
+                        let inverses_witness_section_offset =
+                            inverses_witness_section_offset + repetition * strides.witness_tables;
+                        let alpha = vm.data.as_ad.alpha(repetition);
+                        let beta = vm.data.as_ad.beta(repetition);
+                        // x-constraint at base + 2*i: A=[(beta,1)], B=v_i, C=[(x,-1)]
+                        let x_coeff = *vm
+                            .data
+                            .as_ad
+                            .ad_coeffs
+                            .at::<F>(inverses_constraint_section_offset + 2 * i);
+                        // da[beta] += x_coeff (A entry: (beta, 1))
+                        *vm.data.as_ad.out_da.at::<F>(beta) += x_coeff;
+                        // db[v_i] += x_coeff (B entry: element value)
+                        lookup_elem_bump_db(elem_ptr, elem_kind, stride, x_coeff, vm);
+                        // dc[x_wit] -= x_coeff (C entry: (x, -1))
+                        *vm.data
+                            .as_ad
+                            .out_dc
+                            .at::<F>(inverses_witness_section_offset + 2 * i) -= x_coeff;
 
-                    // y-constraint at base + 2*i + 1: A=y_i, B=(alpha - i - x_i), C=mult_i
-                    let y_coeff = *vm
-                        .data
-                        .as_ad
-                        .ad_coeffs
-                        .at::<F>(inverses_constraint_section_offset + 2 * i + 1);
-                    // dA[y_witness] += y_coeff
-                    *vm.data
-                        .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + 2 * i + 1) += y_coeff;
-                    // dB[alpha] += y_coeff
-                    *vm.data
-                        .as_ad
-                        .out_db
-                        .at::<F>(vm.data.as_ad.logup_wit_challenge_off) += y_coeff;
-                    // dB -= y_coeff * i (constant part)
-                    *vm.data.as_ad.out_db.slot::<F>() -= y_coeff * F::from(i as u64);
-                    // dB[x_witness] -= y_coeff (x_i appears negated in B)
-                    *vm.data
-                        .as_ad
-                        .out_db
-                        .at::<F>(inverses_witness_section_offset + 2 * i) -= y_coeff;
-                    // dC[mult_witness] += y_coeff
-                    *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += y_coeff;
+                        // y-constraint at base + 2*i + 1: A=y_i, B=(alpha - i - x_i), C=mult_i
+                        let y_coeff = *vm
+                            .data
+                            .as_ad
+                            .ad_coeffs
+                            .at::<F>(inverses_constraint_section_offset + 2 * i + 1);
+                        // dA[y_witness] += y_coeff
+                        *vm.data
+                            .as_ad
+                            .out_da
+                            .at::<F>(inverses_witness_section_offset + 2 * i + 1) += y_coeff;
+                        // dB[alpha] += y_coeff
+                        *vm.data.as_ad.out_db.at::<F>(alpha) += y_coeff;
+                        // dB -= y_coeff * i (constant part)
+                        *vm.data.as_ad.out_db.slot::<F>() -= y_coeff * F::from(i as u64);
+                        // dB[x_witness] -= y_coeff (x_i appears negated in B)
+                        *vm.data
+                            .as_ad
+                            .out_db
+                            .at::<F>(inverses_witness_section_offset + 2 * i) -= y_coeff;
+                        // dC[mult_witness] += y_coeff
+                        *vm.data.as_ad.out_dc.at::<F>(multiplicities_wit_offset + i) += y_coeff;
+                    }
                 })
             };
 
-            let sum_coeff = unsafe {
-                *vm.data
-                    .as_ad
-                    .ad_coeffs
-                    .at::<F>(inverses_constraint_section_offset + 2 * length)
-            };
-
-            // Sum constraint: y_i goes into A position
-            for i in 0..length {
-                unsafe {
+            for repetition in 0..strides.repetitions {
+                let inverses_constraint_section_offset =
+                    inverses_constraint_section_offset + repetition * strides.constraint_tables;
+                let inverses_witness_section_offset =
+                    inverses_witness_section_offset + repetition * strides.witness_tables;
+                let sum_coeff = unsafe {
                     *vm.data
                         .as_ad
-                        .out_da
-                        .at::<F>(inverses_witness_section_offset + 2 * i + 1) += sum_coeff;
-                }
-            }
+                        .ad_coeffs
+                        .at::<F>(inverses_constraint_section_offset + 2 * length)
+                };
 
-            // Sum constraint B=1: bump out_db by sum_coeff
-            unsafe {
-                *vm.data.as_ad.out_db.slot::<F>() += sum_coeff;
+                // Sum constraint: y_i goes into A position
+                for i in 0..length {
+                    unsafe {
+                        *vm.data
+                            .as_ad
+                            .out_da
+                            .at::<F>(inverses_witness_section_offset + 2 * i + 1) += sum_coeff;
+                    }
+                }
+
+                // Sum constraint B=1: bump out_db by sum_coeff
+                unsafe {
+                    *vm.data.as_ad.out_db.slot::<F>() += sum_coeff;
+                }
             }
 
             let table_info = TableInfo {
@@ -5112,7 +4995,7 @@ mod tests {
     #[test]
     fn opcode_numbers_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 4,
+            PROGRAM_FORMAT_VERSION, 5,
             "the format version these numbers belong to"
         );
         let pinned: &[(usize, &str)] = &[
@@ -5707,6 +5590,7 @@ mod tests {
             algebraic_size: 8,
             multiplicities_size: 16,
             challenges_size: 2,
+            logup_repetitions: 1,
             tables_data_size: 32,
             lookups_data_size: 16,
         };
@@ -6027,7 +5911,7 @@ mod tests {
     #[test]
     fn boxed_layout_encodings_are_pinned() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 4,
+            PROGRAM_FORMAT_VERSION, 5,
             "the format version these encodings belong to"
         );
         let codes = [
@@ -6127,7 +6011,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unsupported VM program format version Some(1); expected 4")]
+    #[should_panic(expected = "unsupported VM program format version Some(1); expected 5")]
     fn a_binary_of_another_format_version_is_refused() {
         // A version-1 binary, which has no field word.
         parse_program_header(&[PROGRAM_MAGIC, 1, 0, 0, 0, 0, u64::MAX, 0]);
@@ -6154,7 +6038,7 @@ mod tests {
     #[test]
     fn the_program_header_names_its_field() {
         assert_eq!(
-            PROGRAM_FORMAT_VERSION, 4,
+            PROGRAM_FORMAT_VERSION, 5,
             "the format version these codes belong to"
         );
         assert_eq!([FieldId::Bn254.code(), FieldId::Goldilocks.code()], [1, 2]);

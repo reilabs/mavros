@@ -25,11 +25,11 @@ pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 /// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
 /// Appending opcodes without changing existing production encodings does not require a bump.
 /// The third word names the program's field ([`FieldId::code`]).
-pub const PROGRAM_FORMAT_VERSION: u64 = 4;
+pub const PROGRAM_FORMAT_VERSION: u64 = 5;
 
 /// Buffer layouts bound to the compiled constraint traversal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConstraintLayouts([u64; 8]);
+pub struct ConstraintLayouts([u64; 9]);
 
 impl ConstraintLayouts {
     pub fn new(witness: WitnessLayout, constraints: ConstraintsLayout) -> Self {
@@ -37,6 +37,7 @@ impl ConstraintLayouts {
             witness.algebraic_size as u64,
             witness.multiplicities_size as u64,
             witness.challenges_size as u64,
+            witness.logup_repetitions as u64,
             witness.tables_data_size as u64,
             witness.lookups_data_size as u64,
             constraints.algebraic_size as u64,
@@ -45,8 +46,8 @@ impl ConstraintLayouts {
         ])
     }
 
-    /// The eight header words, in the order [`Self::new`] reads its fields.
-    pub fn words(self) -> [u64; 8] {
+    /// The nine header words, in the order [`Self::new`] reads its fields.
+    pub fn words(self) -> [u64; 9] {
         self.0
     }
 }
@@ -110,8 +111,8 @@ impl ProgramHeader {
         let (constraint_layouts, off) = match word(3)? {
             0 => (None, 4),
             1 => {
-                let layouts = words(4, 8)?.try_into().expect("8 words");
-                (Some(ConstraintLayouts(layouts)), 12)
+                let layouts = words(4, 9)?.try_into().expect("9 words");
+                (Some(ConstraintLayouts(layouts)), 13)
             }
             tag => return Err(format!("invalid constraint layout tag {tag}")),
         };
