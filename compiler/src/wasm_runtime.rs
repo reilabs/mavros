@@ -131,8 +131,9 @@ pub fn locate_or_build() -> Result<PathBuf, ToolchainError> {
         )));
     }
 
-    let lib_path = workspace_root
-        .join("target")
+    let lib_path = metadata
+        .target_directory
+        .as_std_path()
         .join("wasm32-unknown-unknown")
         .join("release")
         .join("libmavros_wasm_runtime.a");
