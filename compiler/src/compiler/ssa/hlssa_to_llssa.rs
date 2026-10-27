@@ -4654,7 +4654,8 @@ mod tests {
             },
         };
         use mavros_wasm_layout::{WITGEN_INPUTS_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE};
-        let runtime = crate::wasm_runtime::locate_or_build().unwrap();
+        let runtime =
+            crate::wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}"));
         for (name, sequence, write) in [
             ("array_get", Some(SequenceTargetType::Array(2)), false),
             ("slice_get", Some(SequenceTargetType::Slice), false),
@@ -4941,7 +4942,8 @@ mod tests {
         codegen.compile(&llssa, &FlowAnalysis::run(&llssa));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("subject.wasm");
-        let runtime = crate::wasm_runtime::locate_or_build().unwrap();
+        let runtime =
+            crate::wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}"));
         codegen.compile_to_wasm(&path, WasmCompileOpts::fast(runtime));
 
         let engine = wasmtime::Engine::default();
