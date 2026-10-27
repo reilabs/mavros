@@ -39,9 +39,12 @@ release: ## Build Mavros in release mode
 STATUS ?= STATUS.md
 JOBS ?= 4
 
+# Extra nextest options, e.g. NEXTEST_ARGS='--profile ci' or '--test-threads 4'.
+NEXTEST_ARGS ?=
+
 .PHONY: unit-test
-unit-test: ## Run the unit tests
-	$(SHELL_WRAPPER) env RUST_MIN_STACK=8388608 cargo test --all-targets --all-features
+unit-test: ## Run unit tests in parallel with nextest (override with NEXTEST_ARGS=<args>)
+	$(SHELL_WRAPPER) bash scripts/unit-test.sh $(NEXTEST_ARGS)
 
 .PHONY: func-test
 func-test: ## Run the functional test harness (override with STATUS=<path> JOBS=<n>)
