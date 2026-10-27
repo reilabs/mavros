@@ -901,7 +901,9 @@ pub fn bytecode_listing(ssa: &HLSSA) -> String {
 fn compile_wasm(driver: &mut Driver, r1cs: &R1CS) -> Option<WasmArtifact> {
     let scratch = TempDir::new().ok()?;
     let path = scratch.path().join("program.wasm");
-    let options = WasmCompileOpts::fast(wasm_runtime::locate_or_build());
+    let options = WasmCompileOpts::fast(
+        wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}")),
+    );
 
     driver
         .compile_llvm_targets(

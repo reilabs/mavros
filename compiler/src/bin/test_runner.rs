@@ -453,9 +453,11 @@ fn run_single(root: PathBuf, expect_failure: bool, analyze: bool) {
         emit("START:WASM_COMPILE");
         let tmpdir = tempfile::tempdir().ok()?;
         let wasm_path = tmpdir.keep().join("program.wasm");
-        let wasm_opts = WasmCompileOpts::fast(wasm_runtime::locate_or_build())
-            .with_debug_path_root(&source_path_root)
-            .with_debug_info();
+        let wasm_opts = WasmCompileOpts::fast(
+            wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}")),
+        )
+        .with_debug_path_root(&source_path_root)
+        .with_debug_info();
         match driver.compile_llvm_targets(
             false,
             r1cs,
@@ -901,7 +903,8 @@ fn run_parent(output_path: &Path, jobs: usize, ignored_tests: &[&str], analyze: 
     // If children built it themselves, their `cargo metadata`/`cargo build` invocations would
     // walk the noir git checkout while other children create and delete `mavros_debug` dirs for
     // tests living inside it, crashing whichever child loses the race.
-    let wasm_runtime_lib = wasm_runtime::locate_or_build();
+    let wasm_runtime_lib =
+        wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}"));
     eprintln!("Built wasm runtime at: {}", wasm_runtime_lib.display());
 
     let exe = env::current_exe().expect("Cannot determine own exe path");
@@ -1301,7 +1304,8 @@ fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
         .collect();
 
     // Build the wasm runtime once and hand children the artifact path (see `run_parent`).
-    let wasm_runtime_lib = wasm_runtime::locate_or_build();
+    let wasm_runtime_lib =
+        wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}"));
     let exe = env::current_exe().expect("Cannot determine own exe path");
 
     let scratch = tempfile::tempdir().expect("Cannot create scratch dir");
