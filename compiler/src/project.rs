@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use fm::FileManager;
+use fm::{FileId, FileManager};
 use itertools::Itertools;
 use nargo::{
     package::{Dependency, Package},
@@ -132,10 +132,13 @@ const FOREIGN_REPLACEMENTS: &[&str] = &[
     "sha256_compression",
 ];
 
-/// Rewrite all registered `#[foreign]` and `#[builtin]` shims to call their replacements.
-fn replace_foreign_functions(parsed_files: &mut ParsedFiles) {
+/// Rewrite all registered `#[foreign]` and `#[builtin]` shims in stdlib to call their replacements.
+fn replace_foreign_functions(stdlib_files: &HashSet<FileId>, parsed_files: &mut ParsedFiles) {
     let mut replaced: HashSet<&'static str> = HashSet::default();
-    for (module, _) in parsed_files.values_mut() {
+    for file_id in stdlib_files {
+        let (module, _) = parsed_files
+            .get_mut(file_id)
+            .expect("every stdlib file is parsed");
         replace_foreign_functions_in_module(module, &mut replaced);
     }
     for foreign_name in FOREIGN_REPLACEMENTS {
@@ -189,7 +192,7 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
         .iter()
         .map(|param| {
             let Pattern::Identifier(ident) = &param.pattern else {
-                ice_usr!("foreign function '{foreign_name}' has a non-identifier parameter pattern")
+                ice!("foreign function '{foreign_name}' has a non-identifier parameter pattern")
             };
             variable(AstPath::plain(
                 vec![PathSegment {
@@ -276,6 +279,7 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     // Build the file manager manually so we can expose the Mavros extensions from the embedded
     // stdlib root without maintaining a copy of upstream's `std/lib.nr`.
     let mut file_manager = FileManager::new(&workspace.root_dir);
+    let mut stdlib_files: HashSet<FileId> = HashSet::default();
 
     // 1. Add the embedded stdlib, extending its root with the Mavros module declaration.
     let stdlib_root = Path::new("std/lib.nr");
@@ -285,13 +289,16 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
             source.push_str("\npub mod mavros;\n");
             extended_stdlib_root = true;
         }
-        file_manager.add_file_with_source_canonical_path(Path::new(&path), source);
+        stdlib_files
+            .extend(file_manager.add_file_with_source_canonical_path(Path::new(&path), source));
     }
     assert!(extended_stdlib_root, "embedded stdlib root was not found");
 
     // 2. Add the Mavros stdlib extensions.
     for (path, source) in MAVROS_STDLIB_FILES {
-        file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string());
+        stdlib_files.extend(
+            file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string()),
+        );
     }
 
     // 3. Add workspace files
@@ -302,7 +309,7 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     gate_bn254_stdlib_apis(&file_manager, &mut parsed_files);
 
     // 5. Rewrite replaced stdlib functions to call their pure-Noir implementations
-    replace_foreign_functions(&mut parsed_files);
+    replace_foreign_functions(&stdlib_files, &mut parsed_files);
     (file_manager, parsed_files)
 }
 
