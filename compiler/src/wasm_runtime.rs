@@ -96,7 +96,7 @@ pub fn load_wasmtime_module(
 /// test runner therefore builds the runtime once up front and points children at the artifact
 /// via [`WASM_RUNTIME_LIB_ENV`], so they never invoke cargo.
 pub fn locate_or_build() -> Result<PathBuf, ToolchainError> {
-    if let Ok(lib_path) = std::env::var(WASM_RUNTIME_LIB_ENV) {
+    if let Some(lib_path) = std::env::var_os(WASM_RUNTIME_LIB_ENV) {
         let lib_path = PathBuf::from(lib_path);
         if lib_path.exists() {
             return Ok(lib_path);
