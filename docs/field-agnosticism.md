@@ -270,10 +270,12 @@ before conversion to the chosen VM field.
       located diagnostic, and negates it for a negative literal (so `-1` is `p - 1` on Goldilocks).
 - [x] `compiler/src/driver.rs` — `run_noir_compiler_for_field` passes the selected field to both
       Noir's frontend and Mavros' AST lowering. Existing callers default to BN254.
-- [ ] Mavros' injected stdlib replacements contain BN254-only constants and casts (including
-      `u128 as Field`). Goldilocks compilation currently rejects these before monomorphization, even
-      for programs that do not call those replacements. Porting the libraries is separate from
-      running and reporting the test corpus under each field.
+- [x] Mavros' injected stdlib compiles under both fields. BN254-only curve, Poseidon2 and vendored
+      bignum modules are field-gated before type checking. ECDSA and Poseidon2 calls on Goldilocks
+      produce unavailable-item frontend diagnostics; their BN254 constants are never reduced
+      into the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and
+      retains the packed spread implementation on BN254. BLAKE's small-field additions likewise
+      use integer carries, avoiding native-field bit decomposition. AES is shared.
 - [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is unsatisfiable
       for a value at or above `2^n`, on every field: `LowerWitnessNarrowingCast` windows an `Int`
       source only, and a `Field` source relies on the frontend emitting `bit_range(v, 0, n)` before
@@ -600,7 +602,9 @@ VM program alone.
 
 The secp256k1 and secp256r1 replacements share curve-generic code, but their vendored arithmetic
 assumes the headroom of the BN254 proving field. The ECDSA base field `Fq` and scalar field `Fr` are
-non-native fields; neither is the Noir `Field` used to constrain their arithmetic.
+non-native fields; neither is the Noir `Field` used to constrain their arithmetic. The vendored
+modules are currently gated to BN254. Goldilocks can compile unrelated programs, but calling either
+ECDSA replacement fails with a frontend diagnostic.
 
 - [ ] `mavros_stdlib/vendor/bignum.nr` — `constants`, limb range checks, multiplication and
       reduction gadgets use radix `2^120`, `u128` limbs, and native `Field` accumulators, including

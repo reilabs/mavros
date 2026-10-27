@@ -2507,20 +2507,6 @@ mod tests {
                 ),
             )
             .unwrap();
-            if F::ID == FieldId::Goldilocks {
-                // The injected replacements contain BN254-only casts. Until those libraries
-                // are ported, even this tiny program must expose their frontend diagnostics.
-                let project = Project::new(tmp.path().to_path_buf()).unwrap();
-                let mut driver = Driver::new(project, false);
-                let error = driver
-                    .run_noir_compiler_for_field(field_config(F::ID))
-                    .unwrap_err();
-                assert!(matches!(error, DriverError::NoirCompilerError { .. }));
-                let diagnostic = error.to_string();
-                assert!(diagnostic.contains("std/mavros/"));
-                assert!(diagnostic.contains("can exceed the field modulus"));
-                return;
-            }
             let mut run = run_single_vm::<F>(tmp.path().to_path_buf(), false, false).unwrap();
             let r1cs = run.r1cs.as_ref().expect("R1CS generation must succeed");
             let artifact = run
