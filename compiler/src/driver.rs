@@ -1053,11 +1053,11 @@ impl Driver {
         let manifest = self.witness_manifest(&r1cs)?;
         let abi = serde_json::to_vec(self.abi()).expect("a Noir ABI always serializes to JSON");
         Ok(Artifact::new(
+            COMPILER_VERSION.to_string(),
             manifest,
             r1cs,
             bytecode,
             abi,
-            COMPILER_VERSION.to_string(),
         ))
     }
 

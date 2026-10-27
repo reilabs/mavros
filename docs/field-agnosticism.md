@@ -100,7 +100,7 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   constants through `FieldConfig` (`constant` takes `IntoFieldElement`), which refuses an element of
   another field.
 - **The VM** carries `goldilocks_*` copies of every field opcode in every build. A program binary
-  names its field in its header (format version 3), and a run over another field is refused.
+  names its field in its header, and a run over another field is refused.
 - **The R1CS** is generic (`R1CS<F>`, with bn254 as the default): `Driver::generate_r1cs::<F>`
   refuses an `F` other than the program's field, `R1CGen<F>` converts constants with
   `MavrosField::from_element`, and a serialized coefficient is `F::CANONICAL_LIMBS` limbs.

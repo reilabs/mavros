@@ -293,6 +293,7 @@ fn run_compile_package(
                 "binary": verifier.binary,
                 "witness_layout": artifact.r1cs().witness_layout,
                 "constraints_layout": artifact.r1cs().constraints_layout,
+                "circuit_digest": mavros_artifacts::hex(&artifact.circuit_digest()),
             }))?,
         )?;
         write_vm_debug_info(output, verifier.debug_info, &driver, absolute_paths)?;
@@ -1105,7 +1106,7 @@ mod tests {
     /// Covers LogUp slots, unused private inputs and partially read compound parameters.
     #[test]
     fn compile_writes_one_artifact() {
-        use mavros_artifacts::{Artifact, ParamVisibility};
+        use mavros_artifacts::{Artifact, ArtifactPreamble, ParamVisibility};
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         fs::create_dir_all(root.join("src")).unwrap();
@@ -1131,16 +1132,16 @@ mod tests {
         let artifact: Artifact = Artifact::from_bytes(&bytes).unwrap();
         let manifest = artifact.manifest();
         assert_eq!(manifest.entry_blob_field_count(), 8);
-        assert_eq!(
-            mavros_vm::bytecode::parse_program_header(artifact.bytecode()).entry_blob_field_count,
-            8
-        );
         let abi: noirc_abi::Abi = serde_json::from_slice(artifact.abi()).unwrap();
         let names: Vec<_> = abi.parameters.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["unused", "unused_u8", "x", "y"]);
         assert_eq!(
             artifact.compiler(),
             mavros_compiler::driver::COMPILER_VERSION
+        );
+        assert_eq!(
+            ArtifactPreamble::peek(&bytes).unwrap().compiler.as_deref(),
+            Some(mavros_compiler::driver::COMPILER_VERSION)
         );
         let columns: Vec<_> = manifest
             .parameters
@@ -1178,6 +1179,33 @@ mod tests {
             ExitCode::SUCCESS
         );
         assert_eq!(fs::read(&again).unwrap(), bytes);
+
+        // What a consumer does with the file: witgen and AD from its bytecode, R1CS and ABI.
+        fs::write(
+            root.join("Prover.toml"),
+            "unused = \"7\"\nunused_u8 = \"9\"\nx = [\"1\", \"5\", \"2\"]\ny = [\"3\", \"0\", \"0\"]\nreturn = [\"6\", \"5\"]\n",
+        )
+        .unwrap();
+        let (params, declared_return) = api::read_prover_inputs(&root, &abi).unwrap();
+        let r1cs = artifact.r1cs();
+        let mut bytecode = artifact.bytecode().to_vec();
+        let witgen = api::run_witgen_from_binary(&mut bytecode, r1cs, &params, None).unwrap();
+        assert!(api::check_witgen(r1cs, &witgen));
+        mavros_compiler::abi_helpers::check_witness_manifest(
+            manifest,
+            &params,
+            declared_return.as_ref(),
+            &witgen.out_wit_pre_comm,
+        )
+        .unwrap();
+        use ark_ff::UniformRand as _;
+        use rand::SeedableRng as _;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let coeffs: Vec<RawField> = (0..r1cs.constraints.len())
+            .map(|_| RawField::rand(&mut rng))
+            .collect();
+        let (a, b, c, _) = api::run_ad_from_binary(&mut bytecode, r1cs, &coeffs, None).unwrap();
+        assert!(api::check_ad(r1cs, &coeffs, &a, &b, &c));
     }
 
     #[test]
