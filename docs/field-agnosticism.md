@@ -272,10 +272,10 @@ before conversion to the chosen VM field.
       Noir's frontend and Mavros' AST lowering. Existing callers default to BN254.
 - [x] Mavros' injected stdlib compiles under both fields. BN254-only curve, Poseidon2 and vendored
       bignum modules are field-gated before type checking. ECDSA and Poseidon2 calls on Goldilocks
-      produce unavailable-item frontend diagnostics; their BN254 constants are never reduced
-      into the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and
-      retains the packed spread implementation on BN254. BLAKE's small-field additions likewise
-      use integer carries, avoiding native-field bit decomposition. AES is shared.
+      produce unavailable-item frontend diagnostics; their BN254 constants are never reduced into
+      the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and retains
+      the packed spread implementation on BN254. BLAKE's small-field additions likewise use integer
+      carries, avoiding native-field bit decomposition. AES is shared.
 - [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is unsatisfiable
       for a value at or above `2^n`, on every field: `LowerWitnessNarrowingCast` windows an `Int`
       source only, and a `Field` source relies on the frontend emitting `bit_range(v, 0, n)` before
