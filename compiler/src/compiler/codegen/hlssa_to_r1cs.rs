@@ -26,8 +26,8 @@ use crate::compiler::{
 };
 
 pub use mavros_artifacts::{
-    ConstraintsLayout, FlamegraphProfile, FlamegraphStackId, LC, R1C, R1CS, SealedR1CS,
-    WitnessLayout,
+    ConstraintsLayout, FlamegraphProfile, FlamegraphStackId, LC, MAX_LOGUP_REPETITIONS, R1C, R1CS,
+    SealedR1CS, WitnessLayout,
 };
 
 /// Per-function circuit-size profiles produced alongside the R1CS.
@@ -408,6 +408,8 @@ pub struct LookupConstraint<F: MavrosField = RawField> {
     pub table_id: usize,
     pub elements: Vec<LC<F>>,
     pub flag: LC<F>,
+    /// The profile's (constraints, witnesses) stacks of the lookup's call site, when profiling.
+    profile_stacks: Option<(FlamegraphStackId, FlamegraphStackId)>,
 }
 
 #[derive(Clone, Debug)]
@@ -436,12 +438,19 @@ impl<F: MavrosField> Table<F> {
         }
     }
 
-    fn profile_size(&self) -> (u64, u64) {
+    /// The (constraints, witnesses) of one LogUp repetition of the table.
+    fn repetition_profile_size(&self) -> (u64, u64) {
         let rows = self.row_count() as u64;
         match self {
-            Table::Range(_) | Table::Spread(_) | Table::Pow2(_) => (rows + 1, 2 * rows),
-            Table::OfElems(_) => (2 * rows + 1, 3 * rows),
+            Table::Range(_) | Table::Spread(_) | Table::Pow2(_) => (rows + 1, rows),
+            Table::OfElems(_) => (2 * rows + 1, 2 * rows),
         }
+    }
+
+    /// The (constraints, witnesses) of the multiplicities and one LogUp repetition.
+    fn profile_size(&self) -> (u64, u64) {
+        let (constraints, witnesses) = self.repetition_profile_size();
+        (constraints, witnesses + self.row_count() as u64)
     }
 
     fn profile_name(&self, table_index: usize) -> String {
@@ -578,10 +587,17 @@ impl<F: MavrosField> symbolic_executor::Context<Value<F>> for R1CGen<F> {
         };
         self.record_constraints(lookup_size);
         self.record_witnesses(lookup_size);
+        let profile_stacks = self.profile.is_some().then(|| {
+            *self
+                .call_stack_ids
+                .last()
+                .expect("a lookup sits in a call frame")
+        });
         self.lookups.push(LookupConstraint {
             table_id,
             elements: els,
             flag: flag_lc,
+            profile_stacks,
         });
     }
 
@@ -1253,12 +1269,27 @@ impl<F: MavrosField> R1CGen<F> {
         &self.entry_columns
     }
 
-    pub fn seal(self) -> R1CS<F> {
-        self.seal_impl().0
+    /// Whether the program looks anything up, so that sealing emits a LogUp argument.
+    pub fn has_lookup_tables(&self) -> bool {
+        !self.tables.is_empty()
     }
 
-    pub fn seal_with_profile(self) -> Result<(R1CS<F>, R1CSProfile), R1CSProfileDisabled<F>> {
-        let (r1cs, profile) = self.seal_impl();
+    /// Number of table entries, one term per entry on the table side of the LogUp identity.
+    pub fn num_table_entries(&self) -> usize {
+        self.tables.iter().map(Table::row_count).sum()
+    }
+
+    /// Seals the system with `logup_repetitions` independent repetitions of the LogUp argument: one
+    /// to [`MAX_LOGUP_REPETITIONS`], and ignored when the program has no lookup table.
+    pub fn seal(self, logup_repetitions: usize) -> R1CS<F> {
+        self.seal_impl(logup_repetitions).0
+    }
+
+    pub fn seal_with_profile(
+        self,
+        logup_repetitions: usize,
+    ) -> Result<(R1CS<F>, R1CSProfile), R1CSProfileDisabled<F>> {
+        let (r1cs, profile) = self.seal_impl(logup_repetitions);
         match profile {
             Some(profile) => Ok((r1cs, profile)),
             None => Err(R1CSProfileDisabled {
@@ -1267,7 +1298,11 @@ impl<F: MavrosField> R1CGen<F> {
         }
     }
 
-    fn seal_impl(mut self) -> (R1CS<F>, Option<R1CSProfile>) {
+    fn seal_impl(mut self, logup_repetitions: usize) -> (R1CS<F>, Option<R1CSProfile>) {
+        assert!(
+            (1..=MAX_LOGUP_REPETITIONS).contains(&logup_repetitions),
+            "LogUp takes one to {MAX_LOGUP_REPETITIONS} repetitions, not {logup_repetitions}"
+        );
         // The rows below are `LC`s, which hold raw coefficients.
         let field = self.field;
         let one = F::from_element(field.one());
@@ -1278,6 +1313,7 @@ impl<F: MavrosField> R1CGen<F> {
             algebraic_size: self.next_witness,
             multiplicities_size: 0,
             challenges_size: 0,
+            logup_repetitions: 0,
             tables_data_size: 0,
             lookups_data_size: 0,
         };
@@ -1292,7 +1328,8 @@ impl<F: MavrosField> R1CGen<F> {
         struct TableInfo<F: MavrosField> {
             multiplicities_witness_off: usize,
             table: Table<F>,
-            sum_constraint_idx: usize,
+            /// Per repetition.
+            sum_constraint_idx: Vec<usize>,
         }
         let mut table_infos = vec![];
         let mut max_width = 0;
@@ -1303,7 +1340,7 @@ impl<F: MavrosField> R1CGen<F> {
                 multiplicities_witness_off: witness_layout.multiplicities_size
                     + witness_layout.algebraic_size,
                 table,
-                sum_constraint_idx: 0,
+                sum_constraint_idx: Vec::with_capacity(logup_repetitions),
             });
             witness_layout.multiplicities_size += len;
         }
@@ -1328,146 +1365,177 @@ impl<F: MavrosField> R1CGen<F> {
         }
 
         // challenges init
-        // FIELD-ASSUMPTION: L4-logup-challenges
-        // One `alpha` (+ an optional column-folding `beta`) gives ~log2(p) bits of LogUp
-        // soundness: ample on bn254, too few on a small field. A goldilocks target needs K
-        // independent (alpha, beta) pairs here (see docs/field-agnosticism.md).
-        let alpha = witness_layout.challenges_end();
-        witness_layout.challenges_size += 1;
-        let beta = if max_width > 1 {
-            let beta = witness_layout.challenges_end();
-            witness_layout.challenges_size += 1;
-            beta
-        } else {
-            usize::MAX // hoping this crashes soon if used
-        };
+        // Repetition `k` checks the shared multiplicities against `alpha_k` (and the
+        // column-folding `beta_k` when a table has a value column), laid out `[alpha_0, beta_0,
+        // alpha_1, beta_1, ...]`. Each repetition adds about `log2(p) - log2(D)` bits of soundness.
+        witness_layout.logup_repetitions = logup_repetitions;
+        let challenges_per_repetition = if max_width > 1 { 2 } else { 1 };
+        let challenges: Vec<(usize, usize)> = (0..logup_repetitions)
+            .map(|repetition| {
+                let alpha =
+                    witness_layout.challenges_start() + repetition * challenges_per_repetition;
+                // `usize::MAX` is never a column: a row naming it fails to evaluate.
+                let beta = if max_width > 1 { alpha + 1 } else { usize::MAX };
+                (alpha, beta)
+            })
+            .collect();
+        witness_layout.challenges_size = logup_repetitions * challenges_per_repetition;
+
         if let Some(profile) = &mut self.profile {
             profile.witnesses.record(
                 [self.profile_root.clone(), "<lookup challenges>".to_string()],
                 witness_layout.challenges_size as u64,
             );
+
+            for (table_index, table_info) in table_infos.iter().enumerate() {
+                let (constraints, witnesses) = table_info.table.repetition_profile_size();
+                let repeats = logup_repetitions as u64 - 1;
+                let stack = [
+                    self.profile_root.clone(),
+                    "<lookup tables>".to_string(),
+                    table_info.table.profile_name(table_index),
+                ];
+                profile
+                    .constraints
+                    .record(stack.clone(), repeats * constraints);
+                profile.witnesses.record(stack, repeats * witnesses);
+            }
+
+            for lookup in &self.lookups {
+                let (constraints, witnesses) = lookup
+                    .profile_stacks
+                    .expect("a profiled generator records each lookup's stacks");
+                let weight = (logup_repetitions as u64 - 1) * lookup.elements.len() as u64;
+                profile.constraints.record_interned(constraints, weight);
+                profile.witnesses.record_interned(witnesses, weight);
+            }
         }
 
         // tables contents init
-        for table_info in table_infos.iter_mut() {
-            match &table_info.table {
-                Table::Range(bits) => {
-                    // for each element i, we need one witness `y = mᵢ / (α - i)`
-                    // and one constraint saying `y * (α - i) - mᵢ = 0`
-                    let len = 1 << bits;
-                    let mut sum_lhs: LC<F> = vec![];
-                    for i in 0..len {
-                        let y = witness_layout.next_table_data();
-                        let m = table_info.multiplicities_witness_off + i;
+        for &(alpha, beta) in &challenges {
+            for table_info in table_infos.iter_mut() {
+                match &table_info.table {
+                    Table::Range(bits) => {
+                        // for each element i, we need one witness `y = mᵢ / (α - i)`
+                        // and one constraint saying `y * (α - i) - mᵢ = 0`
+                        let len = 1 << bits;
+                        let mut sum_lhs: LC<F> = vec![];
+                        for i in 0..len {
+                            let y = witness_layout.next_table_data();
+                            let m = table_info.multiplicities_witness_off + i;
+                            result.push(R1C {
+                                a: vec![(y, one)],
+                                b: vec![(alpha, one), (0, -constant(i as u64))],
+                                c: vec![(m, one)],
+                            });
+                            sum_lhs.push((y, one));
+                        }
                         result.push(R1C {
-                            a: vec![(y, one)],
-                            b: vec![(alpha, one), (0, -constant(i as u64))],
-                            c: vec![(m, one)],
+                            a: sum_lhs,
+                            b: vec![(0, one)],
+                            c: vec![], // this is prepared for the looked up values to come into
                         });
-                        sum_lhs.push((y, one));
+                        table_info.sum_constraint_idx.push(result.len() - 1);
                     }
-                    result.push(R1C {
-                        a: sum_lhs,
-                        b: vec![(0, one)],
-                        c: vec![], // this is prepared for the looked up values to come into
-                    });
-                    table_info.sum_constraint_idx = result.len() - 1;
-                }
-                Table::OfElems(els) => {
-                    // for each element (i, v), we need two witness/constraint pairs:
-                    // -> x = β * v, with the constraint `β * v - x = 0`
-                    // -> y = mᵢ / (α - i - x), with the constraint `y * (α - i - x) - mᵢ = 0`
-                    let mut sum_lhs: LC<F> = vec![];
-                    for (i, v) in els.iter().enumerate() {
-                        let x = witness_layout.next_table_data();
-                        let y = witness_layout.next_table_data();
-                        let m = table_info.multiplicities_witness_off + i;
+                    Table::OfElems(els) => {
+                        // for each element (i, v), we need two witness/constraint pairs:
+                        // -> x = β * v, with the constraint `β * v - x = 0`
+                        // -> y = mᵢ / (α - i - x), with the constraint
+                        //    `y * (α - i - x) - mᵢ = 0`
+                        let mut sum_lhs: LC<F> = vec![];
+                        for (i, v) in els.iter().enumerate() {
+                            let x = witness_layout.next_table_data();
+                            let y = witness_layout.next_table_data();
+                            let m = table_info.multiplicities_witness_off + i;
+                            result.push(R1C {
+                                a: vec![(beta, one)],
+                                b: v.clone(),
+                                c: vec![(x, -one)],
+                            });
+                            result.push(R1C {
+                                a: vec![(y, one)],
+                                b: vec![(alpha, one), (0, -constant(i as u64)), (x, -one)],
+                                c: vec![(m, one)],
+                            });
+                            sum_lhs.push((y, one));
+                        }
                         result.push(R1C {
-                            a: vec![(beta, one)],
-                            b: v.clone(),
-                            c: vec![(x, -one)],
+                            a: sum_lhs,
+                            b: vec![(0, one)],
+                            c: vec![], // this is prepared for the looked up values to come into
                         });
-                        result.push(R1C {
-                            a: vec![(y, one)],
-                            b: vec![(alpha, one), (0, -constant(i as u64)), (x, -one)],
-                            c: vec![(m, one)],
-                        });
-                        sum_lhs.push((y, one));
+                        table_info.sum_constraint_idx.push(result.len() - 1);
                     }
-                    result.push(R1C {
-                        a: sum_lhs,
-                        b: vec![(0, one)],
-                        c: vec![], // this is prepared for the looked up values to come into
-                    });
-                    table_info.sum_constraint_idx = result.len() - 1;
-                }
-                Table::Spread(bits) => {
-                    // Spread table: for each entry i in 0..2^bits, value = spread(i). Both operands
-                    // (key=i, value=spread(i)) are compile-time constants, so the `x = β·spread(i)`
-                    // intermediate of the generic key-value table (`OfElems`) collapses:
-                    // β·spread(i) is linear in the witness and folds directly into the denominator.
-                    // One witness/constraint per entry, where `OfElems` needs two:
-                    // -> y = mᵢ / (α - i + β·spread(i)),
-                    //    constraint `y · (α - i + β·spread(i)) - mᵢ = 0`
-                    let len = 1usize << bits;
-                    let mut sum_lhs: LC<F> = vec![];
-                    for i in 0..len {
-                        let key = u32::try_from(i).expect("a spread table's key fits a half-word");
-                        let spread_val = mavros_limb_arith::spread_u32_to_u64(key);
-                        let y = witness_layout.next_table_data();
-                        let m = table_info.multiplicities_witness_off + i;
+                    Table::Spread(bits) => {
+                        // Spread table: for each entry i in 0..2^bits, value = spread(i). Both
+                        // operands (key=i, value=spread(i)) are compile-time constants, so the
+                        // `x = β·spread(i)` intermediate of the generic key-value table
+                        // (`OfElems`) collapses: β·spread(i) is linear in the witness and folds
+                        // directly into the denominator. One witness/constraint per entry, where
+                        // `OfElems` needs two:
+                        // -> y = mᵢ / (α - i + β·spread(i)),
+                        //    constraint `y · (α - i + β·spread(i)) - mᵢ = 0`
+                        let len = 1usize << bits;
+                        let mut sum_lhs: LC<F> = vec![];
+                        for i in 0..len {
+                            let key =
+                                u32::try_from(i).expect("a spread table's key fits a half-word");
+                            let spread_val = mavros_limb_arith::spread_u32_to_u64(key);
+                            let y = witness_layout.next_table_data();
+                            let m = table_info.multiplicities_witness_off + i;
+                            result.push(R1C {
+                                a: vec![(y, one)],
+                                b: vec![
+                                    (alpha, one),
+                                    (0, -constant(i as u64)),
+                                    (beta, constant(spread_val)),
+                                ],
+                                c: vec![(m, one)],
+                            });
+                            sum_lhs.push((y, one));
+                        }
                         result.push(R1C {
-                            a: vec![(y, one)],
-                            b: vec![
-                                (alpha, one),
-                                (0, -constant(i as u64)),
-                                (beta, constant(spread_val)),
-                            ],
-                            c: vec![(m, one)],
+                            a: sum_lhs,
+                            b: vec![(0, one)],
+                            c: vec![],
                         });
-                        sum_lhs.push((y, one));
+                        table_info.sum_constraint_idx.push(result.len() - 1);
                     }
-                    result.push(R1C {
-                        a: sum_lhs,
-                        b: vec![(0, one)],
-                        c: vec![],
-                    });
-                    table_info.sum_constraint_idx = result.len() - 1;
-                }
-                Table::Pow2(size) => {
-                    // Powers-of-two table: for each entry n in 0..2^size, value = 2^n. Folded
-                    // exactly like the spread table above as both operands are compile-time
-                    // constants, so beta*2^n folds straight into the denominator:
-                    //
-                    // -> y = m_n / (alpha - n + beta*2^n),
-                    //    constraint `y * (alpha - n + beta*2^n) - m_n = 0`
-                    //
-                    // FIELD-ASSUMPTION: L4-decompose. The largest value is 2^(2^size - 1), which is
-                    // 2^127 at the widest size `MAX_POW2_TABLE_SIZE` admits; that ceiling is set so
-                    // the widest row clears the modulus, so no row wraps. `two_pow` would wrap
-                    // silently if it ever did.
-                    let len = 1usize << size;
-                    let mut sum_lhs: LC<F> = vec![];
-                    for n in 0..len {
-                        let y = witness_layout.next_table_data();
-                        let m = table_info.multiplicities_witness_off + n;
+                    Table::Pow2(size) => {
+                        // Powers-of-two table: for each entry n in 0..2^size, value = 2^n. Folded
+                        // exactly like the spread table above as both operands are compile-time
+                        // constants, so beta*2^n folds straight into the denominator:
+                        //
+                        // -> y = m_n / (alpha - n + beta*2^n),
+                        //    constraint `y * (alpha - n + beta*2^n) - m_n = 0`
+                        //
+                        // FIELD-ASSUMPTION: L4-decompose. The largest value is 2^(2^size - 1),
+                        // which is 2^127 at the widest size `MAX_POW2_TABLE_SIZE` admits; that
+                        // ceiling is set so the widest row clears the modulus, so no row wraps.
+                        // `two_pow` would wrap silently if it ever did.
+                        let len = 1usize << size;
+                        let mut sum_lhs: LC<F> = vec![];
+                        for n in 0..len {
+                            let y = witness_layout.next_table_data();
+                            let m = table_info.multiplicities_witness_off + n;
+                            result.push(R1C {
+                                a: vec![(y, one)],
+                                b: vec![
+                                    (alpha, one),
+                                    (0, -constant(n as u64)),
+                                    (beta, F::from_element(field.two_pow(n))),
+                                ],
+                                c: vec![(m, one)],
+                            });
+                            sum_lhs.push((y, one));
+                        }
                         result.push(R1C {
-                            a: vec![(y, one)],
-                            b: vec![
-                                (alpha, one),
-                                (0, -constant(n as u64)),
-                                (beta, F::from_element(field.two_pow(n))),
-                            ],
-                            c: vec![(m, one)],
+                            a: sum_lhs,
+                            b: vec![(0, one)],
+                            c: vec![],
                         });
-                        sum_lhs.push((y, one));
+                        table_info.sum_constraint_idx.push(result.len() - 1);
                     }
-                    result.push(R1C {
-                        a: sum_lhs,
-                        b: vec![(0, one)],
-                        c: vec![],
-                    });
-                    table_info.sum_constraint_idx = result.len() - 1;
                 }
             }
         }
@@ -1475,50 +1543,52 @@ impl<F: MavrosField> R1CGen<F> {
         constraints_layout.tables_data_size = result.len() - constraints_layout.algebraic_size;
 
         // lookups init
-        for lookup in self.lookups.into_iter() {
-            let y_wit = match lookup.elements.len() {
-                1 => {
-                    let y = witness_layout.next_lookups_data();
-                    let mut b = vec![(alpha, one)];
-                    for (w, coeff) in lookup.elements[0].iter() {
-                        b.push((*w, -*coeff));
+        for (repetition, &(alpha, beta)) in challenges.iter().enumerate() {
+            for lookup in &self.lookups {
+                let y_wit = match lookup.elements.len() {
+                    1 => {
+                        let y = witness_layout.next_lookups_data();
+                        let mut b = vec![(alpha, one)];
+                        for (w, coeff) in lookup.elements[0].iter() {
+                            b.push((*w, -*coeff));
+                        }
+                        // y * (α - key) = flag
+                        result.push(R1C {
+                            a: vec![(y, one)],
+                            b,
+                            c: lookup.flag.clone(),
+                        });
+                        y
                     }
-                    // y * (α - key) = flag
-                    result.push(R1C {
-                        a: vec![(y, one)],
-                        b,
-                        c: lookup.flag.clone(),
-                    });
-                    y
-                }
-                2 => {
-                    let x = witness_layout.next_lookups_data();
-                    let y = witness_layout.next_lookups_data();
-                    // β * value = -x  (defines x = -β*value)
-                    result.push(R1C {
-                        a: vec![(beta, one)],
-                        b: lookup.elements[1].clone(),
-                        c: vec![(x, -one)],
-                    });
+                    2 => {
+                        let x = witness_layout.next_lookups_data();
+                        let y = witness_layout.next_lookups_data();
+                        // β * value = -x  (defines x = -β*value)
+                        result.push(R1C {
+                            a: vec![(beta, one)],
+                            b: lookup.elements[1].clone(),
+                            c: vec![(x, -one)],
+                        });
 
-                    // y * (α - x - key) = flag
-                    let mut b = vec![(alpha, one), (x, -one)];
-                    for (w, coeff) in lookup.elements[0].iter() {
-                        b.push((*w, -*coeff));
+                        // y * (α - x - key) = flag
+                        let mut b = vec![(alpha, one), (x, -one)];
+                        for (w, coeff) in lookup.elements[0].iter() {
+                            b.push((*w, -*coeff));
+                        }
+                        result.push(R1C {
+                            a: vec![(y, one)],
+                            b,
+                            c: lookup.flag.clone(),
+                        });
+                        y
                     }
-                    result.push(R1C {
-                        a: vec![(y, one)],
-                        b,
-                        c: lookup.flag.clone(),
-                    });
-                    y
-                }
-                _ => ice!("unsupported lookup width {}", lookup.elements.len()),
-            };
+                    _ => ice!("unsupported lookup width {}", lookup.elements.len()),
+                };
 
-            result[table_infos[lookup.table_id].sum_constraint_idx]
-                .c
-                .push((y_wit, one));
+                result[table_infos[lookup.table_id].sum_constraint_idx[repetition]]
+                    .c
+                    .push((y_wit, one));
+            }
         }
 
         constraints_layout.lookups_data_size =
@@ -1588,6 +1658,12 @@ mod r1cs_profile_tests {
 
     #[test]
     fn all_lookup_profiles_match_the_sealed_r1cs_layout() {
+        for repetitions in 1..=3 {
+            all_lookup_profiles_match_the_sealed_r1cs_layout_at(repetitions);
+        }
+    }
+
+    fn all_lookup_profiles_match_the_sealed_r1cs_layout_at(repetitions: usize) {
         let mut generator = R1CGen::new(FieldConfig::bn254());
         generator.enable_profile();
         generator.profile_root = "main".to_string();
@@ -1628,7 +1704,7 @@ mod r1cs_profile_tests {
         }
         generator.pop_profile_frame();
 
-        let (r1cs, profile) = generator.seal_with_profile().unwrap();
+        let (r1cs, profile) = generator.seal_with_profile(repetitions).unwrap();
         assert_eq!(
             profile.constraints.total_weight(),
             r1cs.constraints_layout.size() as u64
@@ -1644,7 +1720,8 @@ mod r1cs_profile_tests {
         assert!(constraints.contains("main;<lookup tables>;<pow2 table: 4-bit shifts>"));
         assert!(constraints.contains("main;<lookup tables>;<array table #3: 3 rows>"));
         assert!(constraints.contains("main;<lookup tables>;<array table #4: 3 rows>"));
-        assert!(constraints.contains("main 9\n"));
+        // The lookup sites' rows, once per repetition.
+        assert!(constraints.contains(&format!("main {}\n", 9 * repetitions)));
     }
 }
 
@@ -1664,43 +1741,20 @@ pub struct SoundnessReport {
     /// `D = table_entries + num_lookups`, the degree of the cleared-denominator polynomial.
     pub soundness_degree: usize,
 
-    /// Bits of security a single challenge buys: `floor(log2 p) - ceil(log2 D)`.
-    pub per_challenge_bits: u32,
+    /// Bits of security one repetition buys: `floor(log2 p) - ceil(log2 D)`.
+    pub per_repetition_bits: u32,
 
-    /// `K = ceil(requested_bits / per_challenge_bits)` — the minimum number of challenges.
-    pub challenges: u32,
+    /// `K = max(1, ceil(requested_bits / per_repetition_bits))` — the minimum number of LogUp
+    /// repetitions.
+    pub repetitions: u32,
 
-    /// `K * per_challenge_bits` — a lower bound on the security actually delivered.
+    /// `K * per_repetition_bits` — a lower bound on the security actually delivered.
     pub achieved_bits: u32,
 
-    /// `Some((k, bits))` when the request forces a nearly-empty extra challenge: dropping to
-    /// `k = challenges - 1` challenges would still deliver `bits` bits, because the request sits in
-    /// the lower half of the final challenge's contribution.
+    /// `Some((k, bits))` when the request forces a nearly-empty extra repetition: dropping to
+    /// `k = repetitions - 1` repetitions would still deliver `bits` bits, because the request sits
+    /// in the lower half of the final repetition's contribution.
     pub near_optimal_alternative: Option<(u32, u32)>,
-}
-
-impl SoundnessReport {
-    /// Diagnostic emitted when `challenges > 1`: without K-challenge replication the requested
-    /// target cannot be honoured on this field.
-    pub fn unsupported_message(&self) -> String {
-        let mut msg = format!(
-            "--logup-soundness={} bits needs {} LogUp challenges on this field \
-             (~{} bits each; argument degree D = {}), but multi-challenge LogUp is not yet \
-             implemented \u{2014} a single challenge provides only ~{} bits",
-            self.requested_bits,
-            self.challenges,
-            self.per_challenge_bits,
-            self.soundness_degree,
-            self.per_challenge_bits,
-        );
-        if let Some((k, bits)) = self.near_optimal_alternative {
-            msg.push_str(&format!(
-                " (note: lowering --logup-soundness to {bits} would need only {k} challenge(s), \
-                 shedding a nearly-empty extra challenge)"
-            ));
-        }
-        msg
-    }
 }
 
 /// `ceil(log2 n)` for `n >= 1`, computed with integer bit-length arithmetic (never `f64`,
@@ -1713,12 +1767,9 @@ fn ceil_log2(n: usize) -> u32 {
     }
 }
 
-/// Compute the LogUp challenge count for the working field's bit size.
-///
-/// FIELD-ASSUMPTION: L4-logup-challenges
-///
-/// The bit size comes from the configured field; what remains field-dependent is the K-challenge
-/// replication this rejects (see `Error::LogupSoundnessUnsupported`).
+/// Compute the LogUp repetition count for the working field's bit size. Fails when the field is
+/// too small for any number of repetitions to reach the target, or when reaching it takes more than
+/// [`MAX_LOGUP_REPETITIONS`].
 pub fn logup_soundness_report(
     field: FieldConfig,
     requested_bits: u32,
@@ -1735,10 +1786,16 @@ pub fn logup_soundness_report(
 ///
 /// LogUp proves a log-derivative rational identity at a random challenge; clearing denominators
 /// yields a nonzero polynomial of total degree `<= D = table_entries + num_lookups`, so one
-/// challenge fails with probability `<= D/|F|` (Schwartz-Zippel). K independent challenges give
+/// challenge fails with probability `<= D/|F|` (Schwartz-Zippel). K independent repetitions give
 /// `(D/|F|)^K`, i.e. `K * (log2|F| - log2 D)` bits. All rounding is toward _under_-estimating
-/// security (floor `log2 p`, ceil `log2 D`), so we never report more bits than are actually
+/// security (floor `log2 p`, ceil `log2 D`) to ensure we never report more bits than are actually
 /// delivered.
+///
+/// A challenge that zeroes the denominator of a row whose numerator is zero (a table entry of
+/// multiplicity zero, a lookup with a zero flag) leaves that row's inverse free, which adds at most
+/// another `D/|F|`. Flooring `log2 p` absorbs that factor of two on Goldilocks to within `10^-9`
+/// bits, and bn254 over-reports by at most 0.41 bits per repetition, far inside its margin. Under
+/// Fiat-Shamir these are bits per hash query: a prover grinding `2^t` transcripts gains `t` bits.
 fn compute_logup_soundness(
     requested_bits: u32,
     field_bits: u32,
@@ -1748,21 +1805,30 @@ fn compute_logup_soundness(
     if field_bits <= d_bits {
         return Err(format!(
             "LogUp soundness: field is too small \u{2014} floor(log2 p) = {field_bits} bits is not \
-             larger than ceil(log2 D) = {d_bits} bits for a lookup argument of degree D = {degree}; \
-             a single challenge distinguishes < 1 bit, so no number of challenges recovers soundness"
+             larger than ceil(log2 D) = {d_bits} bits for a lookup argument of degree \
+             D = {degree}; a single repetition distinguishes < 1 bit, so no number of repetitions \
+             recovers soundness"
         ));
     }
-    let per_challenge_bits = field_bits - d_bits;
-    let challenges = requested_bits.div_ceil(per_challenge_bits).max(1);
-    let achieved_bits = challenges * per_challenge_bits;
+    let per_repetition_bits = field_bits - d_bits;
+    let repetitions = requested_bits.div_ceil(per_repetition_bits).max(1);
+    // The cap also bounds the products below well inside `u32`.
+    if repetitions as usize > MAX_LOGUP_REPETITIONS {
+        return Err(format!(
+            "LogUp soundness: {requested_bits} bits needs {repetitions} repetitions of \
+             {per_repetition_bits} bits each for a lookup argument of degree D = {degree}; at most \
+             {MAX_LOGUP_REPETITIONS} are supported"
+        ));
+    }
+    let achieved_bits = repetitions * per_repetition_bits;
 
-    // Near-optimal: the request lands in the lower half of the final challenge's
-    // contribution, so it buys a whole extra challenge for less than half its worth.
-    let near_optimal_alternative = if challenges >= 2 {
-        let prev = (challenges - 1) * per_challenge_bits;
+    // Near-optimal: the request lands in the lower half of the final repetition's
+    // contribution, so it buys a whole extra repetition for less than half its worth.
+    let near_optimal_alternative = if repetitions >= 2 {
+        let prev = (repetitions - 1) * per_repetition_bits;
         let gap = requested_bits.saturating_sub(prev);
-        if gap > 0 && gap <= per_challenge_bits / 2 {
-            Some((challenges - 1, prev))
+        if gap > 0 && gap <= per_repetition_bits / 2 {
+            Some((repetitions - 1, prev))
         } else {
             None
         }
@@ -1774,8 +1840,8 @@ fn compute_logup_soundness(
         requested_bits,
         field_bits,
         soundness_degree: degree,
-        per_challenge_bits,
-        challenges,
+        per_repetition_bits,
+        repetitions,
         achieved_bits,
         near_optimal_alternative,
     })
@@ -1785,99 +1851,128 @@ fn compute_logup_soundness(
 mod logup_soundness_tests {
     use mavros_artifacts::FieldConfig;
 
-    use super::{compute_logup_soundness, logup_soundness_report};
+    use super::{MAX_LOGUP_REPETITIONS, compute_logup_soundness, logup_soundness_report};
 
     #[test]
-    fn bn254_needs_a_single_challenge_for_realistic_targets() {
+    fn bn254_needs_a_single_repetition_for_realistic_targets() {
         // bn254: floor(log2 p) = 253. A large circuit (D = 2^24 -> ceil(log2 D) = 24)
-        // still buys 229 bits/challenge, so every sane request is a single challenge.
+        // still buys 229 bits per repetition, so every sane request is a single repetition.
         let field_bits = 253;
         let degree = 1 << 24;
         for requested in [1, 80, 128, 223, 229] {
             let r = compute_logup_soundness(requested, field_bits, degree).unwrap();
             assert_eq!(
-                r.challenges, 1,
-                "requested {requested} should need 1 challenge"
+                r.repetitions, 1,
+                "requested {requested} should need 1 repetition"
             );
-            assert_eq!(r.per_challenge_bits, 229);
+            assert_eq!(r.per_repetition_bits, 229);
             assert!(r.near_optimal_alternative.is_none());
         }
     }
 
     #[test]
-    fn live_bn254_alias_yields_a_single_challenge_at_the_default() {
+    fn live_bn254_alias_yields_a_single_repetition_at_the_default() {
         // The real configured field (bn254) at the 128-bit default must be a genuine no-op.
         let r = logup_soundness_report(FieldConfig::bn254(), 128, 1 << 20).unwrap();
         assert_eq!(r.field_bits, 253);
-        assert_eq!(r.challenges, 1);
+        assert_eq!(r.repetitions, 1);
+    }
+
+    /// Goldilocks (`floor(log2 p) = 63`) at the 128-bit default: three repetitions while
+    /// `ceil(log2 D) <= 20` (at least 43 bits each), four up to `D = 2^31`.
+    #[test]
+    fn goldilocks_repeats_the_argument_three_or_four_times_at_the_default() {
+        let repetitions = |degree| {
+            logup_soundness_report(FieldConfig::goldilocks(), 128, degree)
+                .unwrap()
+                .repetitions
+        };
+        assert_eq!(repetitions(100), 3);
+        assert_eq!(repetitions(1 << 20), 3);
+        assert_eq!(repetitions((1 << 20) + 1), 4);
+        assert_eq!(repetitions(1 << 31), 4);
     }
 
     #[test]
-    fn goldilocks_scales_challenges_with_the_target() {
+    fn goldilocks_scales_repetitions_with_the_target() {
         // Synthetic goldilocks: floor(log2 p) = 63, D ~= 2^22 -> ceil(log2 D) = 22, so
-        // per-challenge = 41 bits (the sound floor of the informal ~42-bit estimate).
+        // per-repetition = 41 bits (the sound floor of the informal ~42-bit estimate).
         let field_bits = 63;
         let degree = 1 << 22;
         let pc = 41;
         assert_eq!(
             compute_logup_soundness(pc, field_bits, degree)
                 .unwrap()
-                .per_challenge_bits,
+                .per_repetition_bits,
             pc
         );
         // K = ceil(requested / 41).
         assert_eq!(
             compute_logup_soundness(41, field_bits, degree)
                 .unwrap()
-                .challenges,
+                .repetitions,
             1
         );
         assert_eq!(
             compute_logup_soundness(42, field_bits, degree)
                 .unwrap()
-                .challenges,
+                .repetitions,
             2
         );
         assert_eq!(
             compute_logup_soundness(123, field_bits, degree)
                 .unwrap()
-                .challenges,
+                .repetitions,
             3
         );
         assert_eq!(
             compute_logup_soundness(124, field_bits, degree)
                 .unwrap()
-                .challenges,
+                .repetitions,
             4
         );
         let r128 = compute_logup_soundness(128, field_bits, degree).unwrap();
-        assert_eq!(r128.challenges, 4);
+        assert_eq!(r128.repetitions, 4);
         assert_eq!(r128.achieved_bits, 164);
     }
 
     #[test]
-    fn near_optimal_fires_just_above_a_challenge_boundary() {
+    fn near_optimal_fires_just_above_a_repetition_boundary() {
         let field_bits = 63;
-        let degree = 1 << 22; // per-challenge = 41
-        // 128 is 5 above the 3-challenge mark (123); 5 <= 41/2, so warn and suggest 123/K=3.
+        let degree = 1 << 22; // per-repetition = 41
+        // 128 is 5 above the 3-repetition mark (123); 5 <= 41/2, so warn and suggest 123/K=3.
         let r = compute_logup_soundness(128, field_bits, degree).unwrap();
         assert_eq!(r.near_optimal_alternative, Some((3, 123)));
-        // 145 is 22 above the 3-challenge mark; 22 > 41/2 = 20, so no suggestion.
+        // 145 is 22 above the 3-repetition mark; 22 > 41/2 = 20, so no suggestion.
         let r = compute_logup_soundness(145, field_bits, degree).unwrap();
-        assert_eq!(r.challenges, 4);
+        assert_eq!(r.repetitions, 4);
         assert!(r.near_optimal_alternative.is_none());
-        // Exactly on a boundary (123 = 3*41) is a single-challenge overshoot of 0 -> K=3, none.
+        // Exactly on a boundary (123 = 3*41) is a single-repetition overshoot of 0 -> K=3, none.
         let r = compute_logup_soundness(123, field_bits, degree).unwrap();
         assert!(r.near_optimal_alternative.is_none());
+    }
+
+    /// A target past [`MAX_LOGUP_REPETITIONS`] repetitions is refused, including one whose bit
+    /// count overflows `u32` once multiplied out.
+    #[test]
+    fn a_target_past_the_repetition_cap_is_refused() {
+        let field_bits = 63;
+        let degree = 1 << 22; // per-repetition = 41
+        let at_cap = MAX_LOGUP_REPETITIONS as u32 * 41;
+        let r = compute_logup_soundness(at_cap, field_bits, degree).unwrap();
+        assert_eq!(r.repetitions as usize, MAX_LOGUP_REPETITIONS);
+        assert!(compute_logup_soundness(at_cap + 1, field_bits, degree).is_err());
+        assert!(compute_logup_soundness(u32::MAX, 253, 1 << 24).is_err());
     }
 
     #[test]
     fn degenerate_when_degree_exceeds_the_field() {
         // D >= |F|: a single evaluation point can't distinguish the instance; hard error.
         assert!(compute_logup_soundness(128, 20, 1 << 22).is_err());
-        // Boundary: field_bits == d_bits is still an error (per-challenge would be 0 bits).
+        // Boundary: field_bits == d_bits is still an error (per-repetition would be 0 bits).
         assert!(compute_logup_soundness(128, 22, 1 << 22).is_err());
-        assert!(compute_logup_soundness(128, 23, 1 << 22).is_ok());
+        // One bit per repetition, within the repetition cap.
+        assert!(compute_logup_soundness(16, 23, 1 << 22).is_ok());
     }
 }
 
@@ -2200,11 +2295,23 @@ mod tests {
         assert_eq!(fresh.expect_linear_combination(), vec![(1, one)]);
     }
 
-    /// Every sealed LogUp row is satisfiable once the lookups' keys hit their tables: each table
-    /// and lookup row defines one fresh column, and the sum row then balances only if every table
-    /// row's denominator `α − key + β·value` matches the lookup side's.
-    #[test]
-    fn a_sealed_lookup_argument_balances_on_entries_in_its_tables() {
+    /// A witness under construction: `None` marks a column not yet known.
+    type PartialWitness = Vec<Option<RawField>>;
+
+    /// The multiplicity columns, relative to the section, of the entries the lookups of
+    /// [`sealed_lookup_argument`] hit: each table has 4 rows except the array's 3, in lookup order.
+    const HITS: [usize; 4] = [2, 4 + 3, 8 + 3, 12 + 1];
+
+    /// A system with `repetitions` LogUp repetitions looking up `2` in a 2-bit range table,
+    /// `(3, 5)` in a 2-bit spread table, `(3, 8)` in a 2-bit pow2 table and `(1, 20)` in
+    /// `[10, 20, 30]`, and its witness with the cells, the challenges (distinct primes) and zero
+    /// multiplicities known.
+    fn sealed_lookup_argument(repetitions: usize) -> (R1CS<RawField>, PartialWitness) {
+        sealed_lookups(repetitions, true)
+    }
+
+    /// [`sealed_lookup_argument`], or with `value_columns` false its range lookup alone.
+    fn sealed_lookups(repetitions: usize, value_columns: bool) -> (R1CS<RawField>, PartialWitness) {
         let mut generator = R1CGen::new(field());
         // Column 0 is the constant one.
         assert_eq!(generator.next_witness(), 0);
@@ -2215,70 +2322,253 @@ mod tests {
             Value::LC(vec![(column, field().one().to_ark())])
         };
         let range = cell(&mut generator, 2);
-        let spread = (cell(&mut generator, 3), cell(&mut generator, 5));
-        let pow2 = (cell(&mut generator, 3), cell(&mut generator, 8));
-        let array = (cell(&mut generator, 1), cell(&mut generator, 20));
         let flag = Value::Const(field().one());
         generator.lookup(
             hlssa::LookupTarget::Rangecheck(2),
             vec![range],
             flag.clone(),
         );
-        generator.lookup(
-            hlssa::LookupTarget::Spread(2),
-            vec![spread.0, spread.1],
-            flag.clone(),
-        );
-        generator.lookup(
-            hlssa::LookupTarget::Pow2(2),
-            vec![pow2.0, pow2.1],
-            flag.clone(),
-        );
-        let table = Value::mk_array(vec![constant(10), constant(20), constant(30)]);
-        generator.lookup(
-            hlssa::LookupTarget::Array(table),
-            vec![array.0, array.1],
-            flag,
-        );
-        // (table offset, entry hit): each table has 4 rows except the array's 3, in lookup order.
-        let hits = [(0, 2), (4, 3), (8, 3), (12, 1)];
+        if value_columns {
+            let spread = (cell(&mut generator, 3), cell(&mut generator, 5));
+            let pow2 = (cell(&mut generator, 3), cell(&mut generator, 8));
+            let array = (cell(&mut generator, 1), cell(&mut generator, 20));
+            generator.lookup(
+                hlssa::LookupTarget::Spread(2),
+                vec![spread.0, spread.1],
+                flag.clone(),
+            );
+            generator.lookup(
+                hlssa::LookupTarget::Pow2(2),
+                vec![pow2.0, pow2.1],
+                flag.clone(),
+            );
+            let table = Value::mk_array(vec![constant(10), constant(20), constant(30)]);
+            generator.lookup(
+                hlssa::LookupTarget::Array(table),
+                vec![array.0, array.1],
+                flag,
+            );
+        }
 
-        let r1cs = generator.seal();
+        let r1cs = generator.seal(repetitions);
         let layout = &r1cs.witness_layout;
-        let mut w: Vec<Option<RawField>> = vec![None; layout.size()];
+        let mut w: PartialWitness = vec![None; layout.size()];
         for (column, value) in known {
             w[column] = Some(value.to_ark());
         }
         for i in layout.multiplicities_start()..layout.multiplicities_end() {
             w[i] = Some(<RawField as ark_ff::Zero>::zero());
         }
-        for (offset, entry) in hits {
-            w[layout.multiplicities_start() + offset + entry] = Some(field().one().to_ark());
-        }
-        for (i, challenge) in
-            (layout.challenges_start()..layout.challenges_end()).zip([1009u64, 7919])
-        {
+        const PRIMES: [u64; 8] = [
+            1009,
+            7919,
+            104729,
+            1299709,
+            15485863,
+            179424673,
+            2038074743,
+            22801763489,
+        ];
+        for (i, challenge) in (layout.challenges_start()..layout.challenges_end()).zip(PRIMES) {
             w[i] = Some(field().constant(challenge).to_ark());
         }
+        (r1cs, w)
+    }
 
-        let eval = |lc: &LC, w: &[Option<RawField>]| -> Option<RawField> {
-            lc.iter().map(|(i, c)| w[*i].map(|v| *c * v)).sum()
-        };
+    fn evaluate(lc: &LC, w: &[Option<RawField>]) -> Option<RawField> {
+        lc.iter().map(|(i, c)| w[*i].map(|v| *c * v)).sum()
+    }
+
+    /// Fills, in row order, each row's single unknown column: every table and lookup row defines
+    /// one.
+    fn solve(r1cs: &R1CS<RawField>, w: &mut PartialWitness) {
         let fresh = |lc: &LC, w: &[Option<RawField>]| match lc.as_slice() {
             [(column, coefficient)] if w[*column].is_none() => Some((*column, *coefficient)),
             _ => None,
         };
         for row in &r1cs.constraints {
-            if let Some((column, k)) = fresh(&row.a, &w) {
-                w[column] = Some(eval(&row.c, &w).unwrap() / (k * eval(&row.b, &w).unwrap()));
-            } else if let Some((column, k)) = fresh(&row.c, &w) {
-                w[column] = Some(eval(&row.a, &w).unwrap() * eval(&row.b, &w).unwrap() / k);
+            if let Some((column, k)) = fresh(&row.a, w) {
+                w[column] = Some(evaluate(&row.c, w).unwrap() / (k * evaluate(&row.b, w).unwrap()));
+            } else if let Some((column, k)) = fresh(&row.c, w) {
+                w[column] = Some(evaluate(&row.a, w).unwrap() * evaluate(&row.b, w).unwrap() / k);
             }
         }
-        for (index, row) in r1cs.constraints.iter().enumerate() {
-            let (a, b, c) = (eval(&row.a, &w), eval(&row.b, &w), eval(&row.c, &w));
-            assert_eq!(a.unwrap() * b.unwrap(), c.unwrap(), "row {index} fails");
+    }
+
+    fn failing_rows(r1cs: &R1CS<RawField>, w: &[Option<RawField>]) -> Vec<usize> {
+        let at = |lc: &LC| evaluate(lc, w).expect("every column is known");
+        (0..r1cs.constraints.len())
+            .filter(|index| {
+                let row = &r1cs.constraints[*index];
+                at(&row.a) * at(&row.b) != at(&row.c)
+            })
+            .collect()
+    }
+
+    fn strides(r1cs: &R1CS<RawField>) -> mavros_artifacts::LogupStrides {
+        mavros_artifacts::LogupStrides::new(&r1cs.witness_layout, &r1cs.constraints_layout)
+    }
+
+    /// The column of repetition `k`'s `α`.
+    fn alpha(r1cs: &R1CS<RawField>, k: usize) -> usize {
+        r1cs.witness_layout.challenges_start() + strides(r1cs).alpha(k)
+    }
+
+    /// The rows of repetition `k`: its table rows, then its lookup rows.
+    fn repetition_rows(r1cs: &R1CS<RawField>, k: usize) -> Vec<usize> {
+        let (layout, strides) = (&r1cs.constraints_layout, strides(r1cs));
+        let (tables, lookups) = (strides.constraint_tables, strides.constraint_lookups);
+        let tables_start = layout.tables_data_start() + k * tables;
+        let lookups_start = layout.lookups_data_start() + k * lookups;
+        (tables_start..tables_start + tables)
+            .chain(lookups_start..lookups_start + lookups)
+            .collect()
+    }
+
+    /// Every sealed LogUp row is satisfiable once the lookups' keys hit their tables, at every
+    /// repetition count: each table and lookup row defines one fresh column, and each repetition's
+    /// sum rows then balance only if every table row's denominator `α − key + β·value` matches the
+    /// lookup side's.
+    #[test]
+    fn a_sealed_lookup_argument_balances_on_entries_in_its_tables() {
+        let (single, _) = sealed_lookup_argument(1);
+        for repetitions in 1..=4 {
+            let (r1cs, mut w) = sealed_lookup_argument(repetitions);
+            let (wl, strides) = (&r1cs.witness_layout, strides(&r1cs));
+            assert_eq!(wl.logup_repetitions, repetitions);
+            assert_eq!(wl.challenges_size, 2 * repetitions);
+            assert_eq!(
+                wl.multiplicities_size,
+                single.witness_layout.multiplicities_size
+            );
+            assert_eq!(
+                strides.witness_tables,
+                single.witness_layout.tables_data_size
+            );
+            assert_eq!(
+                strides.witness_lookups,
+                single.witness_layout.lookups_data_size
+            );
+            assert_eq!(
+                strides.constraint_tables,
+                single.constraints_layout.tables_data_size
+            );
+            assert_eq!(
+                strides.constraint_lookups,
+                single.constraints_layout.lookups_data_size
+            );
+            for hit in HITS {
+                w[wl.multiplicities_start() + hit] = Some(field().one().to_ark());
+            }
+            solve(&r1cs, &mut w);
+            assert_eq!(
+                failing_rows(&r1cs, &w),
+                Vec::<usize>::new(),
+                "at K = {repetitions}"
+            );
         }
+    }
+
+    /// The challenge columns repetition `k`'s rows name, in order.
+    fn named_challenges(r1cs: &R1CS<RawField>, k: usize) -> Vec<usize> {
+        let layout = &r1cs.witness_layout;
+        let challenges = layout.challenges_start()..layout.challenges_end();
+        let mut named = std::collections::BTreeSet::new();
+        for row in repetition_rows(r1cs, k) {
+            let row = &r1cs.constraints[row];
+            for (column, _) in row.a.iter().chain(&row.b).chain(&row.c) {
+                if challenges.contains(column) {
+                    named.insert(*column);
+                }
+            }
+        }
+        named.into_iter().collect()
+    }
+
+    /// Repetition `k`'s rows name exactly the challenges `α_k` and `β_k`: a row reaching another
+    /// repetition's challenge would let one repetition's answer stand in for another's.
+    #[test]
+    fn each_repetition_reads_only_alpha_k_and_beta_k() {
+        let (r1cs, _) = sealed_lookup_argument(3);
+        for k in 0..3 {
+            let alpha = alpha(&r1cs, k);
+            assert_eq!(
+                named_challenges(&r1cs, k),
+                [alpha, alpha + 1],
+                "repetition {k}"
+            );
+        }
+    }
+
+    /// Without a value-column table a repetition is `α_k` alone: one challenge per repetition, each
+    /// repetition's rows name exactly theirs, and the argument balances.
+    #[test]
+    fn a_range_only_argument_takes_one_challenge_per_repetition() {
+        let (r1cs, mut w) = sealed_lookups(3, false);
+        let layout = r1cs.witness_layout;
+        assert_eq!(layout.challenges_size, 3);
+        for k in 0..3 {
+            assert_eq!(
+                named_challenges(&r1cs, k),
+                [alpha(&r1cs, k)],
+                "repetition {k}"
+            );
+        }
+        w[layout.multiplicities_start() + HITS[0]] = Some(field().one().to_ark());
+        solve(&r1cs, &mut w);
+        assert_eq!(failing_rows(&r1cs, &w), Vec::<usize>::new());
+    }
+
+    /// An answer valid for one repetition's challenges fails another's: copying repetition 0's
+    /// table and lookup columns into repetition 1 breaks repetition 1's rows.
+    #[test]
+    fn a_repetition_answered_with_another_repetitions_columns_is_rejected() {
+        let (r1cs, mut w) = sealed_lookup_argument(2);
+        let layout = r1cs.witness_layout;
+        for hit in HITS {
+            w[layout.multiplicities_start() + hit] = Some(field().one().to_ark());
+        }
+        solve(&r1cs, &mut w);
+        let strides = strides(&r1cs);
+        for (start, per) in [
+            (layout.tables_data_start(), strides.witness_tables),
+            (layout.lookups_data_start(), strides.witness_lookups),
+        ] {
+            for i in 0..per {
+                w[start + per + i] = w[start + i];
+            }
+        }
+        let failing = failing_rows(&r1cs, &w);
+        assert!(!failing.is_empty());
+        assert!(
+            failing
+                .iter()
+                .all(|row| repetition_rows(&r1cs, 1).contains(row))
+        );
+    }
+
+    /// A forged multiplicity tuned to repetition 0's `α` balances repetition 0 but not
+    /// repetition 1. The range lookup of `2` is credited to entry 1 with the multiplicity
+    /// `(α_0 − 1)/(α_0 − 2)`, which makes the table side equal `1/(α_0 − 2)` at `α_0` only.
+    #[test]
+    fn a_multiplicity_forged_for_one_challenge_is_rejected_by_another() {
+        let (r1cs, mut w) = sealed_lookup_argument(2);
+        let layout = r1cs.witness_layout;
+        let one = field().one().to_ark();
+        for hit in &HITS[1..] {
+            w[layout.multiplicities_start() + hit] = Some(one);
+        }
+        let alpha = w[alpha(&r1cs, 0)].unwrap();
+        let forged = (alpha - one) / (alpha - one - one);
+        w[layout.multiplicities_start() + 1] = Some(forged);
+        solve(&r1cs, &mut w);
+        let failing = failing_rows(&r1cs, &w);
+        assert!(!failing.is_empty());
+        assert!(
+            failing
+                .iter()
+                .all(|row| repetition_rows(&r1cs, 1).contains(row))
+        );
     }
 }
 
