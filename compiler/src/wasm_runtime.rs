@@ -124,13 +124,11 @@ pub fn locate_or_build() -> Result<PathBuf, ToolchainError> {
         })?;
 
     if !output.status.success() {
-        eprintln!(
-            "wasm-runtime build stderr: {}",
+        return Err(ToolchainError::new(format!(
+            "Failed to build wasm-runtime for wasm32 ({}):\n{}",
+            output.status,
             String::from_utf8_lossy(&output.stderr)
-        );
-        return Err(ToolchainError::new(
-            "Failed to build wasm-runtime for wasm32",
-        ));
+        )));
     }
 
     let lib_path = workspace_root
