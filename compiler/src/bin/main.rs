@@ -392,10 +392,15 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     if args.verify && roots.len() > 1 {
         return Err("--verify requires a single binary package; use --root to select a member or set default-member in Nargo.toml".into());
     }
+    let runtime_lib = if args.emit_wasm {
+        Some(mavros_compiler::wasm_runtime::locate_or_build()?)
+    } else {
+        None
+    };
     run_packages(&roots, |root| {
         let mut options = args.clone();
         options.root = root.clone();
-        run_package(&options)
+        run_package(&options, runtime_lib.as_deref())
     })
 }
 
@@ -422,7 +427,7 @@ fn run_packages(
     })
 }
 
-fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
+fn run_package(args: &ProgramOptions, runtime_lib: Option<&Path>) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = compile_to_r1cs(
         args.root.clone(),
         args.draw_graphs,
@@ -465,8 +470,9 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("program.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
-            let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build();
-            let mut opts = WasmCompileOpts::release(runtime_lib);
+            let runtime_lib =
+                runtime_lib.expect("run() resolves the runtime when --emit-wasm is set");
+            let mut opts = WasmCompileOpts::release(runtime_lib.to_path_buf());
             if let Some(root) = &source_path_root {
                 opts = opts.with_debug_path_root(root);
             }
