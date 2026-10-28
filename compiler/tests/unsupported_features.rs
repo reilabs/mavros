@@ -1,6 +1,9 @@
 mod common;
 
-use mavros_compiler::{Project, driver::Driver};
+use mavros_compiler::{
+    Project,
+    driver::{Driver, Error},
+};
 
 // The fork rejects unsupported features with source diagnostics before Mavros lowering.
 use common::assert_frontend_refused as assert_refused;
@@ -55,23 +58,23 @@ fn print_oracles_remain_ignored() {
     driver.make_struct_access_static().unwrap();
 }
 
-/// Mavros lowering still reports these errors through `ice_usr!`.
-fn assert_lowering_refused(source: &str, message: &str) {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
+/// Mavros lowering refuses `source` with [`Error::LoweringRefused`]
+fn assert_lowering_refused(source: &str, messages: &[&str]) -> String {
     let dir = common::noir_project(source);
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let panic = catch_unwind(AssertUnwindSafe(|| driver.run_noir_compiler()))
-        .expect_err("expected a lowering diagnostic");
-    let rendered = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .expect("a rendered user diagnostic");
-    assert!(
-        rendered.contains("Unhandled error from user input:") && rendered.contains(message),
-        "missing {message:?}: {rendered}"
-    );
+    let error = match driver.run_noir_compiler() {
+        Err(error @ Error::LoweringRefused(_)) => error,
+        Err(error) => panic!("expected a lowering refusal, got: {error}"),
+        Ok(()) => panic!("expected a lowering refusal"),
+    };
+    let rendered = error.to_string();
+    for message in messages {
+        assert!(
+            rendered.contains(message),
+            "missing {message:?}: {rendered}"
+        );
+    }
+    rendered
 }
 
 /// `spread::<N>` reads `N` bits of a `u32` and `unspread::<N>` takes two `N`-bit halves out of a
@@ -101,9 +104,34 @@ fn spread_widths_past_their_containers_are_refused() {
                 "use std::mavros::{{spread, unspread}};\n\
                  fn main(x: u64) {{ let _ = {call}; }}\n"
             ),
-            message,
+            &[message],
         );
     }
+}
+
+/// Lowering carries on past a refusal
+#[test]
+fn every_refusal_in_a_program_is_reported_together() {
+    let rendered = assert_lowering_refused(
+        "use std::mavros::spread;\n\
+         fn main(x: u32) { let _ = spread::<0>(x); let _ = spread::<33>(x); }\n",
+        &[
+            "`spread::<0>` must read 1..=32 bits of its `u32`",
+            "`spread::<33>` must read 1..=32 bits of its `u32`",
+        ],
+    );
+    assert_eq!(rendered.matches("error:").count(), 2, "{rendered}");
+}
+
+/// `unsafe_cast` handles scalars only
+#[test]
+fn unsafe_casts_to_non_scalars_are_refused() {
+    let rendered = assert_lowering_refused(
+        "use std::mavros::unsafe_cast;\n\
+         fn main(x: Field) -> pub [Field; 2] { unsafe_cast::<[Field; 2]>(x) }\n",
+        &["unsafe_cast: unsupported target type Array(2, Field)"],
+    );
+    assert!(rendered.contains("src/main.nr:2:"), "{rendered}");
 }
 
 /// Compiles `source`, whose `main` takes `x: u32`, and runs it on each value, answering whether its

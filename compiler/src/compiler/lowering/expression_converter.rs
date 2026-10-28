@@ -92,6 +92,9 @@ pub struct ExpressionConverter<'a> {
     /// Memoized user-facing source paths keyed by Noir file id.
     source_files: RefCell<HashMap<FileId, Arc<str>>>,
 
+    /// Refusals recorded while lowering, shared by every converter of the program.
+    diagnostics: &'a RefCell<Vec<Diagnostic>>,
+
     /// Source anchor inherited by locationless child expressions. This starts at the Noir-internal
     /// fallback, but normally gets replaced by the nearest enclosing expression's real source
     /// location while lowering.
@@ -114,6 +117,7 @@ impl<'a> ExpressionConverter<'a> {
         global_constants: &'a HashMap<GlobalId, ValueId>,
         entry_block: BlockId,
         file_manager: Option<&'a FileManager>,
+        diagnostics: &'a RefCell<Vec<Diagnostic>>,
     ) -> Self {
         Self {
             bindings: HashMap::default(),
@@ -129,6 +133,7 @@ impl<'a> ExpressionConverter<'a> {
             current_block: entry_block,
             file_manager,
             source_files: RefCell::new(HashMap::default()),
+            diagnostics,
             current_source_location: SourceLocation::synthetic("Noir internal"),
         }
     }
@@ -246,9 +251,8 @@ impl<'a> ExpressionConverter<'a> {
         Some(source_file)
     }
 
-    /// Render unsupported source constructs through the diagnostic infrastructure. These remain
-    /// user-error panics until lowering can propagate diagnostics to the driver.
-    pub(super) fn reject_unsupported(&self, message: String, location: Option<NoirLocation>) -> ! {
+    /// Record an unsupported source construct as a diagnostic.
+    pub(super) fn reject_unsupported(&self, message: String, location: Option<NoirLocation>) {
         // Noir's wrappers for higher-order oracles carry dummy locations. File id zero is a
         // real stdlib file, so resolving one would blame unrelated source text.
         let source_location = if location == Some(NoirLocation::dummy()) {
@@ -260,17 +264,33 @@ impl<'a> ExpressionConverter<'a> {
             .filter(|location| *location != NoirLocation::dummy())
             .and_then(|location| self.file_manager?.fetch_file(location.file))
             .map(Arc::from);
-        Self::reject_at(message, source_location, source)
+        self.reject_at(message, source_location, source)
     }
 
     /// [`Self::reject_unsupported`] at a location already resolved, rendered against `source`
     /// where the caller has the file's text.
-    fn reject_at(message: String, location: SourceLocation, source: Option<Arc<str>>) -> ! {
+    fn reject_at(&self, message: String, location: SourceLocation, source: Option<Arc<str>>) {
         let mut diagnostic = Diagnostic::error(message, location);
         if let Some(source) = source {
             diagnostic = diagnostic.with_source(source);
         }
-        ice_usr!("{diagnostic}");
+        let mut diagnostics = self.diagnostics.borrow_mut();
+        if !diagnostics.contains(&diagnostic) {
+            diagnostics.push(diagnostic);
+        }
+    }
+
+    /// A value of `typ` standing in for a refused one.
+    fn placeholder(
+        &mut self,
+        b: &mut HLFunctionBuilder<'_>,
+        location: Option<NoirLocation>,
+        typ: &Type,
+    ) -> ValueId {
+        if typ.is_function() {
+            return b.emit_const(Constant::FnPtr(b.ssa.get_unique_entrypoint_id()));
+        }
+        self.emit_located(b, location, |e| e.default_value(typ))
     }
 
     pub(super) fn expression_location(expr: &Expression) -> Option<NoirLocation> {
@@ -491,10 +511,19 @@ impl<'a> ExpressionConverter<'a> {
             // hand-built monomorphic programs that bypass the frontend.
             // TODO: When oracle calls are supported, preserve their purity so optimizations such
             // as CSE and DCE can distinguish pure calls from calls with side effects.
-            Definition::Oracle { name, .. } => self.reject_unsupported(
-                format!("oracle functions are not supported by Mavros: `{name}`"),
-                ident.location,
-            ),
+            Definition::Oracle { name, .. } => {
+                self.reject_unsupported(
+                    format!("oracle functions are not supported by Mavros: `{name}`"),
+                    ident.location,
+                );
+                let typ = match ident.typ.as_ref() {
+                    AstType::Tuple(pair) if matches!(pair.first(), Some(AstType::Function(..))) => {
+                        self.type_converter.convert_type(&pair[0])
+                    }
+                    _ => self.type_converter.convert_type(&ident.typ),
+                };
+                Some(self.placeholder(b, ident.location, &typ))
+            }
             Definition::Global(global_id) => {
                 if let Some(value) = self.global_constants.get(global_id) {
                     return Some(*value);
@@ -1149,8 +1178,11 @@ impl<'a> ExpressionConverter<'a> {
             Constructor::True => (value, true),
             Constructor::False => (value, false),
             Constructor::Int(int) => {
-                let constant = Self::integer_constant(int, &s.ty, b.field())
-                    .unwrap_or_else(|message| Self::reject_at(message, location.clone(), None));
+                let constant =
+                    Self::integer_constant(int, &s.ty, b.field()).unwrap_or_else(|message| {
+                        self.reject_at(message, location.clone(), None);
+                        Self::zero_constant(&s.ty, b.field())
+                    });
                 let c = b.emit_const(constant);
                 (
                     self.emit_at_source_location(b, location, |e| e.eq(value, c)),
@@ -1739,8 +1771,10 @@ impl<'a> ExpressionConverter<'a> {
                 Some(Constant::int(1, value))
             }
             Literal::Integer(value, typ, location) => Some(
-                Self::integer_constant(value, typ, field)
-                    .unwrap_or_else(|message| self.reject_unsupported(message, Some(*location))),
+                Self::integer_constant(value, typ, field).unwrap_or_else(|message| {
+                    self.reject_unsupported(message, Some(*location));
+                    Self::zero_constant(typ, field)
+                }),
             ),
             _ => None,
         }
@@ -1796,6 +1830,12 @@ impl<'a> ExpressionConverter<'a> {
             )),
             _ => ice!("integer constant with non-integer type {typ:?}"),
         }
+    }
+
+    /// The zero of `typ`, standing in for an integer constant that was refused.
+    fn zero_constant(typ: &AstType, field: FieldConfig) -> Constant {
+        Self::integer_constant(&noir_bigint::BigInt::from(0), typ, field)
+            .unwrap_or_else(|message| ice!("zero is not a constant of {typ:?}: {message}"))
     }
 
     fn is_const_seq_scalar_type(typ: &Type) -> bool {
@@ -1858,10 +1898,14 @@ impl<'a> ExpressionConverter<'a> {
                     Definition::Oracle { name, .. } if name == "print" => None,
                     // Defense in depth for hand-built programs; source calls are rejected
                     // by the frontend before reaching this lowering.
-                    Definition::Oracle { name, .. } => self.reject_unsupported(
-                        format!("oracle functions are not supported by Mavros: `{name}`"),
-                        Some(call.location),
-                    ),
+                    Definition::Oracle { name, .. } => {
+                        self.reject_unsupported(
+                            format!("oracle functions are not supported by Mavros: `{name}`"),
+                            Some(call.location),
+                        );
+                        let typ = self.type_converter.convert_type(&call.return_type);
+                        Some(self.placeholder(b, Some(call.location), &typ))
+                    }
                     _ => todo!("Call to {:?} not yet supported", ident.definition),
                 }
             }
@@ -2179,7 +2223,14 @@ impl<'a> ExpressionConverter<'a> {
                     AstType::Field => CastTarget::Field,
                     AstType::Bool => CastTarget::Int(1),
                     AstType::Integer(_, bit_size) => CastTarget::Int(*bit_size as usize),
-                    other => ice_usr!("unsafe_cast: unsupported target type {:?}", other),
+                    other => {
+                        self.reject_unsupported(
+                            format!("unsafe_cast: unsupported target type {other:?}"),
+                            Some(call.location),
+                        );
+                        let typ = self.type_converter.convert_type(other);
+                        return Some(self.placeholder(b, Some(call.location), &typ));
+                    }
                 };
 
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
@@ -2195,6 +2246,8 @@ impl<'a> ExpressionConverter<'a> {
                         format!("`spread::<{bits}>` must read 1..=32 bits of its `u32`"),
                         Some(call.location),
                     );
+                    let typ = self.type_converter.convert_type(&call.return_type);
+                    return Some(self.placeholder(b, Some(call.location), &typ));
                 }
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let result =
@@ -2211,6 +2264,8 @@ impl<'a> ExpressionConverter<'a> {
                         ),
                         Some(call.location),
                     );
+                    let typ = self.type_converter.convert_type(&call.return_type);
+                    return Some(self.placeholder(b, Some(call.location), &typ));
                 }
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();
                 let result = self.emit_located(b, Some(call.location), |e| {
