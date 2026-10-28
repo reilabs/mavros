@@ -491,6 +491,10 @@ pub fn lower_with_layout(
     constraints_layout: ConstraintsLayout,
     options: CodeGenOptions,
 ) -> LLSSA {
+    assert!(
+        witness_layout.logup_repetitions <= 1,
+        "the LLSSA AD emitters bind a single LogUp repetition's challenges"
+    );
     lower_inner(
         hlssa,
         flow_analysis,
@@ -4063,9 +4067,9 @@ fn emit_key_value_ad_lookup_call_body(
     let x_coeff = ad_read_coeff_at_dyn(e, x_cnst_idx);
     let y_coeff = ad_read_coeff_at_dyn(e, y_cnst_idx);
 
-    // FIELD-ASSUMPTION: L4-logup-challenges (4 sites)
-    // The LLSSA AD emitters bind the single challenge at `challenges_start()` (alpha) and
-    // `+1` (beta). K-challenge replication loops these as `challenges_start() + 2k`/`+ 2k + 1`.
+    // FIELD-ASSUMPTION: L4-logup-challenges (6 sites)
+    // The LLSSA AD emitters bind one repetition's challenges: alpha at `challenges_start()` and, at
+    // the key-value sites, beta at `+1`; `lower_with_layout` refuses a layout with more.
     let logup_alpha_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64);
     let logup_beta_i32 = e.emit_int_const(32, witness_layout.challenges_start() as u64 + 1);
 
@@ -4654,7 +4658,8 @@ mod tests {
             },
         };
         use mavros_wasm_layout::{WITGEN_INPUTS_PTR_OFFSET, WITGEN_VM_STRUCT_SIZE};
-        let runtime = crate::wasm_runtime::locate_or_build();
+        let runtime =
+            crate::wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}"));
         for (name, sequence, write) in [
             ("array_get", Some(SequenceTargetType::Array(2)), false),
             ("slice_get", Some(SequenceTargetType::Slice), false),
@@ -4941,7 +4946,8 @@ mod tests {
         codegen.compile(&llssa, &FlowAnalysis::run(&llssa));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("subject.wasm");
-        let runtime = crate::wasm_runtime::locate_or_build();
+        let runtime =
+            crate::wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}"));
         codegen.compile_to_wasm(&path, WasmCompileOpts::fast(runtime));
 
         let engine = wasmtime::Engine::default();

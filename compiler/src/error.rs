@@ -1,5 +1,17 @@
 use thiserror::Error;
 
+/// A failure in the toolchain around the compiler, such as a missing or failing external tool or a
+/// misconfigured environment.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct ToolchainError(String);
+
+impl ToolchainError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("No binary packages selected in {}", .0.display())]
