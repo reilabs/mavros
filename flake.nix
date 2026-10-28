@@ -51,8 +51,10 @@
             llvmPackages.lld
 
             # Tools
+            cargo-nextest
             dprint
             git
+            jq
             graphviz
             flamegraph
             nodejs_26

@@ -66,7 +66,8 @@ pub struct ProgramOptions {
     #[arg(long, value_name = "PATH", requires = "verify")]
     pub w: Option<PathBuf>,
 
-    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the Noir package root.
+    /// Print absolute paths in VM stack traces and WASM debug info instead of paths relative to the
+    /// Noir package root.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub absolute_paths: bool,
 
@@ -78,9 +79,9 @@ pub struct ProgramOptions {
     #[arg(long, conflicts_with = "skip_vm", action = clap::ArgAction::SetTrue)]
     pub profile: bool,
 
-    /// Target LogUp lookup-argument soundness, in bits of security. The compiler computes the
-    /// minimum number of challenges needed to reach it and reports the result. On bn254 a
-    /// single challenge suffices for any realistic target.
+    /// Target LogUp lookup-argument soundness, in bits of security. The compiler repeats the
+    /// argument at independent challenges as many times as needed (at most 16) and reports the
+    /// count. The LLVM and WASM outputs refuse a target that needs more than one repetition.
     #[arg(long, value_name = "BITS", global = true, default_value_t = DEFAULT_LOGUP_SOUNDNESS_BITS)]
     pub logup_soundness: u32,
 
@@ -436,10 +437,15 @@ pub fn run(args: &ProgramOptions) -> Result<ExitCode, Error> {
     if args.verify && roots.len() > 1 {
         return Err("--verify requires a single binary package; use --root to select a member or set default-member in Nargo.toml".into());
     }
+    let runtime_lib = if args.emit_wasm {
+        Some(mavros_compiler::wasm_runtime::locate_or_build()?)
+    } else {
+        None
+    };
     run_packages(&roots, |root| {
         let mut options = args.clone();
         options.root = root.clone();
-        run_package(&options)
+        run_package(&options, runtime_lib.as_deref())
     })
 }
 
@@ -466,7 +472,7 @@ fn run_packages(
     })
 }
 
-fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
+fn run_package(args: &ProgramOptions, runtime_lib: Option<&Path>) -> Result<ExitCode, Error> {
     let (mut driver, r1cs) = compile_to_r1cs(
         args.root.clone(),
         args.draw_graphs,
@@ -509,8 +515,9 @@ fn run_package(args: &ProgramOptions) -> Result<ExitCode, Error> {
         let wasm_config = if args.emit_wasm {
             let wasm_path = driver.get_debug_output_dir().join("program.wasm");
             info!(message = %"Generating WebAssembly", path = %wasm_path.display());
-            let runtime_lib = mavros_compiler::wasm_runtime::locate_or_build()?;
-            let mut opts = WasmCompileOpts::release(runtime_lib);
+            let runtime_lib =
+                runtime_lib.expect("run() resolves the runtime when --emit-wasm is set");
+            let mut opts = WasmCompileOpts::release(runtime_lib.to_path_buf());
             if let Some(root) = &source_path_root {
                 opts = opts.with_debug_path_root(root);
             }

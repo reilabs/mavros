@@ -468,6 +468,10 @@ pub struct WitnessLayout {
     pub multiplicities_size: usize,
 
     pub challenges_size: usize,
+    /// How many times the LogUp argument repeats, each repetition at independent challenges; 0
+    /// when the program has no lookup table. The challenge, table-data and lookup-data sections are
+    /// that many consecutive copies of one repetition's layout.
+    pub logup_repetitions: usize,
 
     pub tables_data_size: usize,
     pub lookups_data_size: usize,
@@ -496,12 +500,6 @@ impl WitnessLayout {
 
     pub fn challenges_end(&self) -> usize {
         self.challenges_start() + self.challenges_size
-    }
-
-    pub fn next_challenge(&mut self) -> usize {
-        let challenge_id = self.challenges_end();
-        self.challenges_size += 1;
-        challenge_id
     }
 
     pub fn tables_data_start(&self) -> usize {
@@ -549,6 +547,110 @@ impl WitnessLayout {
     }
 }
 
+/// The most LogUp repetitions a layout may hold. Goldilocks at 256 bits needs six to eight; the cap
+/// refuses a target that would build millions of copies of the argument.
+pub const MAX_LOGUP_REPETITIONS: usize = 16;
+
+/// The LogUp repetition count and, for each section, the distance between consecutive repetitions:
+/// repetition `k` of a section starts `k` strides past repetition 0's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogupStrides {
+    /// [`WitnessLayout::logup_repetitions`].
+    pub repetitions: usize,
+    pub challenges: usize,
+    pub witness_tables: usize,
+    pub witness_lookups: usize,
+    pub constraint_tables: usize,
+    pub constraint_lookups: usize,
+}
+
+impl LogupStrides {
+    /// Panics where [`Self::try_new`] fails.
+    pub fn new(witness: &WitnessLayout, constraints: &ConstraintsLayout) -> Self {
+        Self::try_new(witness, constraints).unwrap_or_else(|message| panic!("{message}"))
+    }
+
+    /// Fails when a LogUp section does not split into the layout's repetitions, or when a
+    /// repetition is not one the compiler emits: the repetitions exist exactly when there are
+    /// multiplicities, number at most [`MAX_LOGUP_REPETITIONS`], and each takes one or two
+    /// challenges, an inverse column per table entry and one lookup column per lookup row.
+    pub fn try_new(
+        witness: &WitnessLayout,
+        constraints: &ConstraintsLayout,
+    ) -> Result<Self, String> {
+        let repetitions = witness.logup_repetitions;
+        if repetitions > MAX_LOGUP_REPETITIONS {
+            return Err(format!(
+                "{repetitions} LogUp repetitions exceed the {MAX_LOGUP_REPETITIONS} supported"
+            ));
+        }
+        if (repetitions == 0) != (witness.multiplicities_size == 0) {
+            return Err(format!(
+                "{repetitions} LogUp repetitions over {} multiplicities",
+                witness.multiplicities_size
+            ));
+        }
+        let strides = Self {
+            repetitions,
+            challenges: try_per_repetition(witness.challenges_size, repetitions)?,
+            witness_tables: try_per_repetition(witness.tables_data_size, repetitions)?,
+            witness_lookups: try_per_repetition(witness.lookups_data_size, repetitions)?,
+            constraint_tables: try_per_repetition(constraints.tables_data_size, repetitions)?,
+            constraint_lookups: try_per_repetition(constraints.lookups_data_size, repetitions)?,
+        };
+        if repetitions > 0 && !(1..=2).contains(&strides.challenges) {
+            return Err(format!(
+                "a LogUp repetition takes one or two challenges, not {}",
+                strides.challenges
+            ));
+        }
+        if strides.witness_tables < witness.multiplicities_size {
+            return Err(format!(
+                "a LogUp repetition's {} table columns cannot invert {} table entries",
+                strides.witness_tables, witness.multiplicities_size
+            ));
+        }
+        if strides.witness_lookups != strides.constraint_lookups {
+            return Err(format!(
+                "a LogUp repetition's {} lookup columns do not match its {} lookup rows",
+                strides.witness_lookups, strides.constraint_lookups
+            ));
+        }
+        Ok(strides)
+    }
+
+    /// The offset of repetition `repetition`'s `α` into the challenge section.
+    pub fn alpha(&self, repetition: usize) -> usize {
+        repetition * self.challenges
+    }
+
+    /// The offset of repetition `repetition`'s `β` into the challenge section, right after its `α`.
+    ///
+    /// Panics when the repetitions have no `β`: no table has a value column.
+    pub fn beta(&self, repetition: usize) -> usize {
+        assert_eq!(self.challenges, 2, "a LogUp repetition without beta");
+        self.alpha(repetition) + 1
+    }
+}
+
+fn try_per_repetition(size: usize, repetitions: usize) -> Result<usize, String> {
+    if repetitions == 0 {
+        return if size == 0 {
+            Ok(0)
+        } else {
+            Err(format!(
+                "a LogUp section of {size} entries has no repetitions to split into"
+            ))
+        };
+    }
+    if size % repetitions != 0 {
+        return Err(format!(
+            "a LogUp section of {size} entries does not split into {repetitions} repetitions"
+        ));
+    }
+    Ok(size / repetitions)
+}
+
 #[derive(Clone, Debug, Copy, Serialize, Deserialize)]
 pub struct ConstraintsLayout {
     pub algebraic_size: usize,
@@ -590,7 +692,7 @@ fn evaluate<F: MavrosField>(terms: &[(usize, F)], witness: &[F]) -> F {
 }
 
 /// Domain separator of [`R1CS::digest`]; bump it when the preimage encoding changes.
-pub const R1CS_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-digest-v1\0";
+pub const R1CS_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-digest-v2\0";
 
 /// The `u32` tag naming `field` in the artifact header and in digests.
 pub fn field_tag(field: FieldId) -> u32 {

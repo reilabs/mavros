@@ -1,0 +1,12 @@
+[profile.default]
+# Share CPU slots across all test binaries, including integration tests.
+test-threads = "num-cpus"
+
+[profile.ci]
+# Report every failure in one CI run, without retrying failed tests.
+fail-fast = false
+retries = 0
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

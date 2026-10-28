@@ -2514,17 +2514,10 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             })?;
 
         if !output.status.success() {
-            eprintln!(
-                "wasm-ld stdout: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            eprintln!(
-                "wasm-ld stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
             return Err(ToolchainError::new(format!(
-                "wasm-ld failed with status: {}",
-                output.status
+                "wasm-ld failed ({}):\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
             )));
         }
 
@@ -2741,9 +2734,12 @@ mod tests {
         codegen
             .compile_to_wasm(
                 &wasm_path,
-                WasmCompileOpts::fast(crate::wasm_runtime::locate_or_build().unwrap()),
+                WasmCompileOpts::fast(
+                    crate::wasm_runtime::locate_or_build()
+                        .unwrap_or_else(|error| panic!("{error}")),
+                ),
             )
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{error}"));
 
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, &wasm_path)
@@ -3284,9 +3280,12 @@ mod tests {
         codegen
             .compile_to_wasm(
                 &wasm_path,
-                opts_for(crate::wasm_runtime::locate_or_build().unwrap()),
+                opts_for(
+                    crate::wasm_runtime::locate_or_build()
+                        .unwrap_or_else(|error| panic!("{error}")),
+                ),
             )
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{error}"));
 
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, &wasm_path)
