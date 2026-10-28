@@ -107,8 +107,8 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   names the field and the format of the system it carries.
 - **The WASM path** refuses Goldilocks (`Error::WasmFieldUnsupported`): the runtime has no
   Goldilocks instance.
-- **The Noir path** compiles over bn254 only; a Noir `Field` literal enters a configured field only
-  below its modulus (`L1-noir-frontend`).
+- **The Noir path** compiles over BN254 and Goldilocks; a Noir `Field` literal enters a configured
+  field only below its modulus (`L1-noir-frontend`).
 - **LogUp:** at the default `--logup-soundness=128`, a Goldilocks program with a lookup argument
   repeats the argument three times (four for `2^20 < D ≤ 2^31`; `L4-logup-challenges`).
 
@@ -147,8 +147,8 @@ The rest of Phase 5 is open:
   modulus in `bit_range.rs::lower_witness_field_bit_range`.
 - **Integer entry parameters wider than 63 bits** (`prepare_entry_point.rs`): parameters assembled
   from ABI limbs.
-- **The Noir path** (`L1-noir-frontend`): the `--field` selector, and Noir's compile-time bn254
-  builtins.
+- **The Noir path** (`L1-noir-frontend`): remaining field-specific builtins and BN254-only crypto
+  implementations.
 - **Cast semantics** (`analysis/types.rs::check_casts_into_field`, which is to be removed): the
   frontend refuses a non-injective `Int → Field` cast, and HLSSA defines `Int → Field` as reduction
   modulo `p` and `Field → Int` as truncation or zero-extension of the canonical value. Every

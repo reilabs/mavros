@@ -1,9 +1,9 @@
 // The packed spread implementation requires more than 64 bits of field headroom.
-// Small fields use ordinary u32 operations and explicit wrapping addition instead.
+// The portable implementation uses u32 operations and explicit wrapping addition instead.
 #[field(bn254)]
 mod bn254;
 #[field(not(bn254))]
-mod small_field;
+mod portable;
 
 global K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -23,5 +23,5 @@ pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
 
 #[field(not(bn254))]
 pub fn sha256_compression(msg_block: [u32; 16], state: [u32; 8]) -> [u32; 8] {
-    small_field::sha256_compression(msg_block, state)
+    portable::sha256_compression(msg_block, state)
 }

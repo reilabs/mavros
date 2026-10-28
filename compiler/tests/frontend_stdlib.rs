@@ -30,8 +30,8 @@ fn portable_stdlib_replacements_compile_on_both_fields() {
 }
 
 #[test]
-fn bn254_crypto_stays_available_and_reports_targeted_goldilocks_errors() {
-    for (source, message) in [
+fn bn254_crypto_stays_available_and_is_unresolved_on_goldilocks() {
+    for (source, unavailable_item) in [
         (
             "fn main(x: [u8; 32], y: [u8; 32], sig: [u8; 64], hash: [u8; 32]) -> pub bool {
                 std::ecdsa_secp256k1::verify_signature(x, y, sig, hash)
@@ -57,27 +57,41 @@ fn bn254_crypto_stays_available_and_reports_targeted_goldilocks_errors() {
             source.replace("fn main", "unconstrained fn main"),
         ] {
             let error = frontend(&source, FieldConfig::goldilocks()).unwrap_err();
-            assert!(matches!(error, Error::NoirCompilerError { .. }), "{error}");
-            let rendered = error.to_string();
-            assert!(rendered.contains(message), "{error}");
+            let Error::NoirCompilerError {
+                diagnostics,
+                rendered,
+            } = &error
+            else {
+                panic!("expected a Noir resolution error, got {error}");
+            };
+            let expected = format!("Could not resolve '{unavailable_item}' in path");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message == expected),
+                "expected {expected:?}, got {diagnostics:?}"
+            );
             assert!(rendered.contains("src/main.nr:"), "{error}");
         }
     }
 }
 
-fn check_program<F: MavrosField>(source: &str, field: FieldConfig, inputs: &[String]) {
+fn check_program<F: MavrosField>(
+    source: &str,
+    field: FieldConfig,
+    inputs: &[String],
+    unconstrained: bool,
+) {
     let dir = common::noir_project(source);
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
     driver.run_noir_compiler_for_field(field).unwrap();
     driver.make_struct_access_static().unwrap();
     driver.monomorphize().unwrap();
     driver.spill_witness().unwrap();
-    // Match the Goldilocks integer test harness: test arithmetic with one LogUp challenge.
-    // Production's 128-bit target remains unchanged and still rejects insufficient challenges.
-    if field == FieldConfig::goldilocks() {
-        driver.set_logup_soundness(40);
-    }
     let r1cs = driver.generate_r1cs::<F>().unwrap();
+    if field == FieldConfig::goldilocks() && !unconstrained {
+        assert!(r1cs.witness_layout.logup_repetitions > 1);
+    }
     let mut binary = driver
         .compile_bytecode(CodeGenOptions {
             check_constraints: true,
@@ -155,7 +169,7 @@ fn check_sha256<F: MavrosField>(field: FieldConfig, unconstrained: bool) {
             "block = {block:?}\nstate = {state:?}\nreturn = {expected:?}\n"
         ));
     }
-    check_program::<F>(&source, field, &inputs);
+    check_program::<F>(&source, field, &inputs, unconstrained);
 }
 
 #[test]
@@ -190,6 +204,11 @@ fn blake_goldilocks_witnesses_match_reference_digests() {
             [std::hash::blake2s(input), std::hash::blake3(input)]
         }}"
         );
-        check_program::<Goldilocks>(&source, FieldConfig::goldilocks(), &inputs);
+        check_program::<Goldilocks>(
+            &source,
+            FieldConfig::goldilocks(),
+            &inputs,
+            !mode.is_empty(),
+        );
     }
 }

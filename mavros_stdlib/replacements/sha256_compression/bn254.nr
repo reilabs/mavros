@@ -6,6 +6,8 @@ use crate::mavros::{spread, unspread, unsafe_cast};
 use super::K;
 
 // Pre-decomposed word with sigma0 chunk layout [10, 9, 11, 2]
+// These chunks assume Field can hold at least 22 arbitrary bits (spreading an 11-bit chunk).
+// The module's recombined spread arithmetic requires additional headroom, hence the BN254 gate.
 struct Sigma0Word {
     packed: u32,
     s0: Field, // spread of top 10 bits

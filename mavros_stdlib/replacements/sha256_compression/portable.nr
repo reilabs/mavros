@@ -6,11 +6,11 @@ fn rotr<let N: u32>(x: u32) -> u32 {
 }
 
 fn add<let N: u32>(words: [u32; N]) -> u32 {
-    // At most five words are added here. Keep the carry in an integer and truncate it,
+    // Five u32 words need 35 bits (five * (2^32 - 1) exceeds u34). Keep and truncate the carry,
     // avoiding the Field-to-integer conversion used by std's u32::wrapping_add.
-    let mut sum: u64 = 0;
+    let mut sum: u35 = 0;
     for word in words {
-        sum = sum + word as u64;
+        sum = sum + word as u35;
     }
     sum as u32
 }

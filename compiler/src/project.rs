@@ -93,8 +93,8 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements/sha256_compression/bn254.nr"),
     ),
     (
-        "std/mavros/replacements/sha256_compression/small_field.nr",
-        include_str!("../../mavros_stdlib/replacements/sha256_compression/small_field.nr"),
+        "std/mavros/replacements/sha256_compression/portable.nr",
+        include_str!("../../mavros_stdlib/replacements/sha256_compression/portable.nr"),
     ),
     (
         "std/mavros/vendor.nr",
