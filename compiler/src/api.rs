@@ -140,6 +140,12 @@ pub fn run_witgen_phase1<F: MavrosField>(
 }
 
 /// Phase 2: given real Fiat-Shamir challenges, complete witness generation.
+///
+/// `challenges` are `r1cs.witness_layout.challenges_size` field elements drawn independently after
+/// committing to the pre-commitment witness, in witness order: challenge `i` sits at
+/// `r1cs.witness_layout.challenges_start() + i`, each LogUp repetition's `α` followed by its `β`
+/// when a table has a value column. Powers of one challenge are not independent and do not suffice
+/// for the security guarantees provided by the repetitions.
 pub fn run_witgen_phase2<F: MavrosField>(
     phase1: interpreter::Phase1Result<F>,
     challenges: &[F],

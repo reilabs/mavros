@@ -784,6 +784,7 @@ mod tests {
                 algebraic_size: cols,
                 multiplicities_size: 0,
                 challenges_size: 0,
+                logup_repetitions: 0,
                 tables_data_size: 0,
                 lookups_data_size: 0,
             },
