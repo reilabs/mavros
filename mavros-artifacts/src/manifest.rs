@@ -1,13 +1,21 @@
-//! Witness metadata and the versioned `r1cs.bin` format.
+//! Witness metadata and the versioned `program.mavros` artifact.
 //!
 //! ```text
-//! [ MAVR1CS\0 (8 bytes) ][ format version: u32 LE ][ field: u32 LE ][ artifact digest: 32 bytes ]
-//! [ bincode { manifest, r1cs } ]
+//! [ MAVR1CS\0 (8 bytes) ][ format version: u32 LE ][ compiler: u32 LE length, UTF-8 bytes ]
+//! [ field: u32 LE ][ artifact digest: 32 bytes ][ bincode { manifest, r1cs, bytecode, abi } ]
 //! ```
 //!
-//! The digest binds the field, R1CS and witness manifest; reading verifies it and refuses bytes
-//! after the body. Bump [`R1CS_ARTIFACT_FORMAT_VERSION`] when changing the header, the serialized
-//! manifest, the R1CS or the layouts.
+//! The magic, format version and compiler version form the [`ArtifactPreamble`], laid out the same
+//! in every format version so that a reader can name the compiler that wrote a file it cannot
+//! otherwise open. Everything after it belongs to [`ARTIFACT_FORMAT_VERSION`]; bump that when
+//! changing the header, the serialized body or the layouts.
+//!
+//! Two digests identify an artifact. [`Artifact::circuit_digest`] binds the field, the R1CS and the
+//! witness manifest: the constraint system a proof is about. [`Artifact::digest`] binds the circuit
+//! digest, the VM bytecode and the ABI: the whole file. The header carries the latter and reading
+//! verifies it; the header itself is checked, not hashed, and the compiler version is informational.
+//! Reading also checks the manifest and the bytecode header against the R1CS and refuses bytes after
+//! the body.
 //!
 //! The manifest records only what the R1CS cannot say: each parameter's name, visibility, width and
 //! witness columns, and the return's. Witness and constraint counts come from the R1CS layouts, and
@@ -27,7 +35,10 @@ use bincode::Options as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::{Field, FieldId, LogupStrides, MavrosField, R1CS, SealedR1CS, field_tag};
+use crate::{
+    Field, FieldId, LogupStrides, MavrosField, R1CS, SealedR1CS, field_tag,
+    program_header::{ENTRY_AD, ENTRY_WITGEN, NO_ENTRY_POINT, ProgramHeader},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,36 +159,55 @@ impl WitnessManifest {
     }
 }
 
-pub const R1CS_ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
+pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
-pub const R1CS_ARTIFACT_FORMAT_VERSION: u32 = 2;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
+/// The first format whose header records the compiler version; the two `r1cs.bin` formats
+/// recorded none.
+const COMPILER_SINCE_VERSION: u32 = 3;
 
-/// Domain separator of [`R1CSArtifact::digest`]. Bump when its preimage encoding changes.
-pub const R1CS_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-artifact-v1\0";
+/// Domain separator of [`Artifact::circuit_digest`]. Its bytes and preimage are those of the
+/// `r1cs.bin` digest this format replaced, so a circuit keeps the digest it had there. Bump when
+/// the preimage encoding changes.
+pub const CIRCUIT_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-artifact-v1\0";
 
-const VERSION_OFFSET: usize = R1CS_ARTIFACT_MAGIC.len();
-const FIELD_OFFSET: usize = VERSION_OFFSET + 4;
-const DIGEST_OFFSET: usize = FIELD_OFFSET + 4;
-const HEADER_LEN: usize = DIGEST_OFFSET + 32;
+/// Domain separator of [`Artifact::digest`]. Bump when its preimage encoding changes.
+pub const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mavros-artifact-v1\0";
+
+const VERSION_OFFSET: usize = ARTIFACT_MAGIC.len();
+const COMPILER_LEN_OFFSET: usize = VERSION_OFFSET + 4;
+const COMPILER_OFFSET: usize = COMPILER_LEN_OFFSET + 4;
+const FIELD_LEN: usize = 4;
+const DIGEST_LEN: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
-    #[error("r1cs.bin does not start with the MAVR1CS header, so it is not a Mavros R1CS artifact")]
-    MissingHeader,
-    #[error("unsupported r1cs.bin format version {0}; expected {R1CS_ARTIFACT_FORMAT_VERSION}")]
-    UnsupportedVersion(u32),
-    #[error("r1cs.bin names unknown field {0}")]
-    UnknownField(u32),
-    #[error("r1cs.bin is over {found:?} but {expected:?} was requested")]
-    WrongField { expected: FieldId, found: FieldId },
-    #[error("r1cs.bin body: {0}")]
-    Body(#[from] bincode::Error),
     #[error(
-        "r1cs.bin digest mismatch: the header says {expected} but the artifact hashes to {actual}"
+        "the file does not start with a well-formed MAVR1CS header, so it is not a Mavros artifact"
     )]
+    MissingHeader,
+    #[error(
+        "unsupported artifact format version {found}, written by {}; this reader expects \
+         {ARTIFACT_FORMAT_VERSION}",
+        writer(.compiler)
+    )]
+    UnsupportedVersion {
+        found: u32,
+        /// `None` for a format that recorded no compiler version.
+        compiler: Option<String>,
+    },
+    #[error("the artifact names unknown field {0}")]
+    UnknownField(u32),
+    #[error("the artifact is over {found:?} but {expected:?} was requested")]
+    WrongField { expected: FieldId, found: FieldId },
+    #[error("artifact body: {0}")]
+    Body(#[from] bincode::Error),
+    #[error("artifact digest mismatch: the header says {expected} but the body hashes to {actual}")]
     DigestMismatch { expected: String, actual: String },
     #[error("{0}")]
     Invalid(String),
+    #[error("artifact bytecode: {0}")]
+    Bytecode(String),
 }
 
 fn body_options() -> impl bincode::Options {
@@ -186,8 +216,66 @@ fn body_options() -> impl bincode::Options {
         .reject_trailing_bytes()
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// Lowercase hex, the form digests are printed and recorded in.
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn writer(compiler: &Option<String>) -> String {
+    compiler.as_deref().map_or_else(
+        || "an unknown compiler".to_string(),
+        |compiler| format!("mavros {compiler}"),
+    )
+}
+
+fn u32_at(bytes: &[u8], start: usize) -> Result<u32, ArtifactError> {
+    bytes
+        .get(start..start + 4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
+        .ok_or(ArtifactError::MissingHeader)
+}
+
+/// The start of every artifact, laid out the same in every format version: enough to name the
+/// compiler that wrote the file before, or instead of, decoding the rest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactPreamble {
+    pub format_version: u32,
+    /// The release version of the compiler that wrote the artifact; `None` for a format that
+    /// recorded none.
+    pub compiler: Option<String>,
+}
+
+impl ArtifactPreamble {
+    /// Needs only the magic, so it reads an artifact of any format version.
+    pub fn peek(bytes: &[u8]) -> Result<Self, ArtifactError> {
+        if bytes.get(..ARTIFACT_MAGIC.len()) != Some(&ARTIFACT_MAGIC[..]) {
+            return Err(ArtifactError::MissingHeader);
+        }
+        let format_version = u32_at(bytes, VERSION_OFFSET)?;
+        let compiler = if format_version >= COMPILER_SINCE_VERSION {
+            let len = u32_at(bytes, COMPILER_LEN_OFFSET)? as usize;
+            let compiler = COMPILER_OFFSET
+                .checked_add(len)
+                .and_then(|end| bytes.get(COMPILER_OFFSET..end))
+                .and_then(|compiler| std::str::from_utf8(compiler).ok())
+                .ok_or(ArtifactError::MissingHeader)?;
+            Some(compiler.to_string())
+        } else {
+            None
+        };
+        Ok(Self {
+            format_version,
+            compiler,
+        })
+    }
+
+    /// Where the format-specific part of the header begins.
+    pub(crate) fn encoded_len(&self) -> usize {
+        match &self.compiler {
+            Some(compiler) => COMPILER_OFFSET + compiler.len(),
+            None => COMPILER_LEN_OFFSET,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +283,8 @@ fn hex(bytes: &[u8]) -> String {
 struct Body<F: MavrosField> {
     manifest: WitnessManifest,
     r1cs: R1CS<F>,
+    bytecode: Vec<u64>,
+    abi: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -202,25 +292,57 @@ struct Body<F: MavrosField> {
 struct BodyRef<'a, F: MavrosField> {
     manifest: &'a WitnessManifest,
     r1cs: &'a R1CS<F>,
+    bytecode: &'a [u64],
+    abi: &'a [u8],
 }
 
 #[derive(Debug)]
-pub struct R1CSArtifact<F: MavrosField = Field> {
+pub struct Artifact<F: MavrosField = Field> {
+    compiler: String,
     manifest: WitnessManifest,
     r1cs: SealedR1CS<F>,
+    bytecode: Vec<u64>,
+    abi: Vec<u8>,
+    circuit_digest: [u8; 32],
     digest: [u8; 32],
 }
 
-impl<F: MavrosField> R1CSArtifact<F> {
-    pub fn new(manifest: WitnessManifest, r1cs: SealedR1CS<F>) -> Self {
+/// The owned contents of an [`Artifact`]; see [`Artifact::into_parts`].
+#[derive(Debug)]
+pub struct ArtifactParts<F: MavrosField = Field> {
+    pub compiler: String,
+    pub manifest: WitnessManifest,
+    pub r1cs: SealedR1CS<F>,
+    pub bytecode: Vec<u64>,
+    pub abi: Vec<u8>,
+}
+
+impl<F: MavrosField> Artifact<F> {
+    pub fn new(
+        compiler: String,
+        manifest: WitnessManifest,
+        r1cs: SealedR1CS<F>,
+        bytecode: Vec<u64>,
+        abi: Vec<u8>,
+    ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(R1CS_ARTIFACT_DIGEST_DOMAIN);
+        hasher.update(CIRCUIT_DIGEST_DOMAIN);
         hasher.update(r1cs.digest());
         bincode::serialize_into(&mut hasher, &manifest)
-            .expect("hashing a witness manifest cannot fail: the hasher accepts every byte");
+            .expect("hashing cannot fail: the hasher accepts every byte");
+        let circuit_digest: [u8; 32] = hasher.finalize().into();
+        let mut hasher = Sha256::new();
+        hasher.update(ARTIFACT_DIGEST_DOMAIN);
+        hasher.update(circuit_digest);
+        bincode::serialize_into(&mut hasher, &(&bytecode, &abi))
+            .expect("hashing cannot fail: the hasher accepts every byte");
         Self {
+            compiler,
             manifest,
             r1cs,
+            bytecode,
+            abi,
+            circuit_digest,
             digest: hasher.finalize().into(),
         }
     }
@@ -229,11 +351,19 @@ impl<F: MavrosField> R1CSArtifact<F> {
         self.r1cs.field()
     }
 
-    /// SHA-256 over [`R1CS_ARTIFACT_DIGEST_DOMAIN`], the field-bound [`R1CS::digest`] and the
-    /// bincode-encoded manifest. Pin this digest to identify both the system and its public
-    /// input/output mapping; [`SealedR1CS::digest`] identifies only the constraint system.
+    /// SHA-256 over [`ARTIFACT_DIGEST_DOMAIN`], [`Self::circuit_digest`] and the bincode-encoded
+    /// bytecode and ABI: the identity of the whole file, which the header carries. Pin it to mean
+    /// "these exact bytes".
     pub fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    /// SHA-256 over [`CIRCUIT_DIGEST_DOMAIN`], the field-bound [`R1CS::digest`] and the
+    /// bincode-encoded manifest: the identity of the constraint system and its witness layout,
+    /// which a codegen-only change leaves alone. Pin it to mean "the same circuit", as a verifier
+    /// or a proof transcript should.
+    pub fn circuit_digest(&self) -> [u8; 32] {
+        self.circuit_digest
     }
 
     pub fn manifest(&self) -> &WitnessManifest {
@@ -244,42 +374,68 @@ impl<F: MavrosField> R1CSArtifact<F> {
         &self.r1cs
     }
 
-    pub fn into_parts(self) -> (FieldId, WitnessManifest, SealedR1CS<F>) {
-        (self.r1cs.field(), self.manifest, self.r1cs)
+    pub fn bytecode(&self) -> &[u64] {
+        &self.bytecode
+    }
+
+    pub fn abi(&self) -> &[u8] {
+        &self.abi
+    }
+
+    pub fn compiler(&self) -> &str {
+        &self.compiler
+    }
+
+    /// For a consumer that must own the R1CS without cloning it. Read [`Self::digest`] or
+    /// [`Self::circuit_digest`] first; they are not among the parts.
+    pub fn into_parts(self) -> ArtifactParts<F> {
+        ArtifactParts {
+            compiler: self.compiler,
+            manifest: self.manifest,
+            r1cs: self.r1cs,
+            bytecode: self.bytecode,
+            abi: self.abi,
+        }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
+        let compiler_len = u32::try_from(self.compiler.len()).map_err(|_| {
+            ArtifactError::Invalid("the compiler version does not fit in u32 bytes".to_string())
+        })?;
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&R1CS_ARTIFACT_MAGIC);
-        bytes.extend_from_slice(&R1CS_ARTIFACT_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&ARTIFACT_MAGIC);
+        bytes.extend_from_slice(&ARTIFACT_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&compiler_len.to_le_bytes());
+        bytes.extend_from_slice(self.compiler.as_bytes());
         bytes.extend_from_slice(&field_tag(self.field()).to_le_bytes());
-        bytes.extend_from_slice(&self.digest());
-        debug_assert_eq!(bytes.len(), HEADER_LEN);
+        bytes.extend_from_slice(&self.digest);
         body_options().serialize_into(
             &mut bytes,
             &BodyRef {
                 manifest: &self.manifest,
                 r1cs: self.r1cs.system(),
+                bytecode: &self.bytecode,
+                abi: &self.abi,
             },
         )?;
         Ok(bytes)
     }
 
-    /// Reads an artifact, verifying its digest, the manifest against the R1CS and the LogUp layout
-    /// ([`LogupStrides::try_new`]). Trailing bytes are an error.
+    /// Reads an artifact, verifying its digest, then the manifest and the LogUp layout
+    /// ([`LogupStrides::try_new`]) against the R1CS, and the bytecode header against both.
+    /// Trailing bytes are an error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArtifactError> {
-        if bytes.len() < HEADER_LEN || bytes[..R1CS_ARTIFACT_MAGIC.len()] != R1CS_ARTIFACT_MAGIC {
-            return Err(ArtifactError::MissingHeader);
+        let preamble = ArtifactPreamble::peek(bytes)?;
+        if preamble.format_version != ARTIFACT_FORMAT_VERSION {
+            return Err(ArtifactError::UnsupportedVersion {
+                found: preamble.format_version,
+                compiler: preamble.compiler,
+            });
         }
-        let u32_at =
-            |start: usize| u32::from_le_bytes(bytes[start..start + 4].try_into().expect("4 bytes"));
-
-        let version = u32_at(VERSION_OFFSET);
-        if version != R1CS_ARTIFACT_FORMAT_VERSION {
-            return Err(ArtifactError::UnsupportedVersion(version));
-        }
-
-        let field_code = u32_at(FIELD_OFFSET);
+        let field_offset = preamble.encoded_len();
+        let digest_offset = field_offset + FIELD_LEN;
+        let body_offset = digest_offset + DIGEST_LEN;
+        let field_code = u32_at(bytes, field_offset)?;
         let field = FieldId::from_code(u64::from(field_code))
             .ok_or(ArtifactError::UnknownField(field_code))?;
         if field != F::ID {
@@ -288,18 +444,26 @@ impl<F: MavrosField> R1CSArtifact<F> {
                 found: field,
             });
         }
-
-        let digest: [u8; 32] = bytes[DIGEST_OFFSET..HEADER_LEN]
+        let digest: [u8; 32] = bytes
+            .get(digest_offset..body_offset)
+            .ok_or(ArtifactError::MissingHeader)?
             .try_into()
             .expect("32 bytes");
-        let body: Body<F> = body_options().deserialize(&bytes[HEADER_LEN..])?;
-        let artifact = Self::new(body.manifest, SealedR1CS::new(body.r1cs));
-        let actual = artifact.digest();
-
-        if actual != digest {
+        let body: Body<F> = body_options().deserialize(&bytes[body_offset..])?;
+        let compiler = preamble
+            .compiler
+            .expect("the current format records the compiler version");
+        let artifact = Self::new(
+            compiler,
+            body.manifest,
+            SealedR1CS::new(body.r1cs),
+            body.bytecode,
+            body.abi,
+        );
+        if artifact.digest != digest {
             return Err(ArtifactError::DigestMismatch {
                 expected: hex(&digest),
-                actual: hex(&actual),
+                actual: hex(&artifact.digest),
             });
         }
 
@@ -313,14 +477,66 @@ impl<F: MavrosField> R1CSArtifact<F> {
             &artifact.r1cs.constraints_layout,
         )
         .map_err(ArtifactError::Invalid)?;
+        check_bytecode::<F>(&artifact.bytecode, &artifact.r1cs, &artifact.manifest)
+            .map_err(ArtifactError::Bytecode)?;
         Ok(artifact)
     }
+}
+
+/// The bytecode header must describe the program the R1CS and manifest describe.
+fn check_bytecode<F: MavrosField>(
+    bytecode: &[u64],
+    r1cs: &R1CS<F>,
+    manifest: &WitnessManifest,
+) -> Result<(), String> {
+    let header = ProgramHeader::parse(bytecode)?;
+    if header.field != F::ID {
+        return Err(format!(
+            "the bytecode is over {:?} but the artifact is over {:?}",
+            header.field,
+            F::ID
+        ));
+    }
+    if !header.has_layouts(r1cs.witness_layout, r1cs.constraints_layout) {
+        return Err("the bytecode's constraint layouts disagree with the R1CS".to_string());
+    }
+    let len = bytecode.len();
+    if header.code_start > len
+        || header
+            .entry_points
+            .iter()
+            .any(|&entry| entry != NO_ENTRY_POINT && entry >= len)
+    {
+        return Err("the bytecode's header points past its end".to_string());
+    }
+    for (entry, name) in [(ENTRY_WITGEN, "witgen"), (ENTRY_AD, "AD")] {
+        if header
+            .entry_points
+            .get(entry)
+            .is_none_or(|offset| *offset == NO_ENTRY_POINT)
+        {
+            return Err(format!(
+                "the bytecode has no {name} entry point; a verifier binary is not a prover artifact"
+            ));
+        }
+    }
+    let blob = manifest.entry_blob_field_count();
+    if header.entry_blob_field_count != blob {
+        return Err(format!(
+            "the bytecode reads an entry blob of {} fields but the manifest has {blob}",
+            header.entry_blob_field_count
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ConstraintsLayout, Field, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout};
+    use crate::{
+        ConstraintsLayout, Field, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout,
+        program_header::{ConstraintLayouts, PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC},
+    };
 
     /// `fn main(x: Field, y: pub Field) -> pub Field { x * y }`: columns are
     /// `[1, y, x, t3, t4, ret]`, with one constraint `y * x = ret`.
@@ -371,18 +587,63 @@ mod tests {
         }
     }
 
+    /// A header agreeing with `manifest` and `r1cs`: no constant pool or globals, witgen and AD
+    /// entries at the one function marker that follows, no code.
+    fn bytecode(manifest: &WitnessManifest, r1cs: &R1CS) -> Vec<u64> {
+        let mut words = vec![
+            PROGRAM_MAGIC,
+            PROGRAM_FORMAT_VERSION,
+            FieldId::Bn254.code(),
+            1,
+        ];
+        words.extend(ConstraintLayouts::new(r1cs.witness_layout, r1cs.constraints_layout).words());
+        let marker = words.len() as u64 + 6;
+        words.extend([
+            0,
+            0,
+            manifest.entry_blob_field_count() as u64,
+            2,
+            marker,
+            marker,
+        ]);
+        words.push(u64::MAX);
+        words
+    }
+
+    fn abi() -> Vec<u8> {
+        b"{}".to_vec()
+    }
+
+    fn build(manifest: WitnessManifest, r1cs: R1CS, bytecode: Vec<u64>, abi: Vec<u8>) -> Artifact {
+        Artifact::new(
+            "test".into(),
+            manifest,
+            SealedR1CS::new(r1cs),
+            bytecode,
+            abi,
+        )
+    }
+
+    fn artifact(manifest: WitnessManifest, r1cs: R1CS) -> Artifact {
+        let bytecode = bytecode(&manifest, &r1cs);
+        build(manifest, r1cs, bytecode, abi())
+    }
+
     fn bytes_of(manifest: WitnessManifest, r1cs: R1CS) -> Vec<u8> {
-        R1CSArtifact::new(manifest, SealedR1CS::new(r1cs))
-            .to_bytes()
-            .unwrap()
+        artifact(manifest, r1cs).to_bytes().unwrap()
     }
 
-    fn read(bytes: &[u8]) -> Result<R1CSArtifact, ArtifactError> {
-        R1CSArtifact::from_bytes(bytes)
+    fn read(bytes: &[u8]) -> Result<Artifact, ArtifactError> {
+        Artifact::from_bytes(bytes)
     }
 
-    fn round_trip(manifest: WitnessManifest, r1cs: R1CS) -> Result<R1CSArtifact, ArtifactError> {
+    fn round_trip(manifest: WitnessManifest, r1cs: R1CS) -> Result<Artifact, ArtifactError> {
         read(&bytes_of(manifest, r1cs))
+    }
+
+    fn digest_range(bytes: &[u8]) -> Range<usize> {
+        let start = ArtifactPreamble::peek(bytes).unwrap().encoded_len() + FIELD_LEN;
+        start..start + DIGEST_LEN
     }
 
     #[test]
@@ -408,7 +669,7 @@ mod tests {
             let (mut m, mut r) = (manifest(), r1cs());
             mutate(&mut m, &mut r);
             let bytes = bytes_of(m.clone(), r.clone());
-            assert!(bytes.starts_with(&R1CS_ARTIFACT_MAGIC));
+            assert!(bytes.starts_with(&ARTIFACT_MAGIC));
             assert_eq!(
                 bytes,
                 bytes_of(m.clone(), r.clone()),
@@ -417,14 +678,21 @@ mod tests {
             let decoded = read(&bytes).unwrap();
             assert_eq!(decoded.field(), FieldId::Bn254);
             assert_eq!(decoded.r1cs().digest(), r.digest());
-            assert_eq!(&bytes[DIGEST_OFFSET..HEADER_LEN], &decoded.digest());
-            assert_ne!(decoded.digest(), decoded.r1cs().digest());
+            assert_eq!(&bytes[digest_range(&bytes)], &decoded.digest());
+            assert_ne!(decoded.digest(), decoded.circuit_digest());
+            assert_ne!(decoded.circuit_digest(), decoded.r1cs().digest());
             assert_eq!(decoded.manifest(), &m);
+            assert_eq!(decoded.bytecode(), bytecode(&m, &r));
+            assert_eq!(decoded.abi(), abi());
+            assert_eq!(decoded.compiler(), "test");
             assert_eq!(
                 decoded.r1cs().witness_layout.size(),
                 r.witness_layout.size()
             );
             assert_eq!(decoded.r1cs().constraints.len(), r.constraints.len());
+            let parts = decoded.into_parts();
+            assert_eq!(parts.manifest, m);
+            assert_eq!(parts.compiler, "test");
         }
     }
 
@@ -432,25 +700,49 @@ mod tests {
     fn artifact_rejects_invalid_headers() {
         assert!(matches!(read(&[]), Err(ArtifactError::MissingHeader)));
         let mut bytes = bytes_of(manifest(), r1cs());
-        assert!(matches!(
-            read(&bytes[..HEADER_LEN - 1]),
-            Err(ArtifactError::MissingHeader)
-        ));
-        for version in [
-            0,
-            R1CS_ARTIFACT_FORMAT_VERSION - 1,
-            R1CS_ARTIFACT_FORMAT_VERSION + 1,
-        ] {
-            bytes[VERSION_OFFSET..FIELD_OFFSET].copy_from_slice(&version.to_le_bytes());
+        let body = digest_range(&bytes).end;
+        for cut in [COMPILER_OFFSET + 1, body - 1] {
+            assert!(
+                matches!(read(&bytes[..cut]), Err(ArtifactError::MissingHeader)),
+                "cut at {cut}"
+            );
+        }
+        for version in [0, ARTIFACT_FORMAT_VERSION - 1, ARTIFACT_FORMAT_VERSION + 1] {
+            bytes[VERSION_OFFSET..COMPILER_LEN_OFFSET].copy_from_slice(&version.to_le_bytes());
+            let compiler = (version >= COMPILER_SINCE_VERSION).then(|| "test".to_string());
             assert!(matches!(
                 read(&bytes),
-                Err(ArtifactError::UnsupportedVersion(found)) if found == version
+                Err(ArtifactError::UnsupportedVersion { found, compiler: found_compiler })
+                    if found == version && found_compiler == compiler
             ));
+            assert_eq!(
+                ArtifactPreamble::peek(&bytes).unwrap(),
+                ArtifactPreamble {
+                    format_version: version,
+                    compiler,
+                }
+            );
         }
-        bytes[VERSION_OFFSET..FIELD_OFFSET]
-            .copy_from_slice(&R1CS_ARTIFACT_FORMAT_VERSION.to_le_bytes());
-        bytes[FIELD_OFFSET..DIGEST_OFFSET].copy_from_slice(&99u32.to_le_bytes());
+        bytes[VERSION_OFFSET..COMPILER_LEN_OFFSET]
+            .copy_from_slice(&ARTIFACT_FORMAT_VERSION.to_le_bytes());
+        let field = digest_range(&bytes).start - FIELD_LEN;
+        bytes[field..field + FIELD_LEN].copy_from_slice(&99u32.to_le_bytes());
         assert!(matches!(read(&bytes), Err(ArtifactError::UnknownField(99))));
+        bytes[COMPILER_OFFSET] = 0xff;
+        assert!(matches!(read(&bytes), Err(ArtifactError::MissingHeader)));
+
+        // A format-1 file: the field tag and digest follow the version, and no compiler.
+        let mut format_1 = ARTIFACT_MAGIC.to_vec();
+        format_1.extend_from_slice(&1u32.to_le_bytes());
+        format_1.extend_from_slice(&1u32.to_le_bytes());
+        format_1.extend_from_slice(&[0xff; 32]);
+        assert!(matches!(
+            read(&format_1),
+            Err(ArtifactError::UnsupportedVersion {
+                found: 1,
+                compiler: None,
+            })
+        ));
     }
 
     #[test]
@@ -553,29 +845,103 @@ mod tests {
         for (case, mutate) in cases.into_iter().enumerate() {
             let (mut m, mut r) = (manifest(), r1cs());
             mutate(&mut m, &mut r);
+            let bytes = build(m, r, bytecode(&manifest(), &r1cs()), abi())
+                .to_bytes()
+                .unwrap();
             assert!(
-                matches!(round_trip(m, r), Err(ArtifactError::Invalid(_))),
+                matches!(read(&bytes), Err(ArtifactError::Invalid(_))),
                 "overflow case {case}"
             );
         }
     }
 
-    /// The digest is a compatibility promise to consumers that record it: pin its encoding.
+    /// Words: 0 magic, 1 version, 2 field, 3 layout tag, 4..12 layouts, 12 pool length,
+    /// 13 globals, 14 entry blob, 15 entry count, 16 witgen entry, 17 AD entry, 18 marker.
+    #[test]
+    fn artifact_rejects_bytecode_that_disagrees_with_the_circuit() {
+        let cases: [(&str, fn(&mut Vec<u64>)); 10] = [
+            ("empty", |b| b.clear()),
+            ("no magic", |b| b[0] = 0),
+            ("another format version", |b| b[1] += 1),
+            ("another field", |b| b[2] = FieldId::Goldilocks.code()),
+            ("another algebraic size", |b| b[4] += 1),
+            ("another entry blob", |b| b[15] += 1),
+            ("entry past the end", |b| b[17] = 99),
+            ("no code after the header", |b| b.truncate(19)),
+            ("no AD entry", |b| b[18] = NO_ENTRY_POINT as u64),
+            ("witgen entry only", |b| {
+                b[16] = 1;
+                b.remove(17);
+            }),
+        ];
+        for (case, mutate) in cases {
+            let mut words = bytecode(&manifest(), &r1cs());
+            mutate(&mut words);
+            let bytes = build(manifest(), r1cs(), words, abi()).to_bytes().unwrap();
+            assert!(
+                matches!(read(&bytes), Err(ArtifactError::Bytecode(_))),
+                "{case}"
+            );
+        }
+    }
+
+    /// Both digests are compatibility promises to consumers that record them: pin their encoding.
     #[test]
     fn digest_encoding_is_pinned() {
         assert_eq!(
             hex(&r1cs().digest()),
             "19a818fdfde1381d0a34923b663aeb61e431643eaf0cc3d8e435cd944a7289f4"
         );
-        let artifact = R1CSArtifact::new(manifest(), SealedR1CS::new(r1cs()));
+        let pinned = artifact(manifest(), r1cs());
+        // The digest the r1cs.bin artifact carried for this circuit.
         assert_eq!(
-            hex(&artifact.digest()),
+            hex(&pinned.circuit_digest()),
             "2192560a2e938f3ae252363dad5eedb0f1c5de48c88201be9d5f51bd2c19229e"
         );
+        assert_eq!(
+            hex(&pinned.digest()),
+            "b9c22073231d955fba155a857fb6f5cbf099f28df986f8c2065b1e2fc63ac0e5"
+        );
+
+        // The compiler version stays outside both digests.
+        let other = Artifact::new(
+            "other".into(),
+            manifest(),
+            SealedR1CS::new(r1cs()),
+            bytecode(&manifest(), &r1cs()),
+            abi(),
+        );
+        assert_eq!(other.circuit_digest(), pinned.circuit_digest());
+        assert_eq!(other.digest(), pinned.digest());
+        assert_eq!(
+            read(&other.to_bytes().unwrap()).unwrap().compiler(),
+            "other"
+        );
+
+        // Bytecode and ABI move the artifact digest only; the circuit moves both.
+        let mut words = bytecode(&manifest(), &r1cs());
+        *words.last_mut().unwrap() = 7;
+        for other in [
+            build(manifest(), r1cs(), words, abi()),
+            build(
+                manifest(),
+                r1cs(),
+                bytecode(&manifest(), &r1cs()),
+                b"{ }".to_vec(),
+            ),
+        ] {
+            assert_eq!(other.circuit_digest(), pinned.circuit_digest());
+            assert_ne!(other.digest(), pinned.digest());
+        }
+        let mut renamed = manifest();
+        renamed.parameters[0].name = "another_input".into();
+        let other = artifact(renamed, r1cs());
+        assert_ne!(other.circuit_digest(), pinned.circuit_digest());
+        assert_ne!(other.digest(), pinned.digest());
     }
 
-    /// A flipped header byte, another R1CS under the honest digest, or a manifest edit that
-    /// still validates: each is a digest mismatch.
+    /// A flipped header byte, another R1CS, bytecode or ABI under the honest digest, or a
+    /// manifest edit that still validates: each is a digest mismatch.
     #[test]
     fn tampering_is_rejected() {
         let honest = bytes_of(manifest(), r1cs());
@@ -586,12 +952,13 @@ mod tests {
             );
         };
         let with_honest_digest = |mut forged: Vec<u8>| {
-            forged[DIGEST_OFFSET..HEADER_LEN].copy_from_slice(&honest[DIGEST_OFFSET..HEADER_LEN]);
+            let range = digest_range(&honest);
+            forged[range.clone()].copy_from_slice(&honest[range]);
             forged
         };
 
         let mut flipped = honest.clone();
-        flipped[DIGEST_OFFSET] ^= 1;
+        flipped[digest_range(&honest).start] ^= 1;
         rejects(&flipped, "flipped digest byte");
 
         let mut other = r1cs();
@@ -599,6 +966,20 @@ mod tests {
         rejects(
             &with_honest_digest(bytes_of(manifest(), other)),
             "changed coefficient",
+        );
+
+        let with_parts = |bytecode: Vec<u64>, abi: Vec<u8>| {
+            build(manifest(), r1cs(), bytecode, abi).to_bytes().unwrap()
+        };
+        let mut words = bytecode(&manifest(), &r1cs());
+        *words.last_mut().unwrap() = 7;
+        rejects(
+            &with_honest_digest(with_parts(words, abi())),
+            "changed bytecode word",
+        );
+        rejects(
+            &with_honest_digest(with_parts(bytecode(&manifest(), &r1cs()), b"{ }".to_vec())),
+            "changed ABI byte",
         );
 
         let variants: [fn(&mut WitnessManifest); 6] = [

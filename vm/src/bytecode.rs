@@ -3748,34 +3748,10 @@ impl Display for Function {
     }
 }
 
-/// Index of the witness-generation entry point in a program's entry table.
-pub const ENTRY_WITGEN: usize = 0;
-/// Index of the AD entry point in a program's entry table.
-pub const ENTRY_AD: usize = 1;
-/// Index of the direct forward verifier entry point.
-pub const ENTRY_VERIFIER: usize = 2;
-/// An absent entry in a program or serialized entry table.
-pub const NO_ENTRY_POINT: usize = usize::MAX;
-
-/// Buffer layouts bound to the compiled constraint traversal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConstraintLayouts([u64; 9]);
-
-impl ConstraintLayouts {
-    pub fn new(witness: WitnessLayout, constraints: ConstraintsLayout) -> Self {
-        Self([
-            witness.algebraic_size as u64,
-            witness.multiplicities_size as u64,
-            witness.challenges_size as u64,
-            witness.logup_repetitions as u64,
-            witness.tables_data_size as u64,
-            witness.lookups_data_size as u64,
-            constraints.algebraic_size as u64,
-            constraints.tables_data_size as u64,
-            constraints.lookups_data_size as u64,
-        ])
-    }
-}
+pub use mavros_artifacts::program_header::{
+    ConstraintLayouts, ENTRY_AD, ENTRY_VERIFIER, ENTRY_WITGEN, NO_ENTRY_POINT,
+    PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC, ProgramHeader,
+};
 
 pub struct Program {
     /// Required for AD/verifier execution; absent for programs built only for inspection or witgen.
@@ -3818,15 +3794,6 @@ impl Display for Program {
     }
 }
 
-/// The first word of every program binary: `MAVROSVM` as big-endian ASCII.
-pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
-
-/// The program binary's format version, its second word. Changing existing production opcode
-/// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
-/// Appending opcodes without changing existing production encodings does not require a bump.
-/// The third word names the program's field ([`FieldId::code`]).
-pub const PROGRAM_FORMAT_VERSION: u64 = 5;
-
 impl Program {
     /// Serialize executable VM bytecode. Debug information is never embedded in this output.
     pub fn to_binary(&self) -> Vec<u64> {
@@ -3851,7 +3818,7 @@ impl Program {
         let mut binary = vec![PROGRAM_MAGIC, PROGRAM_FORMAT_VERSION, self.field.code()];
         binary.push(u64::from(self.constraint_layouts.is_some()));
         if let Some(layouts) = self.constraint_layouts {
-            binary.extend_from_slice(&layouts.0);
+            binary.extend_from_slice(&layouts.words());
         }
 
         // Constant pool: [pool_len, ...words...].
@@ -3942,76 +3909,15 @@ impl Program {
     }
 }
 
-/// The decoded header of a program binary.
-pub struct ProgramHeader {
-    /// The field the program computes over.
-    pub field: FieldId,
-    /// Layouts emitted by the compiler, checked before constraint execution.
-    pub constraint_layouts: Option<ConstraintLayouts>,
-    /// Interned constant pool (flat words), read at runtime by `mov_const_pool`.
-    pub constant_pool: Vec<u64>,
-    pub global_frame_size: usize,
-    /// The exact number of input fields the caller must supply.
-    pub entry_blob_field_count: usize,
-    /// Absolute word offsets of each entry point's function marker, in entry-table order
-    /// ([`ENTRY_WITGEN`], [`ENTRY_AD`], ...). The entry's frame size lives at `offset + 1` and
-    /// its first opcode at `offset + 2`. [`NO_ENTRY_POINT`] marks an absent entry.
-    pub entry_points: Vec<usize>,
-    /// Word offset of the first function marker, i.e. where the opcode stream begins.
-    pub code_start: usize,
-}
-
-/// Decode a program binary's field, layouts, constant pool, global frame size, entry blob
-/// field count and entry-point table.
+/// Decode a program binary's header; see [`ProgramHeader::parse`].
 ///
 /// # Panics
 ///
 /// If the binary does not open with [`PROGRAM_MAGIC`] followed by [`PROGRAM_FORMAT_VERSION`]: a
 /// binary of any other format numbers its opcodes differently, so they would select the wrong
-/// handlers. If its field word names no supported field.
+/// handlers. If its field word names no supported field, or it ends inside the header.
 pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
-    assert!(
-        program.first() == Some(&PROGRAM_MAGIC),
-        "not a mavros VM program binary"
-    );
-    let version = program.get(1).copied();
-    assert!(
-        version == Some(PROGRAM_FORMAT_VERSION),
-        "unsupported VM program format version {version:?}; expected {PROGRAM_FORMAT_VERSION}"
-    );
-    let field = FieldId::from_code(program[2]).unwrap_or_else(|| {
-        panic!(
-            "the VM program names no supported field (word {})",
-            program[2]
-        )
-    });
-    let (constraint_layouts, off) = match program[3] {
-        0 => (None, 4),
-        1 => (
-            Some(ConstraintLayouts(program[4..13].try_into().unwrap())),
-            13,
-        ),
-        _ => panic!("invalid constraint layout tag"),
-    };
-    let pool_len = program[off] as usize;
-    let constant_pool = program[off + 1..off + 1 + pool_len].to_vec();
-    let off = off + 1 + pool_len;
-    let global_frame_size = program[off] as usize;
-    let entry_blob_field_count = program[off + 1] as usize;
-    let num_entries = program[off + 2] as usize;
-    let entry_points: Vec<usize> = (0..num_entries)
-        .map(|i| program[off + 3 + i] as usize)
-        .collect();
-    let code_start = off + 3 + num_entries;
-    ProgramHeader {
-        field,
-        constraint_layouts,
-        constant_pool,
-        global_frame_size,
-        entry_blob_field_count,
-        entry_points,
-        code_start,
-    }
+    ProgramHeader::parse(program).unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Every width the `_int128` lane holds that is worth sweeping, narrowest first.

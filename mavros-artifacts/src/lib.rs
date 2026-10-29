@@ -1,5 +1,6 @@
 pub mod field;
 pub mod manifest;
+pub mod program_header;
 
 use std::{cell::OnceCell, collections::BTreeMap, fmt::Display, ops::Deref};
 
@@ -9,8 +10,9 @@ use tracing::error;
 
 pub use field::{FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField};
 pub use manifest::{
-    ArtifactError, ManifestParam, ParamVisibility, R1CS_ARTIFACT_DIGEST_DOMAIN,
-    R1CS_ARTIFACT_FORMAT_VERSION, R1CS_ARTIFACT_MAGIC, R1CSArtifact, ReturnSlot, WitnessManifest,
+    ARTIFACT_DIGEST_DOMAIN, ARTIFACT_FORMAT_VERSION, ARTIFACT_MAGIC, Artifact, ArtifactError,
+    ArtifactParts, ArtifactPreamble, CIRCUIT_DIGEST_DOMAIN, ManifestParam, ParamVisibility,
+    ReturnSlot, WitnessManifest, hex,
 };
 
 // FIELD-ASSUMPTION: L1-alias
@@ -740,7 +742,8 @@ impl<F: MavrosField> SealedR1CS<F> {
         F::ID
     }
 
-    /// Use [`R1CSArtifact::digest`] to also bind the witness manifest.
+    /// Use [`Artifact::circuit_digest`] to also bind the witness manifest, and [`Artifact::digest`]
+    /// for the bytecode and ABI too.
     pub fn digest(&self) -> [u8; 32] {
         *self.digest.get_or_init(|| self.system.digest())
     }

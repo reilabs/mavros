@@ -1159,12 +1159,7 @@ fn run_constraint_program<F: mavros_artifacts::MavrosField>(
             }.to_string()),
             stack_trace: Vec::new(),
         })?;
-    if header.constraint_layouts
-        != Some(bytecode::ConstraintLayouts::new(
-            witness_layout,
-            constraints_layout,
-        ))
-    {
+    if !header.has_layouts(witness_layout, constraints_layout) {
         return Err(TrapError {
             message: Some("constraint layouts do not match bytecode".to_string()),
             stack_trace: Vec::new(),
