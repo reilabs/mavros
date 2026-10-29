@@ -2,12 +2,26 @@ use noirc_abi::{AbiType, MAIN_RETURN_NAME, input_parser::InputValue};
 use std::collections::BTreeMap;
 use tracing::warn;
 
-use mavros_artifacts::{InputValueOrdered, WitnessManifest};
+use mavros_artifacts::{FieldId, InputValueOrdered, MavrosField, WitnessManifest};
+
+pub(crate) fn noir_field_id(field: FieldId) -> acvm::FieldId {
+    match field {
+        FieldId::Bn254 => acvm::FieldId::Bn254,
+        FieldId::Goldilocks => acvm::FieldId::Goldilocks,
+    }
+}
 
 pub fn ordered_params_from_btreemap(
     abi: &noirc_abi::Abi,
     unordered_params: &BTreeMap<String, InputValue>,
 ) -> Result<Vec<InputValueOrdered>, String> {
+    ordered_params_from_btreemap_for_field(abi, unordered_params)
+}
+
+pub fn ordered_params_from_btreemap_for_field<F: MavrosField>(
+    abi: &noirc_abi::Abi,
+    unordered_params: &BTreeMap<String, InputValue>,
+) -> Result<Vec<InputValueOrdered<F>>, String> {
     let mut ordered_params = Vec::new();
     for param in &abi.parameters {
         let param_value = unordered_params
@@ -28,6 +42,13 @@ pub fn declared_return_from_btreemap(
     abi: &noirc_abi::Abi,
     unordered_params: &BTreeMap<String, InputValue>,
 ) -> Result<Option<InputValueOrdered>, String> {
+    declared_return_from_btreemap_for_field(abi, unordered_params)
+}
+
+pub fn declared_return_from_btreemap_for_field<F: MavrosField>(
+    abi: &noirc_abi::Abi,
+    unordered_params: &BTreeMap<String, InputValue>,
+) -> Result<Option<InputValueOrdered<F>>, String> {
     match (&abi.return_type, unordered_params.get(MAIN_RETURN_NAME)) {
         (Some(return_type), Some(value)) => Ok(Some(ordered_param(&return_type.abi_type, value)?)),
         (Some(_), None) => {
@@ -52,11 +73,11 @@ pub fn declared_return_from_btreemap(
 /// Checks that the named witness columns hold the corresponding input fields, and that the
 /// return columns hold `declared_return` when one was given.
 /// `manifest` must already be validated against the R1CS.
-pub fn check_witness_manifest(
+pub fn check_witness_manifest<F: MavrosField>(
     manifest: &WitnessManifest,
-    ordered_params: &[InputValueOrdered],
-    declared_return: Option<&InputValueOrdered>,
-    wit_pre_comm: &[mavros_artifacts::Field],
+    ordered_params: &[InputValueOrdered<F>],
+    declared_return: Option<&InputValueOrdered<F>>,
+    wit_pre_comm: &[F],
 ) -> Result<(), String> {
     let blob = crate::vm::interpreter::flatten_param_vec(ordered_params);
     let expected = manifest.entry_blob_field_count();
@@ -90,10 +111,10 @@ pub fn check_witness_manifest(
 }
 
 /// `manifest` must already be validated against the R1CS.
-pub fn check_declared_return(
+pub fn check_declared_return<F: MavrosField>(
     manifest: &WitnessManifest,
-    declared_return: &InputValueOrdered,
-    wit_pre_comm: &[mavros_artifacts::Field],
+    declared_return: &InputValueOrdered<F>,
+    wit_pre_comm: &[F],
 ) -> Result<(), String> {
     let Some(ret) = manifest.returns else {
         return Err(format!(
@@ -120,12 +141,12 @@ pub fn check_declared_return(
     }
 }
 
-fn check_columns(
+fn check_columns<F: MavrosField>(
     what: &str,
     source: &str,
-    expected: &[mavros_artifacts::Field],
+    expected: &[F],
     column_start: usize,
-    wit_pre_comm: &[mavros_artifacts::Field],
+    wit_pre_comm: &[F],
 ) -> Result<(), String> {
     for (j, expected) in expected.iter().enumerate() {
         let column = column_start + j;
@@ -148,9 +169,20 @@ fn check_columns(
     Ok(())
 }
 
-fn ordered_param(abi_type: &AbiType, value: &InputValue) -> Result<InputValueOrdered, String> {
+fn ordered_param<F: MavrosField>(
+    abi_type: &AbiType,
+    value: &InputValue,
+) -> Result<InputValueOrdered<F>, String> {
     Ok(match (value, abi_type) {
-        (InputValue::Field(elem), _) => InputValueOrdered::Field(elem.into_repr()),
+        (InputValue::Field(elem), _) => {
+            use acvm::AcirField;
+            let limbs = num_bigint::BigUint::from_bytes_be(&elem.to_be_bytes()).to_u64_digits();
+            let value = (limbs.len() <= F::CANONICAL_LIMBS)
+                .then(|| F::from_canonical_limbs(&limbs))
+                .flatten()
+                .ok_or_else(|| format!("ABI value does not fit {:?}", F::ID))?;
+            InputValueOrdered::Field(value)
+        }
         (InputValue::Vec(vec_elements), AbiType::Array { typ, length }) => {
             if vec_elements.len() != *length as usize {
                 return Err("Array value length does not match ABI array length".to_string());
@@ -181,8 +213,7 @@ fn ordered_param(abi_type: &AbiType, value: &InputValue) -> Result<InputValueOrd
             InputValueOrdered::Vec(
                 bytes
                     .iter()
-                    // FIELD-ASSUMPTION: L1-direct-ref (7 sites)
-                    .map(|byte| InputValueOrdered::Field(ark_bn254::Fr::from(*byte as u64)))
+                    .map(|byte| InputValueOrdered::Field(F::from(*byte as u64)))
                     .collect(),
             )
         }
@@ -250,6 +281,57 @@ mod tests {
             error.contains("`x`"),
             "error does not name the parameter: {error}"
         );
+    }
+
+    #[test]
+    fn goldilocks_inputs_preserve_values_and_reject_out_of_range_elements() {
+        use mavros_artifacts::{Goldilocks, field::goldilocks::MODULUS};
+
+        for value in [0, 1, MODULUS - 1] {
+            let input = InputValue::Field(acvm::FieldElement::from(value));
+            assert_eq!(
+                ordered_param::<Goldilocks>(&AbiType::Field, &input).unwrap(),
+                InputValueOrdered::Field(Goldilocks::from(value)),
+            );
+        }
+        for value in [MODULUS as u128, 1u128 << 100] {
+            let input = InputValue::Field(acvm::FieldElement::from(value));
+            assert!(ordered_param::<Goldilocks>(&AbiType::Field, &input).is_err());
+        }
+        let input = InputValue::String("ab".into());
+        assert_eq!(
+            ordered_param::<Goldilocks>(&AbiType::String { length: 2 }, &input).unwrap(),
+            InputValueOrdered::Vec(vec![
+                InputValueOrdered::Field(Goldilocks::from(b'a' as u64)),
+                InputValueOrdered::Field(Goldilocks::from(b'b' as u64)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn prover_input_parser_receives_the_requested_field() {
+        use mavros_artifacts::{Goldilocks, field::goldilocks::MODULUS};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut abi = string_abi(&["x"], false);
+        abi.parameters[0].typ = AbiType::Integer {
+            sign: noirc_abi::Sign::Unsigned,
+            width: 64,
+        };
+        let path = dir.path().join("Prover.toml");
+        std::fs::write(&path, format!("x = '{}'\n", MODULUS - 1)).unwrap();
+        let (params, _) =
+            crate::api::read_prover_inputs_for_field::<Goldilocks>(dir.path(), &abi).unwrap();
+        assert_eq!(
+            params,
+            vec![InputValueOrdered::Field(Goldilocks::from(MODULUS - 1))]
+        );
+        std::fs::write(&path, format!("x = '{MODULUS}'\n")).unwrap();
+        assert!(crate::api::read_prover_inputs(dir.path(), &abi).is_ok());
+        // This value fits u64 and BN254, but the Goldilocks parser must reject it.
+        let error =
+            crate::api::read_prover_inputs_for_field::<Goldilocks>(dir.path(), &abi).unwrap_err();
+        assert!(error.to_string().to_lowercase().contains("goldilocks"));
     }
 
     #[test]

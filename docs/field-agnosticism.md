@@ -107,8 +107,8 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   names the field and the format of the system it carries.
 - **The WASM path** refuses Goldilocks (`Error::WasmFieldUnsupported`): the runtime has no
   Goldilocks instance.
-- **The Noir path** compiles over bn254 only; a Noir `Field` literal enters a configured field only
-  below its modulus (`L1-noir-frontend`).
+- **The Noir path** compiles over BN254 and Goldilocks; a Noir `Field` literal enters a configured
+  field only below its modulus (`L1-noir-frontend`).
 - **LogUp:** at the default `--logup-soundness=128`, a Goldilocks program with a lookup argument
   repeats the argument three times (four for `2^20 < D ≤ 2^31`; `L4-logup-challenges`).
 
@@ -147,8 +147,8 @@ The rest of Phase 5 is open:
   modulus in `bit_range.rs::lower_witness_field_bit_range`.
 - **Integer entry parameters wider than 63 bits** (`prepare_entry_point.rs`): parameters assembled
   from ABI limbs.
-- **The Noir path** (`L1-noir-frontend`): the `--field` selector, and Noir's compile-time bn254
-  builtins.
+- **The Noir path** (`L1-noir-frontend`): remaining field-specific builtins and BN254-only crypto
+  implementations.
 - **Cast semantics** (`analysis/types.rs::check_casts_into_field`, which is to be removed): the
   frontend refuses a non-injective `Int → Field` cast, and HLSSA defines `Int → Field` as reduction
   modulo `p` and `Field → Int` as truncation or zero-extension of the canonical value. Every
@@ -249,13 +249,14 @@ stays raw by design until P5. By file (count):
 - [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` (78 at the end of P3, 0 in P4) —
       `Value::Const(Field)`, with coefficient arithmetic, `two_pow` and the seal/lookup coefficients
       minted through `ctx.field()`; the `LC` it emits stays raw (see L1-alias).
-- [ ] `compiler/src/bin/test_runner.rs` (2) — `Fr::rand` input setup for the AD runs. Raw harness,
-      feeds the VM.
+- [x] `compiler/src/bin/test_runner.rs` — the functional runner compiles and executes each test
+      under BN254 and Goldilocks, using field-specific AD coefficients and separate success rates.
+      WASM remains BN254-only; unsupported Goldilocks stages are reported as failures.
 - [ ] `wasm-runtime/src/lib.rs` (1) — the `field_runtime!` invocation's `ark_bn254::Fr` (see
       L3-llstruct).
 - [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
-- [ ] `compiler/src/abi_helpers.rs` (7) — `Fr::from(..)` ABI string decode and its tests. Raw, feeds
-      the VM.
+- [x] `compiler/src/abi_helpers.rs` — ordered inputs and manifest checks are generic over the VM
+      field. Input parsing uses the selected modulus and rejects scalars that cannot fit it.
 
 ### `L1-serde` — artifact/ABI serialization pinned to `[u64;4]` (representation, P5 — done)
 
@@ -265,23 +266,24 @@ stays raw by design until P5. By file (count):
       its header (`manifest.rs`).
 - [x] `mavros-artifacts/src/lib.rs` — `InputValueOrdered::field_sizes` answers `F::STORAGE_CELLS`.
 
-### `L1-noir-frontend` — The Noir Frontend Computes in bn254 (Hardcoded upstream, P5)
+### `L1-noir-frontend` — Frontend field selection and remaining integration gaps (P5)
 
-Noir's `acir_field` chooses bn254 or bls12_381 when Noir is built, so anything Noir evaluates at
-compile time wraps modulo bn254's prime. A `Field` literal crosses the boundary unreduced, as the
-signed integer written.
+The pinned Noir frontend accepts a field per compilation, including compile-time evaluation and
+modulus builtins. A `Field` literal crosses the boundary unreduced, as the signed integer written.
+The ABI parser checks values against the selected modulus, using BN254 elements as exact containers
+before conversion to the chosen VM field.
 
 - [x] `compiler/src/compiler/lowering/expression_converter.rs` — `integer_constant` takes a
       literal's magnitude into the configured field, refusing one at or above its modulus with a
       located diagnostic, and negates it for a negative literal (so `-1` is `p - 1` on Goldilocks).
-- [ ] `compiler/src/driver.rs` — a Noir package compiles over bn254: the driver has no field
-      selector, and `--field` waits on the items below.
-- [ ] Noir's stdlib (`noir_stdlib/src/compat.nr` `is_bn254()`, `field/mod.nr` `modulus_num_bits()`
-      and the `modulus_*_bits`/`_bytes` builtins) answers bn254 at compile time under any configured
-      field, so `Field::lt` takes `bn254_lt`, whose decomposition is against bn254's modulus, and
-      the canonicity checks of `to_le_bits`/`to_le_bytes` (which mavros' raw `to_bits`/`to_radix`
-      lowerings leave to the caller) compare against bn254's modulus. Needs a Goldilocks
-      `acir_field`, or mavros replacing those paths.
+- [x] `compiler/src/driver.rs` — `run_noir_compiler_for_field` passes the selected field to both
+      Noir's frontend and Mavros' AST lowering. Existing callers default to BN254.
+- [x] Mavros' injected stdlib compiles under both fields. BN254-only curve, Poseidon2 and vendored
+      bignum modules are field-gated before type checking. ECDSA and Poseidon2 calls on Goldilocks
+      produce unavailable-item frontend diagnostics; their BN254 constants are never reduced into
+      the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and retains
+      the packed spread implementation on BN254. BLAKE's small-field additions likewise use integer
+      carries, avoiding native-field bit decomposition. AES is shared.
 - [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is unsatisfiable
       for a value at or above `2^n`, on every field: `LowerWitnessNarrowingCast` windows an `Int`
       source only, and a `Field` source relies on the frontend emitting `bit_range(v, 0, n)` before
@@ -614,7 +616,9 @@ and WASM paths refuse `K > 1` (`Error::WasmLogupRepetitionsUnsupported`).
 
 The secp256k1 and secp256r1 replacements share curve-generic code, but their vendored arithmetic
 assumes the headroom of the BN254 proving field. The ECDSA base field `Fq` and scalar field `Fr` are
-non-native fields; neither is the Noir `Field` used to constrain their arithmetic.
+non-native fields; neither is the Noir `Field` used to constrain their arithmetic. The vendored
+modules are currently gated to BN254. Goldilocks can compile unrelated programs, but calling either
+ECDSA replacement fails with a frontend diagnostic.
 
 - [ ] `mavros_stdlib/vendor/bignum.nr` — `constants`, limb range checks, multiplication and
       reduction gadgets use radix `2^120`, `u128` limbs, and native `Field` accumulators, including

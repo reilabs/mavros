@@ -40,6 +40,7 @@ pub fn le_bytes_from_words(words: [u32; 8]) -> [u8; 32] {
     out
 }
 
+#[field(bn254)]
 pub fn g(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> (u32, u32, u32, u32) {
     let a = a.wrapping_add(b).wrapping_add(mx);
     let d = rotr16(d ^ a);
@@ -48,6 +49,22 @@ pub fn g(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> (u32, u32, u32, u3
     let a = a.wrapping_add(b).wrapping_add(my);
     let d = rotr8(d ^ a);
     let c = c.wrapping_add(d);
+    let b = rotr7(b ^ c);
+    (a, b, c, d)
+}
+
+// std's u32::wrapping_add converts through Field. Keep these sums in integers on
+// small fields so the carry is truncated without a native-field bit decomposition.
+// At most three u32 words are added, so u34 holds the sum without Goldilocks multi-limb adds.
+#[field(not(bn254))]
+pub fn g(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> (u32, u32, u32, u32) {
+    let a = (a as u34 + b as u34 + mx as u34) as u32;
+    let d = rotr16(d ^ a);
+    let c = (c as u34 + d as u34) as u32;
+    let b = rotr12(b ^ c);
+    let a = (a as u34 + b as u34 + my as u34) as u32;
+    let d = rotr8(d ^ a);
+    let c = (c as u34 + d as u34) as u32;
     let b = rotr7(b ^ c);
     (a, b, c, d)
 }
