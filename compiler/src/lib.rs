@@ -7,6 +7,8 @@ pub mod compiler;
 pub mod driver;
 pub mod error;
 pub mod flamegraph;
+#[cfg(test)]
+mod forgery;
 pub mod panic_handler;
 pub mod plotting;
 pub mod project;

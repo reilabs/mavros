@@ -56,6 +56,10 @@ fn emit_elem_select(
 pub struct LowerSliceSelect;
 
 impl InstructionLoweringRule for LowerSliceSelect {
+    fn needs_value_ranges(&self) -> bool {
+        false
+    }
+
     fn lower_instruction(
         &self,
         b: &mut HLBlockEmitter<'_>,

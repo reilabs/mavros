@@ -9,7 +9,6 @@ use crate::{
     compiler::{
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
-        passes::shared::limbs::widest_injective_int_bits,
         ssa::{
             FunctionId, SSAConstantsSnapshot, ValueId,
             hlssa::{
@@ -70,40 +69,6 @@ fn check_index(index_type: &Type) -> Result<(), String> {
         _ => Err(format!(
             "a sequence index must be an int{INDEX_BITS}, not {index_type}"
         )),
-    }
-}
-
-/// Panic on a cast in `ssa` into `Field` of an integer wider than the field carries injectively:
-/// two integers differing by the modulus would share an element.
-///
-/// Only the program as written is checked, since `WideWitnessInts` emits such casts for the field
-/// image of a wide integer, one element per limb.
-pub(crate) fn check_casts_into_field(ssa: &HLSSA, type_info: &TypeInfo) {
-    let widest = widest_injective_int_bits(ssa.field());
-    for (function_id, function) in ssa.iter_functions() {
-        let types = type_info.get_function(*function_id);
-        for (_, block) in function.get_blocks() {
-            for instruction in block.get_instructions() {
-                let OpCode::Cast { value, target, .. } = instruction else {
-                    continue;
-                };
-                if *target != CastTarget::Field {
-                    continue;
-                }
-                // Untyped only in a block the dominator walk never reaches, which never runs.
-                let Some(source) = types.try_get_value_type(*value) else {
-                    continue;
-                };
-                if let TypeExpr::Int(bits) = source.strip_witness().expr
-                    && bits > widest
-                {
-                    ice!(
-                        "{instruction:?}: an int{bits} cannot be cast to Field, as this field \
-                         carries integers injectively only up to int{widest}"
-                    );
-                }
-            }
-        }
     }
 }
 

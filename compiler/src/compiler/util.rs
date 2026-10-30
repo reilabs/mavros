@@ -44,7 +44,7 @@ const _: () = assert!(
 ///
 /// Do not add a caller that could ask the pattern instead: [`IntBits`] answers `is_zero` /
 /// `is_one` / `is_all_ones`, the bitwise and shift operations, `cast` / `bit_range` and the whole
-/// signed reading at any width; [`field_constant`] answers `Int -> Field` at the field's bound; and
+/// signed reading at any width; [`field_residue`] answers `Int -> Field` at any width; and
 /// `usize::try_from` reads an index without the truncation an `as` cast would hide.
 #[track_caller]
 pub fn host_word(pattern: &IntBits) -> u128 {
@@ -52,19 +52,17 @@ pub fn host_word(pattern: &IntBits) -> u128 {
         .unwrap_or_else(|e| ice!("an integer constant is wider than the host: {e}"))
 }
 
-/// The field element an integer pattern denotes, or `None` if this field cannot carry it.
-///
-/// The limbs-to-field half of the `Int <-> Field` conversions. A cast is a raw-bits conversion, as
-/// in the model, so a pattern denotes the magnitude its bits spell.
+/// The field element equal to an integer pattern, or `None` if the specified field cannot contain
+/// the integer in question.
 ///
 /// It inverts [`IntBits::from_field_limbs`] in one direction only. That function truncates to the
 /// width asked for, so element to pattern and back returns the starting element only where the
 /// width holds it; pattern to element and back is exact wherever this answers.
 ///
 /// The bound is on the **value**, not the width: a pattern at or above the modulus has no element
-/// however narrow its type, and every pattern below it has one however wide. Refusing keeps a
-/// residue from being minted in place of the value, which nothing downstream could tell apart. A
-/// caller that cannot handle a refusal must bound its inputs itself.
+/// equal to it however narrow its type, and every pattern below it has one however wide. Refusing
+/// keeps a residue from being minted in place of the value, which nothing downstream could tell
+/// apart. A caller that cannot handle a refusal must bound its inputs itself.
 #[must_use]
 pub fn field_constant(field: FieldConfig, pattern: &IntBits) -> Option<Field> {
     // A literal four, because `FieldConfig::from_bigint` takes an `ark_ff::BigInt<4>`: the
@@ -82,6 +80,23 @@ pub fn field_constant(field: FieldConfig, pattern: &IntBits) -> Option<Field> {
     }
 
     field.from_bigint(ark_ff::BigInt::new(canonical))
+}
+
+/// The `Int -> Field` cast of an integer pattern: its unsigned reading reduced modulo the field's
+/// modulus, [`mavros_int_semantics::int_to_field`].
+///
+/// It agrees with [`field_constant`] wherever that answers, and differs only by also answering a
+/// pattern at or above the modulus. A caller that must not mint a residue in place of a value
+/// wants [`field_constant`]. This is total.
+#[must_use]
+pub fn field_residue(field: FieldConfig, pattern: &IntBits) -> Field {
+    // Horner over the 64-bit limbs, from the top.
+    let base = field.two_pow(64);
+    pattern
+        .limbs()
+        .iter()
+        .rev()
+        .fold(field.zero(), |acc, &limb| acc * base + field.constant(limb))
 }
 
 /// Panic with the canonical ICE for a tuple surviving past the `ElideTuples` pass.
@@ -113,6 +128,50 @@ pub mod test {
     /// Convert the provided `n` into a field value.
     pub fn fr(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
+    }
+
+    /// Both configured fields, for a sweep that must hold on each.
+    pub const FIELDS: [FieldConfig; 2] = [FieldConfig::bn254(), FieldConfig::goldilocks()];
+
+    /// The field's modulus as a magnitude, the form the reference model takes it in.
+    pub fn modulus_of(field: FieldConfig) -> num_bigint::BigUint {
+        field.modulus().into()
+    }
+
+    /// An element's canonical representative.
+    pub fn canonical_of(element: &Field) -> num_bigint::BigUint {
+        element.into_bigint().into()
+    }
+
+    /// The element whose canonical representative is `canonical`.
+    ///
+    /// # Panics
+    ///
+    /// If `canonical` is not below the modulus.
+    pub fn element_of(field: FieldConfig, canonical: &num_bigint::BigUint) -> Field {
+        field
+            .from_bigint(canonical.clone().try_into().unwrap())
+            .unwrap_or_else(|| panic!("{canonical} is not below the modulus"))
+    }
+
+    /// The reference model's `Int -> Field` answer, as an element of `field`.
+    pub fn model_int_to_field(
+        field: FieldConfig,
+        pattern: &mavros_int_semantics::IntBits,
+    ) -> Field {
+        element_of(
+            field,
+            &mavros_int_semantics::int_to_field(pattern, &modulus_of(field)),
+        )
+    }
+
+    /// The reference model's `Field -> Int(bits)` answer.
+    pub fn model_field_to_int(
+        field: FieldConfig,
+        element: &Field,
+        bits: usize,
+    ) -> mavros_int_semantics::IntBits {
+        mavros_int_semantics::field_to_int(&canonical_of(element), &modulus_of(field), bits)
     }
 
     /// `alloc` of a scalar `Ref<Field>` seeded with an inert default value (0).
@@ -194,17 +253,6 @@ mod tests {
     // THE LIMBS-TO-FIELD PATH
     // --------------------------------------------------------------------------------------
 
-    /// The modulus as a magnitude, which is the number `field_constant` declines at.
-    fn modulus(field: FieldConfig) -> num_bigint::BigUint {
-        field
-            .modulus_limbs()
-            .iter()
-            .rev()
-            .fold(num_bigint::BigUint::ZERO, |acc, &limb| {
-                (acc << 64) | num_bigint::BigUint::from(limb)
-            })
-    }
-
     /// Below the host word the reading matches Noir; pinned so the artifacts do not move.
     #[test]
     fn a_narrow_pattern_reads_the_value_a_host_word_did() {
@@ -232,7 +280,7 @@ mod tests {
     #[test]
     fn a_wide_pattern_below_the_modulus_reads_rather_than_being_refused_for_its_width() {
         let field = FieldConfig::bn254();
-        let largest = modulus(field) - 1u8;
+        let largest = test::modulus_of(field) - 1u8;
 
         for bits in [129usize, 256, 1000, 16384] {
             let pattern = IntBits::from_biguint(bits, &largest);
@@ -253,7 +301,7 @@ mod tests {
     #[test]
     fn the_reading_is_the_models_magnitude_and_the_bound_is_the_modulus() {
         let field = FieldConfig::bn254();
-        let p = modulus(field);
+        let p = test::modulus_of(field);
 
         let mut answered = 0usize;
         for bits in [1usize, 64, 128, 129, 253, 254, 1000] {
@@ -299,7 +347,7 @@ mod tests {
     #[test]
     fn a_pattern_at_or_above_the_modulus_declines_rather_than_reducing() {
         let field = FieldConfig::bn254();
-        let p = modulus(field);
+        let p = test::modulus_of(field);
 
         for offset in [0u8, 1] {
             let pattern = IntBits::from_biguint(256, &(p.clone() + offset));
@@ -309,5 +357,34 @@ mod tests {
         // The other half of the decline: a magnitude in limbs past those the field has.
         assert_eq!(field_constant(field, &IntBits::all_ones(16384)), None);
         assert_eq!(field_constant(field, &IntBits::all_ones(256)), None);
+    }
+
+    /// The residue is the model's on both fields at every corner, and is [`field_constant`]'s
+    /// answer wherever that answers.
+    #[test]
+    fn the_residue_is_the_models_and_agrees_with_the_exact_reading() {
+        use mavros_int_semantics::corners;
+
+        use super::test::{FIELDS, model_int_to_field, modulus_of};
+
+        for field in FIELDS {
+            let p = modulus_of(field);
+            let mut reduced = 0usize;
+            for bits in corners::field_cast_widths(field.field_bit_size() as usize) {
+                for pattern in corners::field_cast_patterns(bits, &p) {
+                    let residue = field_residue(field, &pattern);
+                    assert_eq!(
+                        residue,
+                        model_int_to_field(field, &pattern),
+                        "{field:?}: {pattern:?}"
+                    );
+                    match field_constant(field, &pattern) {
+                        Some(exact) => assert_eq!(exact, residue, "{field:?}: {pattern:?}"),
+                        None => reduced += 1,
+                    }
+                }
+            }
+            assert!(reduced > 20, "only {reduced} corners on {field:?} reduce");
+        }
     }
 }

@@ -28,9 +28,10 @@ That said, there are currently a few small limits, most of which we hope to lift
   (`u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, and `i64`) at this boundary, including
   inside arrays and structs. Wider values can be assembled from arrays of these types inside a
   program.
-- **Field Casts:** Casting an integer wider than the field modulus to a `Field` is a compile-time
-  error, because this would admit two integer values that produce the same field element (a
-  soundness hole).
+- **Field Casts:** Casting an integer to a `Field` is a compile-time error when its type is as wide
+  as the field's modulus or wider, because two of its values would then produce the same field
+  element (a soundness hole). Internally to Mavros, the cast is defined to reduce modulo the field
+  modulus in order to be total.
 - **Wide Integers and WASM:** Currently the WASM runner places limits on the number of locals that a
   function can host, as well as the stack size, so functions using extremely wide integers may fail
   to compile at the moment.
@@ -49,12 +50,10 @@ widths. In particular, the following all hold.
   has the shifted value's type.
 - **Casts** keep the low bits when narrowing and sign-extend a signed source when widening.
   `uN as Field` is the unsigned value; `iN as Field` is a type error in Noir.
-- **A witnessed `Field` to integer cast is a relabel.** Noir's `as` truncates with a bit window
-  first, so it truncates everywhere. The bare cast, as `mavros_stdlib`'s `unsafe_cast` uses it,
-  carries the element through unchanged and leaves the program to bound it with a later range check
-  or lookup. That bound is required: the compiler treats the result as within its width and drops
-  checks on that basis. On known values the cast reads the low bits, so the two agree whenever the
-  value fits.
+- **A `Field` to integer cast keeps the low bits of the element's canonical value**, matching Noir.
+  Note that `mavros_stdlib`'s `unsafe_cast` is a separate, Mavros-only conversion that does not
+  truncate a witness: it carries the element through unchanged and leaves the program to bound it
+  with a later required range check or lookup.
 - **A rejection is a runtime failure**, not a compile error: an unsatisfiable constraint or a
   witness-generation trap. A failing operation is never removed as dead code, and unconstrained code
   follows the same rules.
@@ -105,6 +104,24 @@ understanding:
 - **Rejections:** These take one of two forms: an operation on a witness rejects through an
   unsatisfiable constraint, and one on known values traps during witness generation.
 
+### Field Casts
+
+An HLSSA `Cast` across the field boundary is defined internally to Mavros to be total, but for the
+bare witnessed narrowing below. Noir's elaborator refuses a non-injective `uN as Field`, and
+`unsafe_cast` only casts out of a `Field`, so no Noir source can write such a cast: only hand-built
+HLSSA reaches one.
+
+- **`Int(n) → Field`** reduces the integer's unsigned reading modulo `p`.
+- **`Field → Int(n)`** truncates or zero-extends the element's canonical value. On a witnessed
+  element, a cast to fewer bits than the field's is a relabel that carries the element through
+  unchanged, so whatever emits it owes the bound. Noir's `x as uN` puts a bit window in front of it,
+  which decomposes the element into its canonical bytes against the configured modulus, and
+  `unsafe_cast` leaves it to the program. A cast at least as wide as the field reads the canonical
+  value through `WideWitnessInts`' limbs.
+- **`FieldLimbs`** is the injective image of an integer, one element per limb for a value too wide
+  for one element, which a lookup keyed on an integer needs. The witness array lowering emits it,
+  and `WideWitnessInts` lowers each one away.
+
 ### Conformance
 
 The `mavros-int-semantics` crate states the expected semantics of Mavros' integers using two
@@ -124,6 +141,13 @@ pub fn residue(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits>;
 
 `eval(p) == Value(v)` implies `residue(p) == Some(v)`. An `IntBits` carries its width and an `IntOp`
 its reading, so neither function takes either as a parameter, and both operands must have one width.
+
+The two field casts never reject, and they take the field's modulus:
+
+```rust
+pub fn int_to_field(pattern: &IntBits, modulus: &BigUint) -> BigUint;
+pub fn field_to_int(canonical: &BigUint, modulus: &BigUint, bits: usize) -> IntBits;
+```
 
 Locations that implement the evaluation of integer semantics are checked for conformance using the
 `int-semantics/src/register.rs` which names each evaluator, the relation it owes the model, its

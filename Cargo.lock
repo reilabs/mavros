@@ -2399,6 +2399,7 @@ dependencies = [
  "mavros-int-semantics",
  "mavros-limb-arith",
  "mavros-opcode-gen",
+ "num-bigint 0.4.6",
  "serde",
  "serde_json",
  "tracing",

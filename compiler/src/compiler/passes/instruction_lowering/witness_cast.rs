@@ -97,7 +97,8 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
 }
 
 // FIELD-ASSUMPTION: L1-noir-frontend
-// A witnessed `Field` source is left alone: the frontend puts `bit_range(v, 0, n)` before its cast.
+// A witnessed `Field` source is left alone: the frontend puts `bit_range(v, 0, n)` before Noir's
+// `x as uN`, and `unsafe_cast`'s caller bounds the bare cast it emits.
 /// The declared width of `value` where it is a witnessed integer, and [`None`] otherwise.
 ///
 /// Only the witness domain is rewritten: a pure value is computed rather than constrained, and

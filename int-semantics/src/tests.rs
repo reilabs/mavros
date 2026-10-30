@@ -14,9 +14,9 @@ use num_bigint::BigUint;
 use proptest::prelude::*;
 
 use crate::{
-    CmpOp, IntBits, IntOp, MAX_BITS, Outcome, Reject, SignedValue, corners, eval,
+    CmpOp, IntBits, IntOp, MAX_BITS, Outcome, Reject, SignedValue, corners, eval, field_to_int,
     int_bits::{FIELD_LIMB_BITS, HOST_WORD_BITS},
-    mask, residue,
+    int_to_field, mask, residue,
 };
 
 // PROPTEST UTILITIES
@@ -714,6 +714,124 @@ fn the_shift_backstop_reduces_to_the_operand_width_not_the_host() {
                 "an in-range amount must be left alone at {bits} bits"
             );
         }
+    }
+}
+
+/// The Goldilocks modulus, `2^64 - 2^32 + 1`: the narrow field, whose width a `u64` reaches.
+fn goldilocks() -> BigUint {
+    (BigUint::from(1u8) << 64) - (BigUint::from(1u8) << 32) + 1u8
+}
+
+/// The bn254 scalar field's modulus, a 254-bit prime.
+fn bn254() -> BigUint {
+    BigUint::parse_bytes(
+        b"30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
+        16,
+    )
+    .expect("the modulus is hex")
+}
+
+#[test]
+fn an_integer_cast_into_a_field_reduces_its_unsigned_reading() {
+    let p = goldilocks();
+
+    // Below the modulus, the value itself.
+    assert_eq!(int_to_field(&pat(8, 255), &p), BigUint::from(255u8));
+
+    // A negative `i8` pattern is read unsigned, as `255`.
+    assert_eq!(int_to_field(&IntBits::from(-1i8), &p), BigUint::from(255u8));
+
+    // `u64::MAX` is `p + 2^32 - 2`, so it reduces to `2^32 - 2`.
+    assert_eq!(
+        int_to_field(&pat(64, u128::from(u64::MAX)), &p),
+        BigUint::from((1u64 << 32) - 2)
+    );
+
+    // At the modulus and one past it.
+    let at = IntBits::from_biguint(64, &p);
+    let past = IntBits::from_biguint(64, &(&p + 1u8));
+    assert_eq!(int_to_field(&at, &p), BigUint::ZERO);
+    assert_eq!(int_to_field(&past, &p), BigUint::from(1u8));
+
+    // bn254: `2^256 - 1` has the four-limb packing's whole width, past the modulus. Its residue is
+    // one below bn254's Montgomery `R`, `2^256 mod p`.
+    let q = bn254();
+    let top = (BigUint::from(1u8) << 256) - 1u8;
+    let r_less_one = BigUint::parse_bytes(
+        b"0e0a77c19a07df2f666ea36f7879462e36fc76959f60cd29ac96341c4ffffffa",
+        16,
+    )
+    .unwrap();
+    assert_eq!(
+        int_to_field(&IntBits::from_biguint(256, &top), &q),
+        r_less_one
+    );
+}
+
+#[test]
+fn a_field_cast_into_an_integer_truncates_or_zero_extends_the_canonical_value() {
+    let p = goldilocks();
+    let top = &p - 1u8;
+
+    // `p - 1` is `0xFFFF_FFFF_0000_0000`: its low 32 bits are zero and bit 32 is set.
+    assert_eq!(field_to_int(&top, &p, 32), pat(32, 0));
+    assert_eq!(field_to_int(&top, &p, 33), pat(33, 1 << 32));
+    assert_eq!(field_to_int(&top, &p, 64), pat(64, 0xFFFF_FFFF_0000_0000));
+
+    // Wider than the field: zero-filled above it.
+    let wide = field_to_int(&top, &p, 1000);
+    assert_eq!(wide.bits(), 1000);
+    assert_eq!(BigUint::from(&wide), top);
+}
+
+#[test]
+fn a_cast_out_and_back_in_is_the_identity_where_the_width_holds_the_field() {
+    for p in [goldilocks(), bn254()] {
+        let k = usize::try_from(p.bits()).expect("a modulus width fits a usize");
+        for v in corners::field_cast_elements(&p) {
+            for bits in [k, k + 1, 256.max(k), 1000] {
+                assert_eq!(
+                    int_to_field(&field_to_int(&v, &p, bits), &p),
+                    v,
+                    "{v} through int{bits}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_field_cast_refuses_a_non_canonical_element_and_a_non_field() {
+    let p = goldilocks();
+    assert!(std::panic::catch_unwind(|| field_to_int(&p, &p, 64)).is_err());
+    assert!(std::panic::catch_unwind(|| field_to_int(&BigUint::ZERO, &p, 0)).is_err());
+    assert!(std::panic::catch_unwind(|| int_to_field(&pat(8, 1), &BigUint::from(1u8))).is_err());
+}
+
+#[test]
+fn the_field_cast_corners_reach_the_modulus_from_both_sides() {
+    for p in [goldilocks(), bn254()] {
+        let k = usize::try_from(p.bits()).expect("a modulus width fits a usize");
+        let widths = corners::field_cast_widths(k);
+        assert!(widths.contains(&k) && widths.contains(&(k + 1)) && widths.contains(&MAX_BITS));
+
+        // At every width the modulus fits, it, one below and one above are all there.
+        for &bits in widths.iter().filter(|&&bits| bits >= k) {
+            let corners: Vec<BigUint> = corners::field_cast_patterns(bits, &p)
+                .iter()
+                .map(BigUint::from)
+                .collect();
+            for v in [&p - 1u8, p.clone(), &p + 1u8] {
+                assert!(corners.contains(&v), "{v} missing at {bits} bits");
+            }
+            for c in corners::field_cast_patterns(bits, &p) {
+                assert_eq!(c.bits(), bits);
+            }
+        }
+
+        let elements = corners::field_cast_elements(&p);
+        assert!(elements.contains(&(&p - 1u8)) && elements.contains(&BigUint::ZERO));
+        assert!(elements.iter().all(|v| *v < p));
     }
 }
 

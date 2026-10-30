@@ -162,6 +162,7 @@ impl<'a> TotalityOracle<'a> {
                 // engine (`cast_field_to_u64` takes the low limb), it does not trap.
                 CastTarget::Nop
                 | CastTarget::Field
+                | CastTarget::FieldLimbs
                 | CastTarget::Int(_)
                 | CastTarget::WitnessOf
                 | CastTarget::ValueOf
