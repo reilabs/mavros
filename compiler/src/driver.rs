@@ -354,6 +354,12 @@ impl Driver {
 
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
+        self.run_noir_compiler_for_field(FieldConfig::bn254())
+    }
+
+    /// Compile the frontend and lower its monomorphized AST using the same field.
+    #[tracing::instrument(skip_all)]
+    pub fn run_noir_compiler_for_field(&mut self, field: FieldConfig) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
             self.project().file_manager(),
             self.project().parsed_files(),
@@ -362,7 +368,10 @@ impl Driver {
         noirc_driver::check_crate(
             &mut context,
             crate_id,
-            &noirc_driver::CompileOptions::default(),
+            &noirc_driver::CompileOptions {
+                field: crate::abi_helpers::noir_field_id(field.id()),
+                ..Default::default()
+            },
         )
         .map_err(|diagnostics| self.noir_error(diagnostics))?;
 
@@ -392,12 +401,10 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        // FIELD-ASSUMPTION: L1-noir-frontend
-        // The driver has no field selector, so a Noir package compiles over bn254.
         let (ssa, main_is_unconstrained) = HLSSA::from_program_with_file_manager(
             &program,
             Some(self.project().file_manager()),
-            FieldConfig::bn254(),
+            field,
         );
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
