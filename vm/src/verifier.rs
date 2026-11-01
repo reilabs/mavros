@@ -6,7 +6,7 @@
 use mavros_artifacts::MavrosField;
 
 use crate::{
-    ConstraintsLayout, TableKind, WitnessLayout,
+    ConstraintsLayout, LogupStrides, TableKind, WitnessLayout,
     bytecode::{TableInfo, Tape},
 };
 
@@ -20,9 +20,11 @@ pub(crate) struct VerifierArrays {
     pub coeffs: Tape,
     pub witness_cursor: usize,
     pub constraint_cursor: usize,
-    // FIELD-ASSUMPTION: L4-logup-challenges
-    // One LogUp challenge pair (alpha, beta); no K-challenge replication.
+    /// The first repetition's `alpha`.
     challenge: usize,
+    /// The table and lookup cursors below run over repetition 0; repetition `k` of a row sits `k`
+    /// strides past it.
+    logup: LogupStrides,
     multiplicities: usize,
     table_witness: usize,
     table_constraint: usize,
@@ -45,6 +47,7 @@ impl VerifierArrays {
             witness_cursor: 0,
             constraint_cursor: 0,
             challenge: wl.challenges_start(),
+            logup: LogupStrides::new(&wl, &cl),
             multiplicities: wl.multiplicities_start(),
             table_witness: wl.tables_data_start(),
             table_constraint: cl.tables_data_start(),
@@ -68,6 +71,26 @@ impl VerifierArrays {
                 *output.slot::<F>() += r * value;
             }
         }
+    }
+
+    /// The value of repetition `repetition`'s `alpha`.
+    unsafe fn alpha<F: MavrosField>(&self, repetition: usize) -> F {
+        unsafe { self.w::<F>(self.challenge + self.logup.alpha(repetition)) }
+    }
+
+    /// The value of repetition `repetition`'s `beta`, which only a layout with a value-column table
+    /// has.
+    unsafe fn beta<F: MavrosField>(&self, repetition: usize) -> F {
+        unsafe { self.w::<F>(self.challenge + self.logup.beta(repetition)) }
+    }
+
+    /// The witness and constraint offsets of `table`'s repetition `repetition`.
+    fn table_offsets(&self, table: &TableInfo, repetition: usize) -> (usize, usize) {
+        (
+            table.elem_inverses_witness_section_offset + repetition * self.logup.witness_tables,
+            table.elem_inverses_constraint_section_offset
+                + repetition * self.logup.constraint_tables,
+        )
     }
 
     /// The next table's row positions, before its length is known.
@@ -104,34 +127,32 @@ impl VerifierArrays {
         &mut self,
         table: &TableInfo,
         multiplicities: usize,
-        values: impl Iterator<Item = F>,
+        values: impl Iterator<Item = F> + Clone,
     ) {
         unsafe {
-            let mut sum = F::ZERO;
-            let alpha = self.w::<F>(self.challenge);
             let w0 = self.w::<F>(0);
-            // Range tables need no beta column.
-            let beta = if table.kind == TableKind::RangeCheck {
-                F::ZERO
-            } else {
-                self.w::<F>(self.challenge + 1)
-            };
-            for (i, value) in values.enumerate() {
-                let y = self.w::<F>(table.elem_inverses_witness_section_offset + i);
-                self.row(
-                    table.elem_inverses_constraint_section_offset + i,
-                    y,
-                    alpha - F::from(i as u64) * w0 + beta * value,
-                    self.w::<F>(multiplicities + i),
-                );
-                sum += y;
+            for repetition in 0..self.logup.repetitions {
+                let (witnesses, constraints) = self.table_offsets(table, repetition);
+                let mut sum = F::ZERO;
+                let alpha = self.alpha::<F>(repetition);
+                // Range tables need no beta column.
+                let beta = if table.kind == TableKind::RangeCheck {
+                    F::ZERO
+                } else {
+                    self.beta::<F>(repetition)
+                };
+                for (i, value) in values.clone().enumerate() {
+                    let y = self.w::<F>(witnesses + i);
+                    self.row(
+                        constraints + i,
+                        y,
+                        alpha - F::from(i as u64) * w0 + beta * value,
+                        self.w::<F>(multiplicities + i),
+                    );
+                    sum += y;
+                }
+                self.row(constraints + table.length, sum, w0, F::ZERO);
             }
-            self.row(
-                table.elem_inverses_constraint_section_offset + table.length,
-                sum,
-                w0,
-                F::ZERO,
-            );
         }
     }
 
@@ -143,34 +164,30 @@ impl VerifierArrays {
         value: F,
     ) {
         unsafe {
-            let x = self.w::<F>(table.elem_inverses_witness_section_offset + 2 * i);
-            let y = self.w::<F>(table.elem_inverses_witness_section_offset + 2 * i + 1);
-            self.row(
-                table.elem_inverses_constraint_section_offset + 2 * i,
-                self.w::<F>(self.challenge + 1),
-                value,
-                -x,
-            );
-            self.row(
-                table.elem_inverses_constraint_section_offset + 2 * i + 1,
-                y,
-                self.w::<F>(self.challenge) - F::from(i as u64) * self.w::<F>(0) - x,
-                self.w::<F>(multiplicities + i),
-            );
+            for repetition in 0..self.logup.repetitions {
+                let (witnesses, constraints) = self.table_offsets(table, repetition);
+                let x = self.w::<F>(witnesses + 2 * i);
+                let y = self.w::<F>(witnesses + 2 * i + 1);
+                self.row(constraints + 2 * i, self.beta::<F>(repetition), value, -x);
+                self.row(
+                    constraints + 2 * i + 1,
+                    y,
+                    self.alpha::<F>(repetition) - F::from(i as u64) * self.w::<F>(0) - x,
+                    self.w::<F>(multiplicities + i),
+                );
+            }
         }
     }
 
     pub unsafe fn array_sum<F: MavrosField>(&mut self, table: &TableInfo) {
         unsafe {
-            let sum = (0..table.length)
-                .map(|i| self.w::<F>(table.elem_inverses_witness_section_offset + 2 * i + 1))
-                .fold(F::ZERO, |sum, value| sum + value);
-            self.row(
-                table.elem_inverses_constraint_section_offset + 2 * table.length,
-                sum,
-                self.w::<F>(0),
-                F::ZERO,
-            );
+            for repetition in 0..self.logup.repetitions {
+                let (witnesses, constraints) = self.table_offsets(table, repetition);
+                let sum = (0..table.length)
+                    .map(|i| self.w::<F>(witnesses + 2 * i + 1))
+                    .fold(F::ZERO, |sum, value| sum + value);
+                self.row(constraints + 2 * table.length, sum, self.w::<F>(0), F::ZERO);
+            }
         }
     }
 
@@ -181,32 +198,28 @@ impl VerifierArrays {
         value: Option<F>,
         flag: F,
     ) {
+        let rows = if value.is_some() { 2 } else { 1 };
+        let width = if table.kind == TableKind::Array { 2 } else { 1 };
         unsafe {
-            let mut x = F::ZERO;
-            if let Some(value) = value {
-                x = self.w::<F>(self.lookup_witness);
-                self.row(
-                    self.lookup_constraint,
-                    self.w::<F>(self.challenge + 1),
-                    value,
-                    -x,
-                );
-                self.lookup_witness += 1;
-                self.lookup_constraint += 1;
+            for repetition in 0..self.logup.repetitions {
+                let mut witness = self.lookup_witness + repetition * self.logup.witness_lookups;
+                let mut constraint =
+                    self.lookup_constraint + repetition * self.logup.constraint_lookups;
+                let mut x = F::ZERO;
+                if let Some(value) = value {
+                    x = self.w::<F>(witness);
+                    self.row(constraint, self.beta::<F>(repetition), value, -x);
+                    witness += 1;
+                    constraint += 1;
+                }
+                let y = self.w::<F>(witness);
+                self.row(constraint, y, self.alpha::<F>(repetition) - x - key, flag);
+                let (_, table_constraints) = self.table_offsets(table, repetition);
+                *self.outputs[2].slot::<F>() +=
+                    self.r::<F>(table_constraints + width * table.length) * y;
             }
-            let y = self.w::<F>(self.lookup_witness);
-            self.row(
-                self.lookup_constraint,
-                y,
-                self.w::<F>(self.challenge) - x - key,
-                flag,
-            );
-            self.lookup_witness += 1;
-            self.lookup_constraint += 1;
-            let width = if table.kind == TableKind::Array { 2 } else { 1 };
-            *self.outputs[2].slot::<F>() += self
-                .r::<F>(table.elem_inverses_constraint_section_offset + width * table.length)
-                * y;
         }
+        self.lookup_witness += rows;
+        self.lookup_constraint += rows;
     }
 }

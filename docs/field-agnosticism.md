@@ -24,11 +24,11 @@ field it is operating over (see #120). This is a multi-stage process that will o
       a later, benchmarked swap. This must support true field width, and not rely on stuffing
       goldilocks into larger limb counts. Two small-field-specific workstreams surface here:
       multi-limb **integer-arithmetic lowering** (Layer 6 — `u64`/`u128` overflow the field and need
-      schoolbook limbs + a multi-cell representation) and **LogUp K-challenge replication**
-      (`L4-logup-challenges` — one challenge is unsound on a small field). The user-facing
-      `--logup-soundness=<bits>` flag (default 128) that computes and reports the required challenge
-      count is **implemented** (byte-identical no-op on bn254); it hard-errors on a target that
-      needs more than one challenge.
+      schoolbook limbs + a multi-cell representation) and **repeated LogUp** (`L4-logup-challenges`
+      — one challenge is unsound on a small field). The user-facing `--logup-soundness=<bits>` flag
+      (default 128) sizes the repetitions the argument needs (one on bn254), and R1CS generation,
+      witgen, AD and the forward verifier repeat it that many times; the LLVM and WASM paths refuse
+      more than one.
 
 **Phase 3 Complete:** a `FieldConfig` is homed on the `SSA` (`ssa/mod.rs`) and reached through
 `ssa.field()` / `b.field()` / the `HLEmitter::field()` trait method; the middle-end's three symbolic
@@ -76,8 +76,7 @@ through the runtime archive, where `field_runtime!` relocates three of the runti
 
 Carried into P5: the WASM struct width (`L3-llstruct`) and the `[4 x i64]` runtime ABI, the
 `BigInt<4>`/`[u64; 4]` signatures (`L3-felt-limbs`), the raw `Field` alias (`L1-alias`) and its
-serde (`L1-serde`), a second field's runtime instance, `wasm-runner`, the `--field` selector,
-K-challenge LogUp and a version word on the serialized R1CS.
+serde (`L1-serde`), a second field's runtime instance, `wasm-runner` and the `--field` selector.
 
 **Opcode renumbering:** P4 ends by dropping the opcodes the compiler never emits (`reserved_92`,
 `assert_r1c`, `unbox_field`, `tuple_alloc`, `tuple_proj`) and the always-empty struct-layout table
@@ -100,18 +99,18 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   constants through `FieldConfig` (`constant` takes `IntoFieldElement`), which refuses an element of
   another field.
 - **The VM** carries `goldilocks_*` copies of every field opcode in every build. A program binary
-  names its field in its header (format version 3), and a run over another field is refused.
+  names its field in its header, and a run over another field is refused.
 - **The R1CS** is generic (`R1CS<F>`, with bn254 as the default): `Driver::generate_r1cs::<F>`
   refuses an `F` other than the program's field, `R1CGen<F>` converts constants with
   `MavrosField::from_element`, and a serialized coefficient is `F::CANONICAL_LIMBS` limbs.
+- **The R1CS artifact** (`r1cs.bin`: a `MAVR1CS` header with format version, field tag and digest)
+  names the field and the format of the system it carries.
 - **The WASM path** refuses Goldilocks (`Error::WasmFieldUnsupported`): the runtime has no
   Goldilocks instance.
-- **The Noir path** compiles over bn254 only; a Noir `Field` literal enters a configured field only
-  below its modulus (`L1-noir-frontend`).
+- **The Noir path** compiles over BN254 and Goldilocks; a Noir `Field` literal enters a configured
+  field only below its modulus (`L1-noir-frontend`).
 - **LogUp:** at the default `--logup-soundness=128`, a Goldilocks program with a lookup argument
-  needs more than one challenge, so the driver refuses it (`Error::LogupSoundnessUnsupported`): R1CS
-  generation implements single-challenge LogUp only (`L4-logup-challenges`). The tests compile at 40
-  bits.
+  repeats the argument three times (four for `2^20 < D ≤ 2^31`; `L4-logup-challenges`).
 
 Goldilocks is tested through hand-built SSA (`compiler/tests/bigints/goldilocks.rs`): field
 arithmetic, equality and constant folding at the field's boundary values, a witnessed 64-bit
@@ -136,17 +135,20 @@ probes run on each lowering, and `wide_witness_ints`' structural audits run on b
 missing range check on a carry or an answer limb is exploited by moving value between limbs through
 a carry, which neither column probe reaches.
 
+**Repeated LogUp** (`L4-logup-challenges`): the driver sizes the argument's repetitions `K` for the
+`--logup-soundness` target before sealing and repeats the argument at independent challenges over
+shared multiplicities, so the pre-commitment witness is unchanged. bn254 keeps `K = 1`, with
+byte-identical constraints and witnesses; `r1cs.bin` (format version 2) and the VM header (format
+version 5) carry `K`. The layout is under `L4-logup-challenges` below.
+
 The rest of Phase 5 is open:
 
-- **K-challenge LogUp** (`L4-logup-challenges`): needs a prover-facing challenge layout.
-- **An R1CS format word** (`L1-serde`): the serialized R1CS names neither its field nor its format,
-  and a prover reading K-challenge layouts must tell them apart.
 - **A witnessed `Field`'s bit window** (`L3-felt-limbs`): a decomposition against the configured
   modulus in `bit_range.rs::lower_witness_field_bit_range`.
 - **Integer entry parameters wider than 63 bits** (`prepare_entry_point.rs`): parameters assembled
   from ABI limbs.
-- **The Noir path** (`L1-noir-frontend`): the `--field` selector, and Noir's compile-time bn254
-  builtins.
+- **The Noir path** (`L1-noir-frontend`): remaining field-specific builtins and BN254-only crypto
+  implementations.
 - **Cast semantics** (`analysis/types.rs::check_casts_into_field`, which is to be removed): the
   frontend refuses a non-injective `Int → Field` cast, and HLSSA defines `Int → Field` as reduction
   modulo `p` and `Field → Int` as truncation or zero-extension of the canonical value. Every
@@ -154,7 +156,13 @@ The rest of Phase 5 is open:
   casts) must implement exactly these semantics, and the witness lowering of a reducing cast of a
   wide witnessed integer needs dedicated constraints. This subsumes the bare
   `cast WitnessOf(Field) -> Int(n)` item under `L1-noir-frontend`.
-- **A Goldilocks WASM runtime** (`L3-llstruct`, the `[4 x i64]` runtime ABI, `field_runtime!`).
+- **A Goldilocks WASM runtime** (`L3-llstruct`, the `[4 x i64]` runtime ABI, `field_runtime!`), with
+  repeated LogUp: a Goldilocks lookup argument needs `K = 3` or 4, and the LLVM and WASM paths
+  refuse `K > 1` (`Error::WasmLogupRepetitionsUnsupported`) because the LLSSA AD emitters
+  (`hlssa_to_llssa.rs`) bind one repetition's challenges. Emitting them at the `LogupStrides`
+  offsets the VM uses lifts the refusal. WASM witgen's phase 2 runs through the interpreter's
+  `run_phase2`, which fills every repetition from the phase-1 metadata in repetition 0's rows.
+  `repeated_lookup_arguments` in `compiler/tests/verifier.rs` then runs on both backends.
 - **`crypto-primitives`** (Layer 5).
 
 The current state has each site of a field assumption tagged with `// FIELD-ASSUMPTION: <tag>`
@@ -168,7 +176,7 @@ Repetitive clusters of the same operation get one marker per file with a count.
 - **`[ ]` / `[x]`** — migration status.
 - **Phase** — which roadmap phase touches it (P2 = façade/direct-refs, P3 = `FieldConfig` on SSA, P4
   = per-field opcodes and a field-generic VM, codegen and WASM path, P5 = goldilocks + per-field
-  width; P5-logup = the LogUp K-challenge replication sub-phase).
+  width).
 - **Kind** — `type-parametric` (already abstracts over the field via `Field`/`PrimeField`; follows
   the alias automatically once it's generic) vs `hardcoded` (names bn254 / a literal / a fixed width
   and must be rewritten) vs `representation` (assumes the 4-limb/32-byte physical layout) vs
@@ -241,39 +249,41 @@ stays raw by design until P5. By file (count):
 - [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` (78 at the end of P3, 0 in P4) —
       `Value::Const(Field)`, with coefficient arithmetic, `two_pow` and the seal/lookup coefficients
       minted through `ctx.field()`; the `LC` it emits stays raw (see L1-alias).
-- [ ] `compiler/src/bin/test_runner.rs` (2) — `Fr::rand` input setup for the AD runs. Raw harness,
-      feeds the VM.
+- [x] `compiler/src/bin/test_runner.rs` — the functional runner compiles and executes each test
+      under BN254 and Goldilocks, using field-specific AD coefficients and separate success rates.
+      WASM remains BN254-only; unsupported Goldilocks stages are reported as failures.
 - [ ] `wasm-runtime/src/lib.rs` (1) — the `field_runtime!` invocation's `ark_bn254::Fr` (see
       L3-llstruct).
 - [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
-- [ ] `compiler/src/abi_helpers.rs` (7) — `Fr::from(..)` ABI string decode and its tests. Raw, feeds
-      the VM.
+- [x] `compiler/src/abi_helpers.rs` — ordered inputs and manifest checks are generic over the VM
+      field. Input parsing uses the selected modulus and rejects scalars that cannot fit it.
 
 ### `L1-serde` — artifact/ABI serialization pinned to `[u64;4]` (representation, P5 — done)
 
 - [x] `mavros-artifacts/src/lib.rs` — `lc_serde` writes each coefficient as its `F::CANONICAL_LIMBS`
       canonical limbs, a fixed-size array (`MavrosField::Limbs`) with no length: four limbs for a
-      bn254 coefficient and one for a Goldilocks one. The serialized R1CS names no field; a reader
-      must know it (the R1CS version word is a P5 item).
+      bn254 coefficient and one for a Goldilocks one. `r1cs.bin` names the field and the format in
+      its header (`manifest.rs`).
 - [x] `mavros-artifacts/src/lib.rs` — `InputValueOrdered::field_sizes` answers `F::STORAGE_CELLS`.
 
-### `L1-noir-frontend` — The Noir Frontend Computes in bn254 (Hardcoded upstream, P5)
+### `L1-noir-frontend` — Frontend field selection and remaining integration gaps (P5)
 
-Noir's `acir_field` chooses bn254 or bls12_381 when Noir is built, so anything Noir evaluates at
-compile time wraps modulo bn254's prime. A `Field` literal crosses the boundary unreduced, as the
-signed integer written.
+The pinned Noir frontend accepts a field per compilation, including compile-time evaluation and
+modulus builtins. A `Field` literal crosses the boundary unreduced, as the signed integer written.
+The ABI parser checks values against the selected modulus, using BN254 elements as exact containers
+before conversion to the chosen VM field.
 
 - [x] `compiler/src/compiler/lowering/expression_converter.rs` — `integer_constant` takes a
       literal's magnitude into the configured field, refusing one at or above its modulus with a
       located diagnostic, and negates it for a negative literal (so `-1` is `p - 1` on Goldilocks).
-- [ ] `compiler/src/driver.rs` — a Noir package compiles over bn254: the driver has no field
-      selector, and `--field` waits on the items below.
-- [ ] Noir's stdlib (`noir_stdlib/src/compat.nr` `is_bn254()`, `field/mod.nr` `modulus_num_bits()`
-      and the `modulus_*_bits`/`_bytes` builtins) answers bn254 at compile time under any configured
-      field, so `Field::lt` takes `bn254_lt`, whose decomposition is against bn254's modulus, and
-      the canonicity checks of `to_le_bits`/`to_le_bytes` (which mavros' raw `to_bits`/`to_radix`
-      lowerings leave to the caller) compare against bn254's modulus. Needs a Goldilocks
-      `acir_field`, or mavros replacing those paths.
+- [x] `compiler/src/driver.rs` — `run_noir_compiler_for_field` passes the selected field to both
+      Noir's frontend and Mavros' AST lowering. Existing callers default to BN254.
+- [x] Mavros' injected stdlib compiles under both fields. BN254-only curve, Poseidon2 and vendored
+      bignum modules are field-gated before type checking. ECDSA and Poseidon2 calls on Goldilocks
+      produce unavailable-item frontend diagnostics; their BN254 constants are never reduced into
+      the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and retains
+      the packed spread implementation on BN254. BLAKE's small-field additions likewise use integer
+      carries, avoiding native-field bit decomposition. AES is shared.
 - [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is unsatisfiable
       for a value at or above `2^n`, on every field: `LowerWitnessNarrowingCast` windows an `Int`
       source only, and a `Field` source relies on the frontend emitting `bit_range(v, 0, n)` before
@@ -546,51 +556,57 @@ Collapsed onto one `FieldConfig::two_pow(exp)`, reached as `b.field().two_pow(ex
 - [x] `compiler/src/compiler/passes/lookup_spilling.rs` — deleted. Its `two_pow_u128` stays: that
       one is integer place-value arithmetic, not a field operation.
 
-### `L4-logup-challenges` — Single LogUp Challenge Assumes a Large Field (Hardcoded count, P5-logup)
+### `L4-logup-challenges` — Single LogUp Challenge Assumes a Large Field (Hardcoded count, P5 — done on the VM)
 
 The LogUp lookup argument proves the log-derivative identity `Σᵢ mᵢ/(α − tᵢ) = Σⱼ flagⱼ/(α − keyⱼ)`
-(width-2 tables fold `(key, value)` into `key + β·value`). It draws **exactly one** challenge
-`alpha` plus an optional column-folding `beta` — sound at `~2⁻²⁵³` on bn254, but only `~log₂ p` bits
-per challenge, which is inadequate on a small field (`~2⁻⁴²` per challenge on goldilocks). Reaching
-a target bits-of-security needs **K independent challenges**.
+(width-2 tables fold `(key, value)` into `key + β·value`). One repetition (`alpha` plus an optional
+column-folding `beta`) buys `log₂ p − log₂ D` bits: about 223 on bn254 at `D = 2^30`, but about 42
+on goldilocks at `D = 2^21`. Reaching a target bits-of-security needs **K independent repetitions**.
 
 **Model (see `hlssa_to_r1cs.rs::compute_logup_soundness`).** Clearing denominators gives a nonzero
-polynomial of total degree `≤ D = table_entries + num_lookups` in the challenges, so one challenge
-fails with probability `≤ D/|F|` (Schwartz–Zippel) and K independent challenges give `(D/|F|)^K`:
+polynomial of total degree `≤ D = table_entries + num_lookups` in the challenges, so one repetition
+fails with probability `≤ D/|F|` (Schwartz–Zippel) and K independent repetitions give `(D/|F|)^K`:
 
 ```
-per_challenge_bits = floor(log2 p) − ceil(log2 D)      (field_bit_size() − 1)
-K                  = ceil(requested_bits / per_challenge_bits)
+per_repetition_bits = floor(log2 p) − ceil(log2 D)      (field_bit_size() − 1)
+K                   = max(1, ceil(requested_bits / per_repetition_bits)) ≤ MAX_LOGUP_REPETITIONS (16)
 ```
 
 Computed with integer bit-length arithmetic (never `f64`) and rounded so `achieved_bits` is a
-_lower_ bound. On bn254 `per_challenge ≈ 223`, so `K = 1` for any sane request and the emitted
-circuit is unchanged (byte-identical). **`beta` must be replicated per repetition** (K independent
-`(αₖ, βₖ)` pairs): a shared `beta` leaves the folding-collision term un-amplified and caps security
-regardless of K.
+_lower_ bound. On bn254 `per_repetition_bits ≈ 223`, so `K = 1` for any sane request and the
+constraints and witnesses are those of a single repetition. **`beta` must be replicated per
+repetition** (K independent `(αₖ, βₖ)` pairs): a shared `beta` leaves the folding-collision term
+un-amplified and caps security regardless of K.
 
-**Status — the `--logup-soundness=<bits>` flag is implemented** (default 128). It computes and
-reports K, and **hard-errors when `K > 1`**, as only one challenge is built; it never emits an
-under-provisioned circuit. K-challenge replication itself is **P5-logup** work; the external
-Fiat-Shamir prover must be updated in lockstep to squeeze K _independent_ challenges (powers
-`α, α², …` are invalid for this identity) by reading `challenges_size` from the serialized
-`WitnessLayout`. How a reader tells a K-challenge layout from a one-challenge one is a decision for
-that sub-phase: the serialized R1CS carries no version word, and `PROGRAM_FORMAT_VERSION` covers the
-VM program alone.
+A challenge that zeroes the denominator of a row whose numerator is zero (a table entry of
+multiplicity zero, a lookup with a zero flag) leaves that row's inverse free, which adds at most
+another `D/|F|` per repetition. Flooring `log₂ p` absorbs that factor of two on Goldilocks to within
+`10⁻⁹` bits; bn254 over-reports by at most 0.41 bits per repetition, far inside its margin. Under
+Fiat–Shamir these are bits per hash query: a prover grinding `2^t` transcripts gains `t` bits.
+
+**Status — implemented.** `--logup-soundness=<bits>` (default 128) sizes K before sealing, and the
+argument is repeated K times with independent `(αₖ, βₖ)` pairs and shared multiplicities.
+`WitnessLayout::logup_repetitions` records K (0 without a table); the challenge section is
+`[α₀, β₀, α₁, β₁, …]` (`β` only when a table has a value column), and the table-data and lookup-data
+sections, in the witness and in the constraints, are K consecutive copies of one repetition's. The
+prover draws all `challenges_size` challenges _independently_ (powers `α, α², …` are invalid for
+this identity) after committing to the pre-commitment witness, and passes them in order to
+`run_witgen_phase2`: challenge `i` sits at `challenges_start() + i`. The layout word is part of
+`r1cs.bin` (format version 2) and of the VM header's constraint layouts (format version 5). The LLVM
+and WASM paths refuse `K > 1` (`Error::WasmLogupRepetitionsUnsupported`).
 
 - [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` —
       `compute_logup_soundness`/`logup_soundness_report` + `SoundnessReport` (the formula,
-      unit-tested); `driver.rs::generate_r1cs` reports + guards. `logup_soundness_report` takes the
-      program's `FieldConfig` (passed from `r1cs_ssa.field()`), so the per-challenge bit budget
-      follows the configured field.
-- [ ] `hlssa_to_r1cs.rs` challenge allocation (`// challenges init`) — allocate K `(αₖ, βₖ)`
-      (`WitnessLayout::next_challenge` is already K-ready); replicate table inverse columns + sum
-      constraints and lookup inverse witnesses ×K.
-- [ ] `vm/src/interpreter.rs` `run_phase2` (6 sites) — reads `alpha`/`beta` at hardcoded
-      post-commitment indices `[0]`/`[1]`; loop the batch inversion + fills over K
-      (`[2k]`/`[2k+1]`).
-- [ ] `vm/src/bytecode.rs` (10 sites) and `hlssa_to_llssa.rs` (4 sites) — AD emitters bind
-      `logup_wit_challenge_off` `{+0,+1}`; loop as `+2k`/`+2k+1`.
+      unit-tested); `driver.rs::logup_repetitions` sizes K from the program's `FieldConfig` before
+      sealing, so the per-repetition bit budget follows the configured field.
+- [x] `hlssa_to_r1cs.rs::seal_impl` (`// challenges init`) — allocates K `(αₖ, βₖ)` and emits the
+      table rows, sum rows and lookup rows once per repetition.
+- [x] `vm/src/interpreter.rs::run_phase2` — copies phase 1's metadata from repetition 0's rows to
+      the others, then fills each repetition from its challenges (`fill_repetition`).
+- [x] `vm/src/bytecode.rs` (AD) and `vm/src/verifier.rs` — the table and lookup handlers run over
+      repetition 0's cursors and emit each repetition at its `LogupStrides` offset.
+- [ ] `hlssa_to_llssa.rs` (6 sites) — the LLSSA AD emitters bind one repetition's challenges;
+      `lower_with_layout` and the driver refuse `K > 1` (Goldilocks WASM, Phase 5).
 
 ---
 
@@ -600,7 +616,9 @@ VM program alone.
 
 The secp256k1 and secp256r1 replacements share curve-generic code, but their vendored arithmetic
 assumes the headroom of the BN254 proving field. The ECDSA base field `Fq` and scalar field `Fr` are
-non-native fields; neither is the Noir `Field` used to constrain their arithmetic.
+non-native fields; neither is the Noir `Field` used to constrain their arithmetic. The vendored
+modules are currently gated to BN254. Goldilocks can compile unrelated programs, but calling either
+ECDSA replacement fails with a frontend diagnostic.
 
 - [ ] `mavros_stdlib/vendor/bignum.nr` — `constants`, limb range checks, multiplication and
       reduction gadgets use radix `2^120`, `u128` limbs, and native `Field` accumulators, including
@@ -639,7 +657,7 @@ non-native fields; neither is the Noir `Field` used to constrain their arithmeti
       later, benchmarked swap behind the façade impls only; Goldilocks is hand-written (Phase 5).
 - [x] **Program header** — `vm/src/bytecode.rs` (`to_binary`/`to_binary_impl` write it,
       `ProgramHeader`/`parse_program_header` read it) opens with `PROGRAM_MAGIC`,
-      `PROGRAM_FORMAT_VERSION` (4) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
+      `PROGRAM_FORMAT_VERSION` (5) and the program's field (`FieldId::code`: bn254 1, Goldilocks 2,
       0 names none). Dispatch needs no field selection, since the opcodes name the field
       (`bn254_add_field`, …); the word lets `interpreter::run*::<F>` refuse, in every build, a
       program over another field, whose handlers would read and write the wrong element width.

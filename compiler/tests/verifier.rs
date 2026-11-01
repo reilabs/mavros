@@ -2,7 +2,11 @@ mod common;
 
 use ark_ff::{AdditiveGroup, UniformRand};
 use mavros_artifacts::{Field, R1CS};
-use mavros_compiler::{api, compiler::codegen::CodeGenOptions};
+use mavros_compiler::{
+    Project, api,
+    compiler::codegen::CodeGenOptions,
+    driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
+};
 use rand::{SeedableRng, rngs::StdRng};
 
 /// Independent oracle: multiply each materialized matrix row by w, then by r.
@@ -119,15 +123,12 @@ fn assert_forward_bytecode(binary: &[u64]) {
 #[test]
 fn goldilocks_verifier_matches_materialized_matrices() {
     use mavros_artifacts::{FieldConfig, Goldilocks};
-    use mavros_compiler::{
-        compiler::ssa::{
-            SourceLocation,
-            hlssa::{
-                BinaryArithOpKind, HLSSA, Type,
-                builder::{HLEmitter as _, HLSSABuilder},
-            },
+    use mavros_compiler::compiler::ssa::{
+        SourceLocation,
+        hlssa::{
+            BinaryArithOpKind, HLSSA, Type,
+            builder::{HLEmitter as _, HLSSABuilder},
         },
-        driver::Driver,
     };
     use mavros_int_semantics::IntBits;
 
@@ -151,8 +152,6 @@ fn goldilocks_verifier_matches_materialized_matrices() {
     });
     let scratch = tempfile::tempdir().unwrap();
     let mut driver = Driver::from_ssa(ssa, scratch.path().to_path_buf(), false);
-    // Arithmetic test only: Goldilocks needs a lower target for the single-challenge LogUp.
-    driver.set_logup_soundness(40);
     driver.make_struct_access_static().unwrap();
     driver.monomorphize().unwrap();
     driver.spill_witness().unwrap();
@@ -160,6 +159,9 @@ fn goldilocks_verifier_matches_materialized_matrices() {
     let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     assert_forward_bytecode(&binary);
     assert!(r1cs.constraints_layout.tables_data_size > 0);
+    // A Goldilocks argument of degree at most 2^20 buys at least 43 bits per repetition, so the
+    // default 128-bit target takes three.
+    assert_eq!(r1cs.witness_layout.logup_repetitions, 3);
     let r: Vec<_> = (0..r1cs.constraints.len())
         .map(|i| Goldilocks::from(i as u64 + 2))
         .collect();
@@ -183,6 +185,17 @@ fn goldilocks_verifier_matches_materialized_matrices() {
 }
 
 fn check(source: &str) -> (usize, usize) {
+    check_at(source, DEFAULT_LOGUP_SOUNDNESS_BITS, None).0
+}
+
+/// `source` compiled at a `logup_soundness` target: the verifier against the materialized matrices
+/// and AD against [`api::check_ad`] on random vectors, and with `prover_toml` witgen against the
+/// constraints. Returns the verifier's and AD's heap allocation counts and the LogUp repetitions.
+fn check_at(
+    source: &str,
+    logup_soundness: u32,
+    prover_toml: Option<&str>,
+) -> ((usize, usize), usize) {
     use mavros_vm::bytecode::{AllocationType, AlocationEvent};
     let heap_allocations = |memory: &mavros_vm::bytecode::AllocationInstrumenter| {
         memory
@@ -193,8 +206,22 @@ fn check(source: &str) -> (usize, usize) {
     };
     let mut heaps = (0, 0);
     let project = common::noir_project(source);
-    let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    if let Some(toml) = prover_toml {
+        std::fs::write(project.path().join("Prover.toml"), toml).unwrap();
+    }
+    let mut driver = Driver::new(Project::new(project.path().to_path_buf()).unwrap(), false);
+    driver.set_logup_soundness(logup_soundness);
+    driver.run_noir_compiler().unwrap();
+    driver.make_struct_access_static().unwrap();
+    driver.monomorphize().unwrap();
+    driver.spill_witness().unwrap();
+    let r1cs = driver.generate_r1cs::<Field>().unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    if prover_toml.is_some() {
+        let (inputs, _) = api::read_prover_inputs(project.path(), driver.abi()).unwrap();
+        let witness = api::run_witgen_from_binary(&mut prover, &r1cs, &inputs, None).unwrap();
+        assert!(api::check_witgen(&r1cs, &witness));
+    }
     let original_prover = prover.clone();
     let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     assert_eq!(
@@ -263,8 +290,11 @@ fn check(source: &str) -> (usize, usize) {
     }
     assert_eq!(binary, original);
     assert_eq!(prover, original_prover);
-    assert!(!project.path().join("Prover.toml").exists());
-    heaps
+    assert_eq!(
+        project.path().join("Prover.toml").exists(),
+        prover_toml.is_some()
+    );
+    (heaps, r1cs.witness_layout.logup_repetitions)
 }
 
 #[test]
@@ -311,6 +341,48 @@ fn empty_circuit() {
     check("fn main() {}");
 }
 
+/// bn254 repeats the LogUp argument past `253 − ⌈log₂ D⌉` bits: witgen, AD and the verifier over
+/// every table kind at two repetitions, at a 256-bit target.
+#[test]
+fn repeated_lookup_arguments() {
+    let programs = ["cond_rangecheck", "array_lookup", "spread_and_cast"].map(|name| {
+        let read = |file: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../noir_tests/{name}/{file}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        (read("src/main.nr"), read("Prover.toml"))
+    });
+    let shift = (
+        "fn main(x: u8, amount: u8) -> pub u8 { x << amount }".to_string(),
+        "x = \"3\"\namount = \"4\"\nreturn = \"48\"\n".to_string(),
+    );
+    for (source, toml) in programs.iter().chain([&shift]) {
+        assert_eq!(check_at(source, 128, Some(toml)).1, 1);
+        assert_eq!(check_at(source, 256, Some(toml)).1, 2);
+    }
+}
+
+/// The WASM AD emitters bind one repetition's challenges, so the WASM path refuses a program
+/// that `repeated_lookup_arguments` runs on the VM.
+#[test]
+fn the_wasm_path_refuses_repeated_lookup_arguments() {
+    let project = common::noir_project("fn main(x: u8, amount: u8) -> pub u8 { x << amount }");
+    let mut driver = Driver::new(Project::new(project.path().to_path_buf()).unwrap(), false);
+    driver.set_logup_soundness(256);
+    driver.run_noir_compiler().unwrap();
+    driver.make_struct_access_static().unwrap();
+    driver.monomorphize().unwrap();
+    driver.spill_witness().unwrap();
+    let r1cs = driver.generate_r1cs::<Field>().unwrap();
+    match driver.compile_llvm_targets(false, &r1cs, None, CodeGenOptions::default()) {
+        Err(mavros_compiler::driver::Error::WasmLogupRepetitionsUnsupported(2)) => {}
+        other => panic!("expected the WASM path to refuse two repetitions, got {other:?}"),
+    }
+}
+
 #[test]
 fn constraint_layouts_must_match_the_compiled_artifact() {
     let project =
@@ -326,10 +398,13 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
     let mut shifted_constraints = r1cs.constraints_layout;
     shifted_constraints.algebraic_size -= 1;
     shifted_constraints.tables_data_size += 1;
+    let mut repeated = r1cs.witness_layout;
+    repeated.logup_repetitions += 1;
     for (wl, cl) in [
         (other_r1cs.witness_layout, other_r1cs.constraints_layout),
         (shifted_witness, r1cs.constraints_layout),
         (r1cs.witness_layout, shifted_constraints),
+        (repeated, r1cs.constraints_layout),
     ] {
         // The vectors fit the supplied layouts, including mismatches with unchanged total lengths.
         let r = vec![Field::from(3u64); cl.size()];

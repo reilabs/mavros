@@ -79,6 +79,14 @@ The VM has special handling for these instructions, reusing yet unused parts of 
 store intermediate results and then compute the challenge-based values in a final pass after
 execution is complete.
 
+One repetition of the LogUp argument provides approximately $\log_2 p - \log_2 D$ bits of soundness,
+where $D$ is the number of table entries and lookups, summed over all tables. The compiler selects
+the number of repetitions $K$ based on the specified `--logup-soundness` target (set at 128 bits by
+default). Each repetition $k$ checks the shared multiplicities against the independent challenges
+$(\alpha_k, \beta_k)$ with separate inverse columns and rows. $K$ is recorded in the witness layout,
+and the challenge, table, and lookup sections are $K$ consecutive copies of one repetition's layout.
+The prover draws all challenges independently after committing to the pre-commitment witness.
+
 ## Compilation Stages
 
 While implementing processes foreign to normal compilers, Mavros has a fairly standard batch-based

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use fm::FileManager;
+use fm::{FileId, FileManager};
 use itertools::Itertools;
 use nargo::{
     package::{Dependency, Package},
@@ -18,7 +18,7 @@ use noirc_frontend::{
     },
     hir::ParsedFiles,
     parser::{ItemKind, ParsedModule},
-    token::FunctionAttributeKind,
+    token::{FieldPredicate, FunctionAttributeKind, SecondaryAttribute, SecondaryAttributeKind},
 };
 
 use crate::{collections::HashSet, error::Error};
@@ -89,6 +89,14 @@ const MAVROS_STDLIB_FILES: &[(&str, &str)] = &[
         include_str!("../../mavros_stdlib/replacements/sha256_compression.nr"),
     ),
     (
+        "std/mavros/replacements/sha256_compression/bn254.nr",
+        include_str!("../../mavros_stdlib/replacements/sha256_compression/bn254.nr"),
+    ),
+    (
+        "std/mavros/replacements/sha256_compression/portable.nr",
+        include_str!("../../mavros_stdlib/replacements/sha256_compression/portable.nr"),
+    ),
+    (
         "std/mavros/vendor.nr",
         include_str!("../../mavros_stdlib/vendor.nr"),
     ),
@@ -124,10 +132,13 @@ const FOREIGN_REPLACEMENTS: &[&str] = &[
     "sha256_compression",
 ];
 
-/// Rewrite all registered `#[foreign]` and `#[builtin]` shims to call their replacements.
-fn replace_foreign_functions(parsed_files: &mut ParsedFiles) {
+/// Rewrite all registered `#[foreign]` and `#[builtin]` shims in stdlib to call their replacements.
+fn replace_foreign_functions(stdlib_files: &HashSet<FileId>, parsed_files: &mut ParsedFiles) {
     let mut replaced: HashSet<&'static str> = HashSet::default();
-    for (module, _) in parsed_files.values_mut() {
+    for file_id in stdlib_files {
+        let (module, _) = parsed_files
+            .get_mut(file_id)
+            .expect("every stdlib file is parsed");
         replace_foreign_functions_in_module(module, &mut replaced);
     }
     for foreign_name in FOREIGN_REPLACEMENTS {
@@ -181,7 +192,7 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
         .iter()
         .map(|param| {
             let Pattern::Identifier(ident) = &param.pattern else {
-                ice_usr!("foreign function '{foreign_name}' has a non-identifier parameter pattern")
+                ice!("foreign function '{foreign_name}' has a non-identifier parameter pattern")
             };
             variable(AstPath::plain(
                 vec![PathSegment {
@@ -228,10 +239,47 @@ fn replace_foreign_function(function: &mut NoirFunction, replaced: &mut HashSet<
     replaced.insert(foreign_name);
 }
 
+/// Upstream exposes these APIs on every field because its backend supplies the black boxes.
+/// Mavros' replacements require BN254. Gate the public APIs and their shims together, so Noir
+/// rejects unsupported uses before lowering, including calls from unconstrained functions.
+fn gate_bn254_stdlib_apis(file_manager: &FileManager, parsed_files: &mut ParsedFiles) {
+    for (path, names) in [
+        ("std/lib.nr", ["ecdsa_secp256k1", "ecdsa_secp256r1"]),
+        (
+            "std/hash/mod.nr",
+            ["poseidon2_permutation", "poseidon2_permutation_internal"],
+        ),
+    ] {
+        let file = file_manager
+            .name_to_id(PathBuf::from(path))
+            .expect("stdlib file exists");
+        let (module, _) = parsed_files.get_mut(&file).expect("stdlib file is parsed");
+        let mut gated = 0;
+        for item in &mut module.items {
+            let attributes = match &mut item.kind {
+                ItemKind::ModuleDecl(decl) if names.contains(&decl.ident.as_str()) => {
+                    &mut decl.outer_attributes
+                }
+                ItemKind::Function(function) if names.contains(&function.name()) => {
+                    &mut function.def.attributes.secondary
+                }
+                _ => continue,
+            };
+            attributes.push(SecondaryAttribute {
+                kind: SecondaryAttributeKind::Field(FieldPredicate::new("bn254".into(), false)),
+                location: item.location,
+            });
+            gated += 1;
+        }
+        assert_eq!(gated, names.len(), "BN254-only APIs changed in {path}");
+    }
+}
+
 fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
     // Build the file manager manually so we can expose the Mavros extensions from the embedded
     // stdlib root without maintaining a copy of upstream's `std/lib.nr`.
     let mut file_manager = FileManager::new(&workspace.root_dir);
+    let mut stdlib_files: HashSet<FileId> = HashSet::default();
 
     // 1. Add the embedded stdlib, extending its root with the Mavros module declaration.
     let stdlib_root = Path::new("std/lib.nr");
@@ -241,21 +289,27 @@ fn parse_workspace(workspace: &Workspace) -> (FileManager, ParsedFiles) {
             source.push_str("\npub mod mavros;\n");
             extended_stdlib_root = true;
         }
-        file_manager.add_file_with_source_canonical_path(Path::new(&path), source);
+        stdlib_files
+            .extend(file_manager.add_file_with_source_canonical_path(Path::new(&path), source));
     }
     assert!(extended_stdlib_root, "embedded stdlib root was not found");
 
     // 2. Add the Mavros stdlib extensions.
     for (path, source) in MAVROS_STDLIB_FILES {
-        file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string());
+        stdlib_files.extend(
+            file_manager.add_file_with_source_canonical_path(Path::new(path), source.to_string()),
+        );
     }
 
     // 3. Add workspace files
     nargo::insert_all_files_for_workspace_into_file_manager(workspace, &mut file_manager);
     let mut parsed_files = nargo::parse_all(&file_manager);
 
-    // 4. Rewrite replaced stdlib functions to call their pure-Noir implementations
-    replace_foreign_functions(&mut parsed_files);
+    // 4. Match the upstream API's availability to the Mavros replacements.
+    gate_bn254_stdlib_apis(&file_manager, &mut parsed_files);
+
+    // 5. Rewrite replaced stdlib functions to call their pure-Noir implementations
+    replace_foreign_functions(&stdlib_files, &mut parsed_files);
     (file_manager, parsed_files)
 }
 
