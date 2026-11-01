@@ -489,8 +489,6 @@ impl<'a> ExpressionConverter<'a> {
             }
             // The frontend rejects oracle references from source. Keep this check for
             // hand-built monomorphic programs that bypass the frontend.
-            // TODO: When oracle calls are supported, preserve their purity so optimizations such
-            // as CSE and DCE can distinguish pure calls from calls with side effects.
             Definition::Oracle { name, .. } => self.reject_unsupported(
                 format!("oracle functions are not supported by Mavros: `{name}`"),
                 ident.location,
