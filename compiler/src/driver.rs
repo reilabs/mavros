@@ -145,6 +145,9 @@ pub enum Error {
     /// assertion failures do not retain their spans.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
+    /// The program uses a Noir feature Mavros cannot lower, or a value that does not fit the field.
+    LoweringRefused(Vec<Diagnostic>),
+
     /// The `--logup-soundness` target is out of reach: the field is too small for any number of
     /// LogUp repetitions (one distinguishes less than a bit at the argument's degree), or the
     /// target needs more than
@@ -179,6 +182,9 @@ impl std::fmt::Display for Error {
         match self {
             Error::NoirCompilerError { rendered, .. } => f.write_str(rendered),
             Error::UnsatisfiableProgram(diagnostics) => {
+                write!(f, "{}", diagnostic::render_all(diagnostics))
+            }
+            Error::LoweringRefused(diagnostics) => {
                 write!(f, "{}", diagnostic::render_all(diagnostics))
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
@@ -405,7 +411,8 @@ impl Driver {
             &program,
             Some(self.project().file_manager()),
             field,
-        );
+        )
+        .map_err(Error::LoweringRefused)?;
         self.initial_ssa = Some(ssa);
         self.main_is_unconstrained = main_is_unconstrained;
 

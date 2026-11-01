@@ -27,11 +27,14 @@ use noirc_frontend::monomorphization::ast::{
 
 use crate::{
     collections::{HashMap, HashSet},
-    compiler::ssa::{
-        FunctionId, SourceLocation,
-        hlssa::{
-            HLFunction, HLSSA,
-            builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
+    compiler::{
+        diagnostic::Diagnostic,
+        ssa::{
+            FunctionId, SourceLocation,
+            hlssa::{
+                HLFunction, HLSSA,
+                builder::{HLEmitter, HLFunctionBuilder, HLSSABuilder},
+            },
         },
     },
 };
@@ -39,6 +42,7 @@ use crate::{
 use expression_converter::ExpressionConverter;
 use fm::FileManager;
 use mavros_artifacts::FieldConfig;
+use std::cell::RefCell;
 use type_converter::TypeConverter;
 
 /// Converts a monomorphized Program to SSA.
@@ -63,6 +67,9 @@ pub struct SSAConverter {
 
     /// Utility for converting between types.
     type_converter: TypeConverter,
+
+    /// Constructs refused while lowering.
+    diagnostics: RefCell<Vec<Diagnostic>>,
 }
 
 impl SSAConverter {
@@ -74,17 +81,18 @@ impl SSAConverter {
             global_slots: HashMap::default(),
             global_constants: HashMap::default(),
             type_converter: TypeConverter::new(),
+            diagnostics: RefCell::new(Vec::new()),
         }
     }
 
     /// Convert an entire program to SSA.
-    /// Returns the SSA and whether main is unconstrained.
+    /// Returns the SSA and whether main is unconstrained, or every construct lowering refused.
     pub fn convert_program(
         &mut self,
         program: &Program,
         file_manager: Option<&FileManager>,
         field: FieldConfig,
-    ) -> (HLSSA, bool) {
+    ) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
         let mut ssa = HLSSA::with_main_in(field, "main".to_string());
 
         // Phase 1: Register all functions to handle mutual recursion.
@@ -159,7 +167,11 @@ impl SSAConverter {
             .map(|f| f.unconstrained)
             .unwrap_or(false);
 
-        (ssa, main_is_unconstrained)
+        let diagnostics = self.diagnostics.take();
+        if !diagnostics.is_empty() {
+            return Err(diagnostics);
+        }
+        Ok((ssa, main_is_unconstrained))
     }
 
     /// Collect all GlobalIds referenced transitively by an expression.
@@ -310,6 +322,7 @@ impl SSAConverter {
                     &self.global_constants,
                     current_block,
                     file_manager,
+                    &self.diagnostics,
                 );
                 let (_name, _typ, init_expr) = &program.globals[gid];
                 let value = expr_converter.convert_value(init_expr, b);
@@ -380,6 +393,7 @@ impl SSAConverter {
             &self.global_constants,
             entry_block,
             file_manager,
+            &self.diagnostics,
         );
 
         // The frontend rejects folding from source. Retain this defense for hand-built
@@ -421,7 +435,7 @@ impl SSAConverter {
 
 impl HLSSA {
     /// Create SSA over bn254 directly from a monomorphized program.
-    pub fn from_program(program: &Program) -> (HLSSA, bool) {
+    pub fn from_program(program: &Program) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
         Self::from_program_with_file_manager(program, None, FieldConfig::bn254())
     }
 
@@ -431,7 +445,7 @@ impl HLSSA {
         program: &Program,
         file_manager: Option<&FileManager>,
         field: FieldConfig,
-    ) -> (HLSSA, bool) {
+    ) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
         let mut converter = SSAConverter::new();
         converter.convert_program(program, file_manager, field)
     }
