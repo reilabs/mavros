@@ -80,6 +80,7 @@ use crate::{
         ssa::{DefaultSSAAnnotator, SourceLocation, hlssa::HLSSA},
         untaint_control_flow::UntaintControlFlow,
     },
+    error::ToolchainError,
 };
 
 /// Executable VM bytecode plus optional standalone source metadata.
@@ -166,9 +167,14 @@ pub enum Error {
     WasmLogupRepetitionsUnsupported(usize),
 
     /// R1CS coefficients requested in a field other than the program's.
-    R1csFieldMismatch { requested: FieldId, program: FieldId },
+    R1csFieldMismatch {
+        requested: FieldId,
+        program: FieldId,
+    },
     /// Missing ABI or inconsistent entry-point/R1CS layouts.
     WitnessManifest(String),
+
+    Toolchain(ToolchainError),
 }
 
 impl std::fmt::Display for Error {
@@ -207,11 +213,18 @@ impl std::fmt::Display for Error {
                 Ok(())
             }
             Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
+            Error::Toolchain(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<ToolchainError> for Error {
+    fn from(error: ToolchainError) -> Self {
+        Error::Toolchain(error)
+    }
+}
 
 impl Driver {
     pub fn new(project: Project, draw_cfg: bool) -> Self {
@@ -347,6 +360,12 @@ impl Driver {
 
     #[tracing::instrument(skip_all)]
     pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
+        self.run_noir_compiler_for_field(FieldConfig::bn254())
+    }
+
+    /// Compile the frontend and lower its monomorphized AST using the same field.
+    #[tracing::instrument(skip_all)]
+    pub fn run_noir_compiler_for_field(&mut self, field: FieldConfig) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
             self.project().file_manager(),
             self.project().parsed_files(),
@@ -355,7 +374,10 @@ impl Driver {
         noirc_driver::check_crate(
             &mut context,
             crate_id,
-            &noirc_driver::CompileOptions::default(),
+            &noirc_driver::CompileOptions {
+                field: crate::abi_helpers::noir_field_id(field.id()),
+                ..Default::default()
+            },
         )
         .map_err(|diagnostics| self.noir_error(diagnostics))?;
 
@@ -385,12 +407,10 @@ impl Driver {
         ));
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
-        // FIELD-ASSUMPTION: L1-noir-frontend
-        // The driver has no field selector, so a Noir package compiles over bn254.
         let (ssa, main_is_unconstrained) = HLSSA::from_program_with_file_manager(
             &program,
             Some(self.project().file_manager()),
-            FieldConfig::bn254(),
+            field,
         )
         .map_err(Error::LoweringRefused)?;
         self.initial_ssa = Some(ssa);
@@ -1274,7 +1294,7 @@ impl Driver {
             let debug_path = wasm_opts
                 .include_debug_info
                 .then(|| crate::compiler::codegen::llssa_to_llvm::wasm_debug_info_path(&wasm_path));
-            codegen.compile_to_wasm(&wasm_path, wasm_opts);
+            codegen.compile_to_wasm(&wasm_path, wasm_opts)?;
             info!(message = %"WASM object generated", path = %wasm_path.display());
             if let Some(debug_path) = debug_path {
                 info!(message = %"WASM debug info generated", path = %debug_path.display());
