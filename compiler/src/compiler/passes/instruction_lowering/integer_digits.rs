@@ -182,7 +182,9 @@ mod tests {
             .get_entry_mut()
             .set_terminator(Terminator::Return(vec![result]));
 
-        InstructionLowering::operand_shapes().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::operand_shapes()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
 
         let mut widths = Vec::new();
         for (_, block) in ssa.get_unique_entrypoint().get_blocks() {

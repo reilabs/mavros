@@ -115,7 +115,7 @@ use crate::compiler::{
         click_cooper::ClickCooper, flow_analysis::FlowAnalysis, types::TypeInfo,
         witness_taint_inference::ApproximateWitnessTaint,
     },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     passes::dead_code_elimination::{Config as DceConfig, DCE},
     ssa::hlssa::HLSSA,
 };
@@ -138,7 +138,7 @@ impl Pass for PRE {
         vec![ClickCooper::id(), TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.transform(
             ssa,
             store.get::<ClickCooper>(),
@@ -149,6 +149,7 @@ impl Pass for PRE {
         // The rewrite invalidates the store's `FlowAnalysis`; recompute it for the integrated DCE.
         let flow = FlowAnalysis::run(ssa);
         DCE::new(self.config.dce).do_run(ssa, &flow);
+        Ok(())
     }
 }
 

@@ -148,7 +148,7 @@ use crate::compiler::{
         types::{FunctionTypeInfo, TypeInfo},
         value_range_analysis::field_modulus,
     },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     passes::shared::{
         divmod_guard::nonzero_hint_divisor,
         limbs::{
@@ -196,7 +196,7 @@ impl Pass for WideWitnessInts {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let field = ssa.field();
         let globals = Globals::split(ssa, field);
 
@@ -254,6 +254,7 @@ impl Pass for WideWitnessInts {
             }
             rewrite_function(ssa, fid, &reachable, &value_map, type_info, field, &globals);
         }
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

@@ -40,7 +40,7 @@ use crate::compiler::{
         flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, TypeInfo},
     },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     passes::shared::{
         seq_bounds::{build_lt_bounds_assert_on_len, build_pop_bounds_assert_on_len, seq_len},
         value_replacements::{ReplaceScope, ValueReplacements},
@@ -73,8 +73,9 @@ impl Pass for LowerZstSlices {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         Self::do_run(ssa, store.get::<FlowAnalysis>(), store.get::<TypeInfo>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -439,7 +440,7 @@ mod tests {
     }
 
     fn lower(ssa: &mut HLSSA) {
-        LowerZstSlices::new().run(ssa, &analyses(ssa));
+        LowerZstSlices::new().run(ssa, &analyses(ssa)).unwrap();
     }
 
     fn program(

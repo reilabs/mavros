@@ -8,9 +8,12 @@ use std::{
 
 use crate::{
     collections::HashMap,
-    compiler::ssa::{
-        DefaultSSAAnnotator, Instruction, SSA, SSAType,
-        hlssa::{Constant, OpCode, Type},
+    compiler::{
+        diagnostic::Diagnostic,
+        ssa::{
+            DefaultSSAAnnotator, Instruction, SSA, SSAType,
+            hlssa::{Constant, OpCode, Type},
+        },
     },
 };
 
@@ -179,6 +182,8 @@ impl AnalysisStore {
 // Pass trait — parametric
 // ---------------------------------------------------------------------------
 
+pub type PassResult = Result<(), Vec<Diagnostic>>;
+
 pub trait Pass<
     Op: Instruction = OpCode,
     Ty: SSAType = Type,
@@ -189,7 +194,7 @@ pub trait Pass<
     fn needs(&self) -> Vec<AnalysisId> {
         vec![]
     }
-    fn run(&self, ssa: &mut SSA<Op, Ty, C>, store: &AnalysisStore);
+    fn run(&self, ssa: &mut SSA<Op, Ty, C>, store: &AnalysisStore) -> PassResult;
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![]
     }
@@ -260,7 +265,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
     }
 
     #[tracing::instrument(skip_all, name = "PassManager::run", fields(phase = %self.phase_label))]
-    pub fn run(&mut self, ssa: &mut SSA<Op, Ty, C>) {
+    pub fn run(&mut self, ssa: &mut SSA<Op, Ty, C>) -> PassResult {
         if let Some(debug_output_dir) = &self.debug_output_dir {
             if debug_output_dir.exists() {
                 fs::remove_dir_all(debug_output_dir).unwrap();
@@ -269,11 +274,14 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
         }
 
         let passes = std::mem::take(&mut self.passes);
-        for (i, pass) in passes.iter().enumerate() {
-            self.run_pass(ssa, pass.as_ref(), i);
-        }
+        let outcome = passes
+            .iter()
+            .enumerate()
+            .try_for_each(|(i, pass)| self.run_pass(ssa, pass.as_ref(), i));
         self.passes = passes;
+        outcome?;
         self.output_final_debug_info(ssa);
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(pass = %pass.name()))]
@@ -282,7 +290,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
         ssa: &mut SSA<Op, Ty, C>,
         pass: &dyn Pass<Op, Ty, C>,
         pass_index: usize,
-    ) {
+    ) -> PassResult {
         // Ensure all needed analyses are computed (in dependency order)
         let ordered = topo_sort(pass.needs(), &self.analyses);
         for id in ordered {
@@ -290,9 +298,10 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash + 'static> PassM
         }
 
         self.output_debug_info(ssa, pass_index, pass.name());
-        pass.run(ssa, &self.analyses);
+        pass.run(ssa, &self.analyses)?;
         self.analyses.apply_preserved(&pass.preserves());
         self.output_pass_ssa_snapshot(ssa, pass_index, pass.name());
+        Ok(())
     }
 
     /// When `MAVROS_DUMP_PASS_SSA` names a directory, write the SSA text after every pass to

@@ -7,7 +7,7 @@ use crate::{
     collections::HashMap,
     compiler::{
         analysis::flow_analysis::FlowAnalysis,
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::value_replacements::{ReplaceScope, ValueReplacements},
         ssa::{BlockId, Terminator, hlssa::HLSSA},
     },
@@ -24,8 +24,9 @@ impl Pass for FixDoubleJumps {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<FlowAnalysis>());
+        Ok(())
     }
 }
 

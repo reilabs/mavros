@@ -145,6 +145,10 @@ pub enum Error {
     /// assertion failures do not retain their spans.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
+    /// A pass cannot compile part of the program, such as a width of the configured field is too
+    /// narrow.
+    PassFailed(Vec<Diagnostic>),
+
     /// The program uses a Noir feature Mavros cannot lower, or a value that does not fit the field.
     LoweringRefused(Vec<Diagnostic>),
 
@@ -214,6 +218,7 @@ impl std::fmt::Display for Error {
             }
             Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
             Error::Toolchain(error) => write!(f, "{error}"),
+            Error::PassFailed(diagnostics) => write!(f, "{}", diagnostic::render_all(diagnostics))
         }
     }
 }
@@ -446,7 +451,9 @@ impl Driver {
             ],
         );
         validation.set_debug_output_dir(self.get_debug_output_dir().clone());
-        validation.run(&mut ssa);
+        validation
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
         let failures = failures
             .borrow_mut()
             .take()
@@ -510,7 +517,9 @@ impl Driver {
         );
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
+        pass_manager
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
         self.entry_blob_layout = Some(
             entry_blob_layout
                 .borrow_mut()
@@ -519,6 +528,16 @@ impl Driver {
         );
         self.static_struct_access_ssa = Some(ssa);
         Ok(())
+    }
+
+    /// [`Error::PassFailed`] for what a pass reported with compiled sources.
+    fn pass_failed(&self, failures: Vec<Diagnostic>) -> Error {
+        Error::PassFailed(
+            failures
+                .into_iter()
+                .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                .collect(),
+        )
     }
 
     /// Attach the source text the compiler read for `diagnostic`'s file, where there is one, so the
@@ -631,7 +650,8 @@ impl Driver {
                 Box::new(RemoveUnreachableFunctions::new()),
             ],
         )
-        .run(&mut ssa);
+        .run(&mut ssa)
+        .map_err(|failures| self.pass_failed(failures))?;
 
         let flow_analysis = FlowAnalysis::run(&ssa);
 
@@ -655,7 +675,8 @@ impl Driver {
                 Rc::clone(&failures),
             ))],
         )
-        .run(&mut ssa);
+        .run(&mut ssa)
+        .map_err(|failures| self.pass_failed(failures))?;
         let failures = failures
             .borrow_mut()
             .take()
@@ -758,7 +779,9 @@ impl Driver {
         );
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
+        pass_manager
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
         self.witness_spilled_ssa = Some(ssa);
         Ok(())
     }
@@ -787,7 +810,9 @@ impl Driver {
             ],
         );
         r1cs_phase_1.set_debug_output_dir(self.get_debug_output_dir().clone());
-        r1cs_phase_1.run(&mut r1cs_ssa);
+        r1cs_phase_1
+            .run(&mut r1cs_ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
@@ -983,7 +1008,7 @@ impl Driver {
         options: CodeGenOptions,
         mode: WitnessMode,
     ) -> Result<BytecodeArtifact, Error> {
-        self.prepare_program_ssa();
+        self.prepare_program_ssa()?;
         let ssa = self.program_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);
@@ -1132,9 +1157,9 @@ impl Driver {
     /// everything downstream (refcounting, codegen, every artifact) compiles the whole program
     /// together.
     #[tracing::instrument(skip_all)]
-    fn prepare_program_ssa(&mut self) {
+    fn prepare_program_ssa(&mut self) -> Result<(), Error> {
         if self.program_ssa.is_some() {
-            return;
+            return Ok(());
         }
 
         let mut ssa = self.witness_spilled_ssa.clone().unwrap();
@@ -1150,7 +1175,9 @@ impl Driver {
             ],
         );
         witgen_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        witgen_pm.run(&mut ssa);
+        witgen_pm
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         let mut ad_ssa = self.r1cs_ssa.clone().unwrap();
         let mut ad_pm = PassManager::new(
@@ -1170,7 +1197,9 @@ impl Driver {
             ],
         );
         ad_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        ad_pm.run(&mut ad_ssa);
+        ad_pm
+            .run(&mut ad_ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         // `SSA::merge` re-interns constants by value, which would silently conflate function
         // pointers across the two halves; by this point defunctionalization must have removed
@@ -1203,7 +1232,9 @@ impl Driver {
             ],
         );
         tail_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        tail_pm.run(&mut ssa);
+        tail_pm
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         self.write_debug_text(
             self.get_debug_output_dir().join("program_ssa.txt"),
@@ -1211,6 +1242,7 @@ impl Driver {
         );
 
         self.program_ssa = Some(ssa);
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -1240,7 +1272,7 @@ impl Driver {
             ));
         }
 
-        self.prepare_program_ssa();
+        self.prepare_program_ssa()?;
         let ssa = self.program_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);

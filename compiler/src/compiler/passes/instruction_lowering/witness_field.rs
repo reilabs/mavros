@@ -554,7 +554,9 @@ mod tests {
         });
         entry.set_terminator(Terminator::Return(vec![result]));
 
-        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::witness_integer_ops()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         (ssa, result)
     }
 

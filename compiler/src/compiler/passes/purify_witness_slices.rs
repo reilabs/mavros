@@ -23,7 +23,7 @@ use crate::{
             witness_info::WitnessShape,
             witness_taint_inference::ApproximateWitnessTaint,
         },
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::{
             BlockId, FunctionId, Instruction, SourceLocation, Terminator, ValueId,
             hlssa::{
@@ -53,7 +53,7 @@ impl Pass for PurifyWitnessSlices {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         ssa.mark_witness_slices_purified();
         let flow = store.get::<FlowAnalysis>();
         let types = store.get::<TypeInfo>();
@@ -141,6 +141,7 @@ impl Pass for PurifyWitnessSlices {
             );
             ssa.put_function(function_id, function);
         }
+        Ok(())
     }
 }
 
@@ -1434,7 +1435,7 @@ mod tests {
         let mut store = AnalysisStore::new();
         store.insert_with_deps::<FlowAnalysis>(flow, vec![]);
         store.insert_with_deps::<TypeInfo>(types, vec![]);
-        PurifyWitnessSlices::new().run(ssa, &store);
+        PurifyWitnessSlices::new().run(ssa, &store).unwrap();
         // The rewrite must leave well-typed SSA behind.
         let flow = FlowAnalysis::run(ssa);
         let _ = Types::new().run(ssa, &flow);

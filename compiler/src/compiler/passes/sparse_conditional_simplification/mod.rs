@@ -93,7 +93,7 @@ use crate::{
             flow_analysis::FlowAnalysis,
             types::{FunctionTypeInfo, TypeInfo, Types},
         },
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         passes::{
             dead_code_elimination::{Config, DCE},
             shared::value_replacements::{ReplaceScope, ValueReplacements},
@@ -124,11 +124,12 @@ impl Pass for SCS {
         vec![ClickCooper::id(), TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         propagate_all(ssa, store.get::<ClickCooper>(), store.get::<TypeInfo>());
         // The rewrite invalidates the store's `FlowAnalysis`; recompute it for the integrated DCE.
         let flow = FlowAnalysis::run(ssa);
         DCE::new(self.config).do_run(ssa, &flow);
+        Ok(())
     }
 }
 

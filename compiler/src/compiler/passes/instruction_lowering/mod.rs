@@ -28,7 +28,7 @@ use crate::compiler::{
             FunctionValueRanges, Interval, ValueRange, ValueRangeAnalysis, Width,
         },
     },
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
     ssa::{
         BlockId, ValueId,
         hlssa::{
@@ -411,15 +411,15 @@ impl Pass for InstructionLowering {
         self.name
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         if !self.fixed_point {
             self.run_iteration(ssa);
-            return;
+            return Ok(());
         }
 
         for _ in 0..ITERATION_LIMIT {
             if !self.run_iteration(ssa) {
-                return;
+                return Ok(());
             }
         }
         ice!("instruction lowering did not reach a fixed point");
@@ -500,7 +500,9 @@ mod tests {
             .get_entry_mut()
             .set_terminator(Terminator::Return(returned));
 
-        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::witness_integer_ops()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         (ssa, op)
     }
 

@@ -43,7 +43,7 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 use crate::{
     collections::HashMap,
     compiler::{
-        pass_manager::{AnalysisStore, Pass},
+        pass_manager::{AnalysisStore, Pass, PassResult},
         passes::{
             shared::{limbs::widest_injective_int_bits, unsupported::unsupported_on_this_field},
             wide_witness_ints::multi_cell_int_bits,
@@ -152,7 +152,7 @@ impl Pass for PrepareEntryPoint {
         "prepare_entry_point"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         let layout = Self::wrap_main(
             ssa,
             self.main_is_unconstrained,
@@ -163,6 +163,7 @@ impl Pass for PrepareEntryPoint {
             *sink.borrow_mut() = Some(layout);
         }
         Self::process_unconstrained_calls(ssa);
+        Ok(())
     }
 }
 

@@ -1479,7 +1479,8 @@ mod tests {
             vec![Box::new(LowerWitnessBitwiseOps::new())],
             false,
         )
-        .run(&mut ssa, &AnalysisStore::new());
+        .run(&mut ssa, &AnalysisStore::new())
+        .unwrap();
 
         let answer = ssa
             .get_unique_entrypoint()

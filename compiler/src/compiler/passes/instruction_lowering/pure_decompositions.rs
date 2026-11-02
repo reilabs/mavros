@@ -133,7 +133,8 @@ mod tests {
                     });
                     entry.set_terminator(Terminator::Return(vec![]));
                     InstructionLowering::pure_bit_decompositions()
-                        .run(&mut ssa, &AnalysisStore::new());
+                        .run(&mut ssa, &AnalysisStore::new())
+                        .unwrap();
                     let checks: Vec<_> = ssa
                         .get_unique_entrypoint()
                         .get_entry()
@@ -162,7 +163,8 @@ mod tests {
                         // A function parameter is checked only after the radix lowerer has
                         // established that it equals 256. The fit check keeps its guard.
                         InstructionLowering::witness_integer_ops()
-                            .run(&mut ssa, &AnalysisStore::new());
+                            .run(&mut ssa, &AnalysisStore::new())
+                            .unwrap();
                         let checks: Vec<_> = ssa
                             .get_unique_entrypoint()
                             .get_entry()

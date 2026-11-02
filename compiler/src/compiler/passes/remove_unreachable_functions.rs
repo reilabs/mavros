@@ -7,7 +7,7 @@ use crate::{
     collections::HashSet,
     compiler::{
         analysis::flow_analysis::FlowAnalysis,
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::hlssa::HLSSA,
     },
 };
@@ -29,7 +29,7 @@ impl Pass for RemoveUnreachableFunctions {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let cfg = store.get::<FlowAnalysis>();
         let call_graph = cfg.get_call_graph();
 
@@ -46,5 +46,6 @@ impl Pass for RemoveUnreachableFunctions {
                 ssa.delete_function(function_id);
             }
         }
+        Ok(())
     }
 }
