@@ -709,7 +709,8 @@ pub(crate) fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)
             CastTarget::WitnessOf
             | CastTarget::ValueOf
             | CastTarget::ArrayToSlice
-            | CastTarget::Map(_) => return None,
+            | CastTarget::Map(_)
+            | CastTarget::FieldLimbs => return None,
         },
         ScalarFold::SExt {
             value,

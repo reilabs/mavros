@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions};
+use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions, driver::Error};
 
 /// Exercise source parsing, monomorphization, input decoding, witness generation and R1CS.
 /// Check a declared return as well so a missing high limb cannot pass unnoticed.
@@ -157,6 +157,149 @@ fn field_casts_to_wide_integers_preserve_the_canonical_value() {
                 ),
                 &format!("x = '{decimal}'\nreturn = ['{low}', '{high}']"),
             );
+        }
+    }
+}
+
+/// Where a differential program casts a `Field`.
+#[derive(Clone, Copy, Debug)]
+enum CastLane {
+    Witnessed,
+    Unconstrained,
+    Constant,
+}
+
+/// A program asserting `x as {ty}` in `lanes` against what Noir's comptime interpreter answers for
+/// `offset + x`.
+fn field_cast_differential(
+    ty: &str,
+    values: &[num_bigint::BigUint],
+    offset: u8,
+    lanes: &[CastLane],
+) -> (String, String) {
+    let count = values.len();
+    let literal = |value: &num_bigint::BigUint| format!("0x{}", value.to_str_radix(16));
+    let interpreted = values
+        .iter()
+        .map(|value| format!("interpreted({})", literal(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = lanes
+        .iter()
+        .map(|lane| match lane {
+            CastLane::Witnessed => {
+                format!("for i in 0..{count} {{ assert(xs[i] as {ty} == wants[i]); }}")
+            }
+            CastLane::Unconstrained => format!(
+                "for i in 0..{count} {{
+                    let answer = unsafe {{ unconstrained_cast(xs[i]) }};
+                    assert(answer == wants[i]);
+                }}"
+            ),
+            CastLane::Constant => values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    format!(
+                        "{{ let constant: Field = {}; assert(constant as {ty} == wants[{index}]); }}",
+                        literal(value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        "comptime fn interpreted(x: Field) -> {ty} {{ ({offset} + x) as {ty} }}
+        unconstrained fn unconstrained_cast(x: Field) -> {ty} {{ x as {ty} }}
+        fn main(xs: [Field; {count}]) -> pub Field {{
+            let wants: [{ty}; {count}] = comptime {{ [{interpreted}] }};
+            {body}
+            1
+        }}"
+    );
+    let inputs = values
+        .iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (source, format!("xs = [{inputs}]\nreturn = '1'"))
+}
+
+/// `source` is refused where its lane asserts: at compile time for a constant, by witness
+/// generation or the constraints otherwise.
+fn assert_cast_refused(lane: CastLane, source: &str, inputs: &str) {
+    let dir = common::noir_project(source);
+    let compiled = api::compile_to_r1cs(dir.path().to_path_buf(), false);
+    if let CastLane::Constant = lane {
+        let error = compiled.err().unwrap_or_else(|| panic!("{source}"));
+        assert!(
+            matches!(error.downcast_ref(), Some(Error::UnsatisfiableProgram(_))),
+            "{source}: {error:?}"
+        );
+        return;
+    }
+    let (mut driver, r1cs) = compiled.unwrap_or_else(|error| panic!("{source}: {error:?}"));
+    let mut binary = api::compile_bytecode(
+        &mut driver,
+        CodeGenOptions {
+            check_constraints: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
+    let (params, _) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None);
+    assert!(
+        result.is_err() || !api::check_witgen(&r1cs, &result.unwrap()),
+        "{source}"
+    );
+}
+
+/// `x as T` on a `Field` answers what Noir's comptime interpreter answers, around each width's
+/// boundary and the top of the field, at widths on both sides of the field's and in both signs.
+#[test]
+fn field_casts_agree_with_noirs_comptime_interpreter() {
+    const LANES: [CastLane; 3] = [
+        CastLane::Witnessed,
+        CastLane::Unconstrained,
+        CastLane::Constant,
+    ];
+    let modulus: num_bigint::BigUint =
+        "21888242871839275222246405745257275088548364400416034343698204186575808495617"
+            .parse()
+            .unwrap();
+    let one = num_bigint::BigUint::from(1u8);
+    let values = [
+        num_bigint::BigUint::ZERO,
+        one.clone(),
+        255u8.into(),
+        256u16.into(),
+        300u16.into(),
+        (&one << 64u32) + 5u8,
+        (&one << 128u32) + 7u8,
+        (&one << 200u32) + 0x1234u16,
+        &modulus - 1u8,
+        &modulus - 2u8,
+        &modulus - 256u16,
+        (&modulus - 1u8) >> 1u32,
+        (&modulus + 1u8) >> 1u32,
+    ];
+    for ty in [
+        "u8", "u16", "u32", "u64", "u128", "u200", "u253", "u254", "u255", "u256", "u300", "i8",
+        "i16", "i32", "i64", "i128", "i200", "i254", "i256",
+    ] {
+        let (source, inputs) = field_cast_differential(ty, &values, 0, &LANES);
+        check(&source, &inputs);
+    }
+
+    // The interpreter's answers reach each lane's assertions.
+    for ty in ["u8", "i64", "u256"] {
+        for lane in LANES {
+            let (source, inputs) = field_cast_differential(ty, &values, 1, &[lane]);
+            assert_cast_refused(lane, &source, &inputs);
         }
     }
 }
@@ -357,6 +500,44 @@ fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
     ] {
         common::assert_frontend_refused(source, &expected);
     }
+}
+
+/// Mavros reduces any cast into `Field` it is handed, so only the frontend keeps a Noir program from
+/// casting a type with two values one modulus apart. A generic width is checked once it is bound.
+#[test]
+fn frontend_refuses_a_cast_into_field_past_the_modulus() {
+    const SIGNED: &str = "Only unsigned integer types may be casted to Field";
+    let exceeds = |typ: &str| {
+        format!("Values of type `{typ}` can exceed the field modulus, so `{typ}` cannot be cast")
+    };
+    for (source, expected) in [
+        (
+            "fn main() { let x: u254 = 5; let _ = x as Field; }",
+            exceeds("u254"),
+        ),
+        (
+            "fn main() { let x: u256 = 5; let _ = x as Field; }",
+            exceeds("u256"),
+        ),
+        (
+            "fn cast<let N: u32>(x: u<N>) -> Field { x as Field } \
+             fn main() { let _ = cast::<254>(5); }",
+            exceeds("u254"),
+        ),
+        (
+            "fn main() { let x: i8 = 5; let _ = x as Field; }",
+            SIGNED.to_string(),
+        ),
+    ] {
+        common::assert_frontend_refused(source, &expected);
+    }
+
+    let dir = common::noir_project("fn main() { let x: u253 = 5; let _ = x as Field; }");
+    let mut driver = mavros_compiler::driver::Driver::new(
+        mavros_compiler::Project::new(dir.path().to_path_buf()).unwrap(),
+        false,
+    );
+    driver.run_noir_compiler().unwrap();
 }
 
 /// Returned errors keep all source diagnostics even after the project and its files are gone.

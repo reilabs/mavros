@@ -25,8 +25,7 @@ use crate::{
     Project,
     compiler::{
         analysis::{
-            flow_analysis::FlowAnalysis,
-            types::{Types, check_casts_into_field},
+            flow_analysis::FlowAnalysis, types::Types,
             witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
@@ -431,11 +430,6 @@ impl Driver {
     pub fn make_struct_access_static(&mut self) -> Result<(), Error> {
         let mut ssa = self.initial_ssa.clone().unwrap();
 
-        // The program as written, before `WideWitnessInts` emits casts of a wide integer's limbs
-        // into Field.
-        let flow = FlowAnalysis::run(&ssa);
-        check_casts_into_field(&ssa, &Types::new().run(&ssa, &flow));
-
         let failures = Rc::new(RefCell::new(None));
         let mut validation = PassManager::new(
             "validate_return_reachability".to_string(),
@@ -761,6 +755,15 @@ impl Driver {
         pass_manager.run(&mut ssa);
         self.witness_spilled_ssa = Some(ssa);
         Ok(())
+    }
+
+    /// The program as witness spilling left it, which R1CS generation and codegen both read: a test
+    /// changes a hint here to stand in for a dishonest prover.
+    #[cfg(test)]
+    pub(crate) fn witness_spilled_ssa_mut(&mut self) -> &mut HLSSA {
+        self.witness_spilled_ssa
+            .as_mut()
+            .expect("witness spilling has run")
     }
 
     /// Generates the program's R1CS with coefficients in `F`, which must be the raw type of the

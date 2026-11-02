@@ -2228,18 +2228,35 @@ impl Display for SequenceTargetType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CastTarget {
+    /// An integer's unsigned reading reduced modulo the field's modulus, or a field element
+    /// unchanged.
     Field,
+
     /// An integer of `bits` raw two's-complement bits.
     Int(usize),
+
     WitnessOf,
+
     /// Strips one `WitnessOf` wrapper.
     ValueOf,
+
     Nop,
+
     ArrayToSlice,
+
     /// Applies the inner cast to every element of an array or slice.
     /// Lowered to an explicit loop late, by `LowerMapCasts`; witness-only maps
     /// never reach codegen in the witgen pipeline (`StripWitnessOf` erases them).
     Map(Box<CastTarget>),
+
+    /// An integer's **injective** field image, typed as one `Field`: one element per witness limb
+    /// of an integer `WideWitnessInts` represents as limbs.
+    ///
+    /// [`CastTarget::Field`] reduces, so two integers that differ by the modulus share its image,
+    /// and a lookup keyed on it would let one stand in for the other. The witness array lowering
+    /// casts each integer leaf wider than one element with this, and `WideWitnessInts` rewrites
+    /// every one into `Field` casts of the limbs, so none reaches a later pass.
+    FieldLimbs,
 }
 
 impl CastTarget {
@@ -2317,7 +2334,7 @@ impl CastTarget {
     /// The type a cast with this target produces for an input of `value_type`.
     pub fn result_type(&self, value_type: &Type) -> Type {
         match self {
-            CastTarget::Field => {
+            CastTarget::Field | CastTarget::FieldLimbs => {
                 if value_type.is_witness_of() {
                     Type::witness_of(Type::field())
                 } else {
@@ -2356,9 +2373,11 @@ impl CastTarget {
         match self {
             CastTarget::WitnessOf | CastTarget::ValueOf => true,
             CastTarget::Map(inner) => inner.is_witness_repr_only(),
-            CastTarget::Field | CastTarget::Int(_) | CastTarget::Nop | CastTarget::ArrayToSlice => {
-                false
-            }
+            CastTarget::Field
+            | CastTarget::FieldLimbs
+            | CastTarget::Int(_)
+            | CastTarget::Nop
+            | CastTarget::ArrayToSlice => false,
         }
     }
 
@@ -2370,6 +2389,7 @@ impl CastTarget {
             CastTarget::ValueOf => true,
             CastTarget::Map(inner) => inner.is_value_of(),
             CastTarget::Field
+            | CastTarget::FieldLimbs
             | CastTarget::Int(_)
             | CastTarget::WitnessOf
             | CastTarget::Nop
@@ -2388,6 +2408,7 @@ impl Display for CastTarget {
             CastTarget::Nop => write!(f, "Nop"),
             CastTarget::ArrayToSlice => write!(f, "ArrayToSlice"),
             CastTarget::Map(inner) => write!(f, "Map({})", inner),
+            CastTarget::FieldLimbs => write!(f, "FieldLimbs"),
         }
     }
 }

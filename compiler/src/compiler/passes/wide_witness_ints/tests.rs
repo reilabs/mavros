@@ -1,14 +1,21 @@
 use super::*;
-use mavros_artifacts::FieldId;
+use mavros_artifacts::{FieldId, InputValueOrdered, MavrosField};
 use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
+use num_bigint::BigUint;
 
-use crate::compiler::{
-    analysis::types::Types,
-    passes::shared::limbs::narrow_int_bits,
-    ssa::hlssa::{
-        MAX_SPREAD_INPUT_BITS, MAX_SUPPORTED_INT_BITS,
-        builder::{HLEmitter, HLSSABuilder},
+use crate::{
+    compiler::{
+        analysis::types::Types,
+        passes::shared::limbs::narrow_int_bits,
+        ssa::{
+            SourceLocation,
+            hlssa::{
+                MAX_SPREAD_INPUT_BITS, MAX_SUPPORTED_INT_BITS, SequenceTargetType,
+                builder::{HLEmitter, HLSSABuilder},
+            },
+        },
     },
+    forgery::{self, replace_hints},
 };
 
 fn bn254() -> FieldConfig {
@@ -307,7 +314,7 @@ fn program_reading_a_sequence_at_a_witness_index(bits: usize, slots: usize) -> H
         block.emit(OpCode::Cast {
             result: image,
             value: hint,
-            target: CastTarget::Field,
+            target: CastTarget::FieldLimbs,
         });
         block.emit(OpCode::WriteWitness {
             result: Some(column),
@@ -424,6 +431,92 @@ fn the_field_image_of_a_pure_read_is_cast_from_the_limbs_it_was_read_as() {
         )),
         "no logical right shift or division re-splits the recombined value into limbs"
     );
+}
+
+/// A `Field` cast of a wide witnessed value is its residue as one element: the sum of the limbs at
+/// their place values.
+#[test]
+fn a_field_cast_of_a_wide_witness_is_one_element_summed_from_its_limbs() {
+    for field in fields() {
+        let id = field.id();
+        for bits in limbed_widths(field) {
+            let mut ssa = program_answering(
+                field,
+                bits,
+                vec![Type::witness_of(Type::field())],
+                |value, results| OpCode::Cast {
+                    result: results[0],
+                    value,
+                    target: CastTarget::Field,
+                },
+            );
+            run_pass(&mut ssa);
+            let main = ssa.get_unique_entrypoint_id();
+            assert_eq!(
+                ssa.get_function(main).get_returns().len(),
+                1,
+                "{id:?} int{bits}: the residue is one element"
+            );
+
+            let ops = emitted(&ssa);
+            let k = limb_widths(bits, witness_limb_bits(field)).len();
+            let count = |kind| {
+                ops.iter()
+                    .filter(|op| matches!(op, OpCode::BinaryArithOp { kind: k, .. } if *k == kind))
+                    .count()
+            };
+            let casts = ops
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op,
+                        OpCode::Cast {
+                            target: CastTarget::Field,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(casts, k, "{id:?} int{bits}: one cast per limb");
+            let places: Vec<_> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::UMul,
+                        rhs,
+                        ..
+                    } => match ssa.get_const(*rhs).as_deref() {
+                        Some(Constant::Field(place)) => Some(*place),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<_> = (1..k)
+                .map(|index| field.two_pow(index * witness_limb_bits(field)))
+                .collect();
+            assert_eq!(
+                places, expected,
+                "{id:?} int{bits}: every limb but the lowest at its place value, from the bottom"
+            );
+            assert_eq!(
+                count(BinaryArithOpKind::UMul),
+                k - 1,
+                "{id:?} int{bits}: no other product"
+            );
+            assert_eq!(count(BinaryArithOpKind::UAdd), k - 1, "{id:?} int{bits}");
+            assert!(
+                !ops.iter().any(|op| matches!(
+                    op,
+                    OpCode::Cast {
+                        target: CastTarget::FieldLimbs,
+                        ..
+                    }
+                )),
+                "{id:?} int{bits}"
+            );
+        }
+    }
 }
 
 /// Every emitted opcode of one function, in order.
@@ -592,6 +685,193 @@ fn a_field_read_as_a_wide_integer_is_held_below_the_modulus() {
                 "{id:?}: limb {index} of the modulus, {limb:?}, bounds nothing"
             );
         }
+    }
+}
+
+/// Behavioral: the limbs of `v + p` sum to the element `v` and fit their range checks, so a
+/// prover writing them is refused only by the chain against the modulus. Each field's width has
+/// room for `p + 5`.
+#[test]
+fn a_field_read_as_a_wide_integer_refuses_the_limbs_of_v_plus_p() {
+    check_the_limbs_of_v_plus_p_are_refused::<mavros_artifacts::Field>(bn254());
+    check_the_limbs_of_v_plus_p_are_refused::<mavros_artifacts::Goldilocks>(
+        FieldConfig::goldilocks(),
+    );
+}
+
+fn check_the_limbs_of_v_plus_p_are_refused<F: MavrosField>(field: FieldConfig) {
+    let id = field.id();
+    let bits = field.field_bit_size() as usize;
+    let five = BigUint::from(5u8);
+    // Whether `main(x: Field) -> Field { (x as int(bits)) as Field }` accepts 5 with the limbs
+    // cut from `shadow`, which stands in for the element's pure value.
+    let accepts = |shadow: &BigUint| {
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            b.function.add_return_type(Type::field());
+            let entry = b.function.get_entry_id();
+            let mut e = b
+                .block(entry)
+                .with_source_location(SourceLocation::synthetic("v_plus_p"));
+            let x = e.add_parameter(Type::field());
+            let wide = e.cast_to(CastTarget::Int(bits), x);
+            let element = e.cast_to(CastTarget::Field, wide);
+            e.terminate_return(vec![element]);
+        });
+        let input = InputValueOrdered::Field(F::from_element(field.constant(5u128)));
+        forgery::accepts_the_forgery::<F>(ssa, &[input], |ssa| {
+            let forged = ssa.add_const(Constant::Int(IntBits::from_biguint(bits, shadow)));
+            // The one the limbs are narrowed from: a range check's helper casts its operand to the
+            // field's width too.
+            let limb_bits = witness_limb_bits(field);
+            let narrowed: Vec<_> = forgery::all_ops(ssa)
+                .filter_map(|op| match op {
+                    OpCode::Cast {
+                        value,
+                        target: CastTarget::Int(width),
+                        ..
+                    } if width == limb_bits => Some(value),
+                    _ => None,
+                })
+                .collect();
+            let replaced = replace_hints(ssa, |op| match *op {
+                OpCode::Cast {
+                    result,
+                    target: CastTarget::Int(width),
+                    ..
+                } if width == bits && narrowed.contains(&result) => Some(OpCode::Cast {
+                    result,
+                    value: forged,
+                    target: CastTarget::Int(bits),
+                }),
+                _ => None,
+            });
+            assert_eq!(replaced, 1, "{id:?}: the limbs are cut from one shadow");
+        })
+    };
+
+    assert!(
+        accepts(&five),
+        "{id:?}: the canonical limbs of 5 are refused"
+    );
+    let lifted = &five + BigUint::from(field.modulus());
+    assert!(
+        lifted.bits() as usize <= bits,
+        "{id:?}: p + 5 fits the limbs"
+    );
+    assert!(
+        !accepts(&lifted),
+        "{id:?}: the limbs of p + 5 are accepted as 5"
+    );
+}
+
+/// Behavioral: a witness-indexed read of a wide element is pinned limb by limb. The read of
+/// index 0 of `[c, c + p, d]` is forged two ways: as `c + p`, which has `c`'s residue, so a lookup
+/// keyed on the residue would accept it; and as `c` with one limb taken from `d`, which differs
+/// from `c` in every limb, so a lookup that skipped that limb would accept it. A constant array is
+/// split into one per limb, so the read is one hint per limb.
+#[test]
+fn a_witness_indexed_read_takes_only_its_element_limb_for_limb() {
+    check_a_read_takes_only_its_element::<mavros_artifacts::Field>(bn254(), 256);
+    check_a_read_takes_only_its_element::<mavros_artifacts::Goldilocks>(
+        FieldConfig::goldilocks(),
+        64,
+    );
+}
+
+fn check_a_read_takes_only_its_element<F: MavrosField>(field: FieldConfig, bits: usize) {
+    let id = field.id();
+    let modulus = BigUint::from(field.modulus());
+    let c = BigUint::from(5u8);
+    let lifted = &c + &modulus;
+    let all_ones = (BigUint::from(1u8) << bits) - 1u8;
+    // Unlike `c` in every limb, and in no two limbs alike, so no two limbs' tables coincide.
+    let limb_bits = witness_limb_bits(field);
+    let d = (0..limb_widths(bits, limb_bits).len()).fold(BigUint::ZERO, |d, limb| {
+        d | (BigUint::from(0x1111u32 * (limb as u32 + 1)) << (limb * limb_bits))
+    });
+    assert!(lifted <= all_ones, "{id:?}: c + p fits int{bits}");
+    let elements = [c.clone(), lifted.clone(), d.clone()];
+
+    // Whether `main(i: int32) -> int32 { [c, c + p, d][i] as int32 }` accepts 0 with its read
+    // forged as `read`.
+    let accepts = |read: &BigUint| {
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let elements = elements.clone();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
+            b.function.add_return_type(Type::int(32));
+            let entry = b.function.get_entry_id();
+            let mut e = b
+                .block(entry)
+                .with_source_location(SourceLocation::synthetic("limb_for_limb"));
+            let index = e.add_parameter(Type::int(32));
+            let values = elements
+                .iter()
+                .map(|element| e.int_const(IntBits::from_biguint(bits, element)))
+                .collect();
+            let array = e.mk_seq(values, SequenceTargetType::Array(3), Type::int(bits));
+            let element = e.array_get(array, index);
+            let low = e.cast_to(CastTarget::Int(32), element);
+            e.terminate_return(vec![low]);
+        });
+        let input = InputValueOrdered::Field(F::from_element(field.constant(0u128)));
+        forgery::accepts_the_forgery::<F>(ssa, &[input], |ssa| {
+            // A constant array is split into one per limb, in limb order, each read at the hinted
+            // index: those reads are the hints.
+            let widths = limb_widths(bits, witness_limb_bits(field));
+            let limb_arrays: Vec<_> = forgery::all_ops(ssa)
+                .filter_map(|op| match op {
+                    OpCode::MkSeq {
+                        result,
+                        seq_type: SequenceTargetType::Array(3),
+                        elem_type,
+                        ..
+                    } if elem_type == Type::int(widths[0]) => Some(result),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                limb_arrays.len(),
+                widths.len(),
+                "{id:?}: one array per limb"
+            );
+            let forged: Vec<_> = widths
+                .iter()
+                .enumerate()
+                .map(|(limb, width)| {
+                    let pattern = IntBits::from_biguint(bits, read)
+                        .bit_range(limb * witness_limb_bits(field), *width);
+                    ssa.add_const(Constant::Int(pattern))
+                })
+                .collect();
+            let replaced = replace_hints(ssa, |op| match *op {
+                OpCode::ArrayGet { result, array, .. } if limb_arrays.contains(&array) => {
+                    let limb = limb_arrays.iter().position(|a| *a == array).unwrap();
+                    Some(OpCode::Cast {
+                        result,
+                        value: forged[limb],
+                        target: CastTarget::Int(widths[limb]),
+                    })
+                }
+                _ => None,
+            });
+            assert_eq!(replaced, widths.len(), "{id:?}: one hint per limb");
+        })
+    };
+
+    assert!(accepts(&c), "{id:?}: the honest read is refused");
+    assert!(!accepts(&lifted), "{id:?}: the read of c accepts c + p");
+    let limb_mask = (BigUint::from(1u8) << limb_bits) - 1u8;
+    for limb in 0..limb_widths(bits, limb_bits).len() {
+        let place = limb * limb_bits;
+        let mask = &limb_mask << place;
+        let read = (&c & (&all_ones ^ &mask)) | (&d & &mask);
+        assert!(
+            !accepts(&read),
+            "{id:?}: the read of c accepts limb {limb} of d"
+        );
     }
 }
 

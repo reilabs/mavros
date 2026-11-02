@@ -1134,7 +1134,12 @@ impl CodeGen {
                 } => {
                     let l_type = type_info.get_value_type(*v);
                     let r_type = type_info.get_value_type(*r);
-                    if matches!(tgt, hlssa::CastTarget::Map(_) | hlssa::CastTarget::ValueOf) {
+                    if matches!(
+                        tgt,
+                        hlssa::CastTarget::Map(_)
+                            | hlssa::CastTarget::ValueOf
+                            | hlssa::CastTarget::FieldLimbs
+                    ) {
                         ice!(
                             "{} cast should have been lowered before bytecode codegen",
                             tgt

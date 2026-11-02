@@ -14,6 +14,9 @@
 //!
 //! The invariant tying them together: **an accepted evaluation and its residue never disagree**.
 //!
+//! The two casts across the field boundary, [`int_to_field`] and [`field_to_int`], never reject,
+//! so they need no residue. They take the field's modulus as an argument.
+//!
 //! ```
 //! # use mavros_int_semantics::{eval, residue, IntBits, IntOp, Outcome};
 //! let u8 = |v| IntBits::from_u128(8, v);
@@ -570,6 +573,51 @@ pub fn residue(op: IntOp, lhs: &IntBits, rhs: &IntBits) -> Option<IntBits> {
         // so none is specified.
         Outcome::Rejected(Reject::DivByZero | Reject::DivOverflow) => None,
     }
+}
+
+// FIELD CASTS
+// ================================================================================================
+//
+// The two casts across the field boundary, for a field given only by its modulus, so this crate
+// stays free of any field. An element is its canonical representative, in `[0, modulus)`.
+//
+// Both are total, and neither rejects.
+
+/// `Int(n) -> Field`: the pattern read as **unsigned**, reduced modulo `modulus`.
+///
+/// # Panics
+///
+/// If `modulus` is below 2, which is no field.
+#[must_use]
+pub fn int_to_field(pattern: &IntBits, modulus: &BigUint) -> BigUint {
+    assert!(
+        *modulus >= BigUint::from(2u8),
+        "modulus {modulus} is not a field's"
+    );
+    BigUint::from(pattern) % modulus
+}
+
+/// `Field -> Int(bits)`: the low `bits` bits of the canonical representative, zero-filled above it
+/// when `bits` exceeds the field's width.
+///
+/// The modulus is taken only to check that `canonical` is canonical: an evaluator holding a
+/// Montgomery or otherwise unreduced form must convert first, and that is the mistake this rules
+/// out.
+///
+/// # Panics
+///
+/// If `canonical` is not below `modulus`, or `bits` is outside `1..=`[`MAX_BITS`].
+#[must_use]
+pub fn field_to_int(canonical: &BigUint, modulus: &BigUint, bits: usize) -> IntBits {
+    assert!(
+        canonical < modulus,
+        "{canonical} is not a canonical representative modulo {modulus}"
+    );
+    assert!(
+        (1..=MAX_BITS).contains(&bits),
+        "cast width {bits} is outside 1..={MAX_BITS}"
+    );
+    IntBits::from_biguint(bits, canonical)
 }
 
 // TESTS

@@ -2393,11 +2393,8 @@ mod def {
         int_limbs::zero_extend(res, limbs.as_ref(), (F::CANONICAL_LIMBS * 64) as u64, bits);
     }
 
-    /// A `bits`-wide integer moved into a field element.
-    ///
-    /// The value must fit the element's limbs. The type analysis rejects a cast to `Field` past the
-    /// widest injective width in the program as written, and `WideWitnessInts` expands each such
-    /// cast it emits limb by limb, so the assertion and the `expect` below are backstops.
+    /// A `bits`-wide integer moved into a field element: its unsigned reading reduced modulo the
+    /// modulus.
     #[opcode]
     #[field_opcode]
     fn cast_intn_to_field<F: mavros_artifacts::MavrosField>(
@@ -2405,15 +2402,19 @@ mod def {
         #[out] res: *mut F,
         #[frame_slice(bits)] a: &[u64],
     ) {
-        assert!(
-            a.len() <= F::CANONICAL_LIMBS,
-            "an integer crosses the field boundary through {} limbs, so an int{bits} has no \
-             element",
-            F::CANONICAL_LIMBS
-        );
+        // A value below the modulus is its element; any other reduces by Horner over the cells,
+        // from the top.
+        let canonical = (a.len() <= F::CANONICAL_LIMBS)
+            .then(|| F::from_canonical_limbs(a))
+            .flatten();
+        let reduced = canonical.unwrap_or_else(|| {
+            let base = F::from(1u128 << 64);
+            a.iter()
+                .rev()
+                .fold(F::ZERO, |acc, &cell| acc * base + F::from(cell))
+        });
         unsafe {
-            *res = F::from_canonical_limbs(a)
-                .expect("a width the modulus carries injectively has an element for every value");
+            *res = reduced;
         }
     }
 
@@ -4573,7 +4574,7 @@ mod tests {
                             .enumerate()
                             .map(|(i, (_, op))| op(bits as u64, at(compare_at(i)), at(a), at(b))),
                     );
-                    // A width the field carries injectively, the only kind cast to Field.
+                    // A width the field carries injectively, so the value survives the round trip.
                     let crosses = bits < 254;
                     if crosses {
                         code.push(OpCode::Bn254CastIntnToField {
@@ -5423,6 +5424,142 @@ mod tests {
             let cells = unsafe { std::slice::from_raw_parts(frame.data, 8) };
             assert_eq!(cells, image, "{opcode}");
             frame.pop(&mut vm);
+        }
+    }
+
+    /// Each field's six cast opcodes answer the model at every corner, through real dispatch.
+    ///
+    /// The narrow lanes read and write host cells, so `CastIntToField` sees every corner up to 64
+    /// bits zero-extended into its cell and `CastFieldToInt` answers the model's low 64 bits; the
+    /// `_intn` pair runs at every width. The result is compared with a sentinel after it, so an
+    /// opcode writing past its result fails.
+    #[test]
+    fn the_field_cast_opcodes_agree_with_the_model_on_both_fields() {
+        type Make = fn(FramePosition, FramePosition) -> OpCode;
+        type MakeN = fn(u64, FramePosition, FramePosition) -> OpCode;
+        check_field_cast_opcodes::<Field>(
+            |res, a| OpCode::Bn254CastIntToField { res, a },
+            |res, a| OpCode::Bn254CastInt128ToField { res, a },
+            |bits, res, a| OpCode::Bn254CastIntnToField { bits, res, a },
+            |res, a| OpCode::Bn254CastFieldToInt { res, a },
+            |res, a| OpCode::Bn254CastFieldToInt128 { res, a },
+            |bits, res, a| OpCode::Bn254CastFieldToIntn { bits, res, a },
+        );
+        check_field_cast_opcodes::<mavros_artifacts::Goldilocks>(
+            |res, a| OpCode::GoldilocksCastIntToField { res, a },
+            |res, a| OpCode::GoldilocksCastInt128ToField { res, a },
+            |bits, res, a| OpCode::GoldilocksCastIntnToField { bits, res, a },
+            |res, a| OpCode::GoldilocksCastFieldToInt { res, a },
+            |res, a| OpCode::GoldilocksCastFieldToInt128 { res, a },
+            |bits, res, a| OpCode::GoldilocksCastFieldToIntn { bits, res, a },
+        );
+
+        fn check_field_cast_opcodes<F: mavros_artifacts::MavrosField>(
+            cast_int: Make,
+            cast_int128: Make,
+            cast_intn: MakeN,
+            cast_field: Make,
+            cast_field128: Make,
+            cast_fieldn: MakeN,
+        ) {
+            use mavros_int_semantics::{IntBits, corners, field_to_int, int_to_field};
+            use num_bigint::BigUint;
+
+            const SENTINEL: u64 = 0xa5a5_a5a5_a5a5_a5a5;
+            let canonical = |element: F| {
+                BigUint::from(&IntBits::from_limbs(
+                    F::CANONICAL_LIMBS * 64,
+                    element.to_canonical_limbs().as_ref(),
+                ))
+            };
+            let element = |canonical: &BigUint| {
+                F::from_canonical_limbs(&canonical.to_u64_digits())
+                    .expect("the model answers a canonical representative")
+            };
+            let p = canonical(F::ZERO - F::ONE) + 1u8;
+            let field_bits = usize::try_from(p.bits()).expect("a modulus width fits a usize");
+
+            // Runs `opcode` with `input` at cell 0 and returns the `cells` cells at `res`, checking
+            // the sentinel after them survived.
+            let run = |opcode: OpCode, input: &[u64], res: usize, cells: usize| -> Vec<u64> {
+                let size = res + cells + 1;
+                let mut vm = empty_witgen_vm::<F>();
+                let frame = Frame::base_frame(size as u64, &mut vm);
+                for cell in 0..size {
+                    frame.write_u64(cell as isize, SENTINEL);
+                }
+                for (i, &word) in input.iter().enumerate() {
+                    frame.write_u64(i as isize, word);
+                }
+                let mut binary = Vec::new();
+                opcode.to_binary(&mut binary, &mut Vec::new());
+                let _ = DISPATCH[binary[0] as usize](binary.as_ptr(), frame, &mut vm);
+                let out: Vec<u64> = (res..res + cells)
+                    .map(|cell| frame.read_u64(cell as isize))
+                    .collect();
+                assert_eq!(
+                    frame.read_u64((res + cells) as isize),
+                    SENTINEL,
+                    "{opcode} wrote past its result"
+                );
+                frame.pop(&mut vm);
+                out
+            };
+            let cells_of = |element: F| {
+                let mut cells = vec![0u64; F::STORAGE_CELLS];
+                element.to_frame_cells(&mut cells);
+                cells
+            };
+
+            let at = FramePosition;
+            let mut checked = 0usize;
+            for bits in corners::field_cast_widths(field_bits) {
+                // The input's cells, zero-filled to the two an `Int128` reads, then the result.
+                let res = IntBits::limbs_for_bits(bits).max(2);
+                for pattern in corners::field_cast_patterns(bits, &p) {
+                    let want = cells_of(element(&int_to_field(&pattern, &p)));
+                    let mut opcodes = vec![cast_intn(bits as u64, at(res), at(0))];
+                    if bits <= 64 {
+                        opcodes.push(cast_int(at(res), at(0)));
+                    }
+                    if bits <= 128 {
+                        opcodes.push(cast_int128(at(res), at(0)));
+                    }
+                    let mut input = pattern.limbs().to_vec();
+                    input.resize(res, 0);
+                    for opcode in opcodes {
+                        let name = opcode.to_string();
+                        assert_eq!(
+                            run(opcode, &input, res, F::STORAGE_CELLS),
+                            want,
+                            "{name}: {pattern:?} as Field"
+                        );
+                        checked += 1;
+                    }
+                }
+                for value in corners::field_cast_elements(&p) {
+                    let input = cells_of(element(&value));
+                    let res = F::STORAGE_CELLS;
+                    let mut cases = vec![(cast_fieldn(bits as u64, at(res), at(0)), bits)];
+                    if bits == 64 {
+                        cases.push((cast_field(at(res), at(0)), 64));
+                    }
+                    if bits == 128 {
+                        cases.push((cast_field128(at(res), at(0)), 128));
+                    }
+                    for (opcode, width) in cases {
+                        let want = field_to_int(&value, &p, width);
+                        let name = opcode.to_string();
+                        assert_eq!(
+                            run(opcode, &input, res, want.limb_count()),
+                            want.limbs(),
+                            "{name}: {value} as u{width}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            assert!(checked > 500, "only {checked} casts on {:?}", F::ID);
         }
     }
 

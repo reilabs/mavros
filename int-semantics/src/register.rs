@@ -43,7 +43,10 @@ pub const EVALUATORS: &[Evaluator] = &[
         what: "the SCCP lattice's constant folder",
         relation: "refinement: never a value the model does not give, and never a fold of an \
                    input the model rejects",
-        files: &["compiler/src/compiler/analysis/click_cooper/lattice.rs"],
+        files: &[
+            "compiler/src/compiler/analysis/click_cooper/lattice.rs",
+            "compiler/src/compiler/util.rs",
+        ],
         conformance: &[
             Conformance {
                 path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
@@ -53,6 +56,10 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
                 test: "folding_refines_the_reference_model_at_wide_widths",
             },
+            Conformance {
+                path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
+                test: "the_field_casts_fold_to_the_reference_model_on_both_fields",
+            },
         ],
     },
     Evaluator {
@@ -61,17 +68,26 @@ pub const EVALUATORS: &[Evaluator] = &[
         relation: "delegation: it evaluates no integer of its own, and routes every fold through \
                    `const-fold`",
         files: &["compiler/src/compiler/passes/specializer.rs"],
-        conformance: &[Conformance {
-            path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
-            test: "folding_refines_the_reference_model",
-        }],
+        conformance: &[
+            Conformance {
+                path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
+                test: "folding_refines_the_reference_model",
+            },
+            Conformance {
+                path: "compiler/src/compiler/analysis/click_cooper/lattice.rs",
+                test: "the_field_casts_fold_to_the_reference_model_on_both_fields",
+            },
+        ],
     },
     Evaluator {
         tag: "r1cs-fold",
         what: "the R1CS symbolic executor",
         relation: "exact, and it may not decline: it runs after the guard IR, so `residue` is the \
                    obligation and an input the model leaves unspecified is an ICE",
-        files: &["compiler/src/compiler/codegen/hlssa_to_r1cs.rs"],
+        files: &[
+            "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
+            "compiler/src/compiler/util.rs",
+        ],
         conformance: &[
             Conformance {
                 path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
@@ -105,6 +121,10 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
                 test: "a_spread_constant_agrees_with_the_model_past_one_host_limb",
             },
+            Conformance {
+                path: "compiler/src/compiler/codegen/hlssa_to_r1cs.rs",
+                test: "the_field_casts_agree_with_the_model_on_both_fields",
+            },
         ],
     },
     Evaluator {
@@ -112,7 +132,10 @@ pub const EVALUATORS: &[Evaluator] = &[
         what: "the cost interpreter that drives specialization decisions",
         relation: "delegation to `residue`, answering zero where the model declines to specify \
                    an input at all",
-        files: &["compiler/src/compiler/analysis/instrumenter.rs"],
+        files: &[
+            "compiler/src/compiler/analysis/instrumenter.rs",
+            "compiler/src/compiler/util.rs",
+        ],
         conformance: &[
             Conformance {
                 path: "compiler/src/compiler/analysis/instrumenter.rs",
@@ -125,6 +148,10 @@ pub const EVALUATORS: &[Evaluator] = &[
             Conformance {
                 path: "compiler/src/compiler/analysis/instrumenter.rs",
                 test: "the_integer_arm_delegates_at_wide_widths_too",
+            },
+            Conformance {
+                path: "compiler/src/compiler/analysis/instrumenter.rs",
+                test: "the_field_casts_delegate_to_the_model_on_both_fields",
             },
         ],
     },
@@ -187,6 +214,14 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "vm/src/int_limbs.rs",
                 test: "the_intn_width_casts_agree_with_the_model",
             },
+            Conformance {
+                path: "vm/src/bytecode.rs",
+                test: "the_field_cast_opcodes_agree_with_the_model_on_both_fields",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/goldilocks.rs",
+                test: "pure_field_casts_agree_with_the_model_on_goldilocks",
+            },
         ],
     },
     Evaluator {
@@ -195,12 +230,13 @@ pub const EVALUATORS: &[Evaluator] = &[
         relation: "the VM's, read three ways because no one reading reaches the whole backend: \
                    LLVM's own constant folder for the instructions it emits, the runtime helpers' \
                    bodies directly for the wide sum, difference, multiply, divisions, shifts, \
-                   comparisons and spreads \
+                   comparisons, spreads and field conversions \
                    the folder cannot see through a call, and a wasm engine for the lowering built \
                    around those calls, which is the one shape the folder is deliberately never \
                    handed",
         files: &[
             "compiler/src/compiler/codegen/llssa_to_llvm.rs",
+            "compiler/src/compiler/ssa/hlssa_to_llssa.rs",
             "wasm-runtime/src/lib.rs",
             "limb-arith/src/lib.rs",
         ],
@@ -249,6 +285,14 @@ pub const EVALUATORS: &[Evaluator] = &[
                 path: "compiler/tests/bigints/main.rs",
                 test: "a_pure_spread_and_unspread_agree_with_the_model",
             },
+            Conformance {
+                path: "wasm-runtime/src/lib.rs",
+                test: "the_helper_field_conversions_agree_with_the_model",
+            },
+            Conformance {
+                path: "compiler/tests/bigints/main.rs",
+                test: "pure_field_casts_agree_with_the_model",
+            },
         ],
     },
     Evaluator {
@@ -258,10 +302,16 @@ pub const EVALUATORS: &[Evaluator] = &[
                    range answered. A rejected execution produces no value, so the analysis owes \
                    it nothing",
         files: &["compiler/src/compiler/analysis/value_range_analysis.rs"],
-        conformance: &[Conformance {
-            path: "compiler/src/compiler/analysis/value_range_analysis.rs",
-            test: "the_transfer_is_sound_for_every_accepted_execution",
-        }],
+        conformance: &[
+            Conformance {
+                path: "compiler/src/compiler/analysis/value_range_analysis.rs",
+                test: "the_transfer_is_sound_for_every_accepted_execution",
+            },
+            Conformance {
+                path: "compiler/src/compiler/analysis/value_range_analysis.rs",
+                test: "the_field_cast_transfer_is_sound_on_both_fields",
+            },
+        ],
     },
     Evaluator {
         tag: "totality",

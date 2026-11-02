@@ -22,7 +22,7 @@ use crate::compiler::{
             Type, TypeExpr,
         },
     },
-    util::{field_constant, host_word},
+    util::{field_constant, field_residue, host_word},
 };
 
 pub use mavros_artifacts::{
@@ -109,13 +109,13 @@ impl<F: MavrosField> Value<F> {
         )
     }
 
-    /// Report a [`Value::Wide`] asked for a field element as a compiler bug: its element would be
-    /// a residue mod `p`. Only the program as written is checked for such a cast, so reaching here
-    /// means a pass emitted one.
+    /// Report a [`Value::Wide`] asked for a field element as a compiler bug: an integer reaches a
+    /// field operand only through a `Field` cast, which reduces it, so a pass used one without the
+    /// cast.
     #[track_caller]
     fn ice_no_element(pattern: &IntBits) -> ! {
         ice!(
-            "an int{} value at or above the modulus reached a use in R1CS generation that needs its field element, which it does not have; a pass emitted a cast into Field of a value past the modulus",
+            "an int{} value at or above the modulus reached a use in R1CS generation that needs its field element, which it does not have; a pass used it as a field operand without a cast into Field",
             pattern.bits()
         )
     }
@@ -897,7 +897,13 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
             (hlssa::CastTarget::Int(bits), Value::Const(_) | Value::Wide(_)) => {
                 Value::of_pattern(ctx.field(), self.expect_pattern(*bits))
             }
-            (hlssa::CastTarget::Field, Value::Wide(pattern)) => Self::ice_no_element(pattern),
+            // A pattern at or above the modulus reduces; one below it is already its element.
+            (hlssa::CastTarget::Field, Value::Wide(pattern)) => {
+                Value::Const(field_residue(ctx.field(), pattern))
+            }
+            (hlssa::CastTarget::FieldLimbs, _) => {
+                ice!("a {cast_target} cast should have been lowered by WideWitnessInts")
+            }
             _ => self.clone(),
         }
     }
@@ -2851,8 +2857,8 @@ mod int_semantics_conformance {
         assert_eq!(sum, IntBits::from_u128(256, 1).shifted_left(254));
     }
 
-    /// A value past the modulus is an ICE where it would have to become an element: a constraint,
-    /// or a cast to `Field`.
+    /// A value past the modulus is an ICE where it would have to become an element without a cast,
+    /// as in a constraint. A cast to `Field` reduces it.
     #[test]
     #[should_panic(expected = "value at or above the modulus reached a use in R1CS generation")]
     fn a_value_past_the_modulus_has_no_element_to_give() {
@@ -2909,5 +2915,53 @@ mod int_semantics_conformance {
         let (want_odd, want_even) = pattern.unspread(128);
         assert_eq!(odd.expect_pattern(64), want_odd);
         assert_eq!(even.expect_pattern(64), want_even);
+    }
+
+    /// Both field casts of a constant answer the model at every corner on both fields. The fold
+    /// may not decline, so a pattern past the modulus answers its residue.
+    #[test]
+    fn the_field_casts_agree_with_the_model_on_both_fields() {
+        check_field_casts::<RawField>(FieldConfig::bn254());
+        check_field_casts::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks());
+    }
+
+    fn check_field_casts<F: mavros_artifacts::MavrosField>(field: FieldConfig) {
+        use crate::compiler::{
+            ssa::hlssa::CastTarget,
+            util::test::{element_of, model_field_to_int, model_int_to_field, modulus_of},
+        };
+
+        let mut generator = super::R1CGen::<F>::new(field);
+        let p = modulus_of(field);
+        for bits in corners::field_cast_widths(field.field_bit_size() as usize) {
+            for pattern in corners::field_cast_patterns(bits, &p) {
+                let value = super::Value::<F>::of_pattern(field, pattern.clone());
+                let cast = <super::Value<F> as symbolic_executor::Value<super::R1CGen<F>>>::cast(
+                    &value,
+                    &CastTarget::Field,
+                    &Type::field(),
+                    &mut generator,
+                );
+                assert_eq!(
+                    cast.expect_constant(),
+                    model_int_to_field(field, &pattern),
+                    "{field:?}: {pattern:?} as Field"
+                );
+            }
+            for canonical in corners::field_cast_elements(&p) {
+                let element = element_of(field, &canonical);
+                let cast = <super::Value<F> as symbolic_executor::Value<super::R1CGen<F>>>::cast(
+                    &super::Value::<F>::Const(element),
+                    &CastTarget::Int(bits),
+                    &Type::int(bits),
+                    &mut generator,
+                );
+                assert_eq!(
+                    cast.expect_pattern(bits),
+                    model_field_to_int(field, &element, bits),
+                    "{field:?}: {canonical} as u{bits}"
+                );
+            }
+        }
     }
 }
