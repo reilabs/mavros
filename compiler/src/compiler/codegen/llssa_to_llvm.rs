@@ -40,6 +40,7 @@ use crate::{
             },
         },
     },
+    error::ToolchainError,
 };
 
 // CONSTANTS
@@ -2428,7 +2429,11 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.module.print_to_file(path).unwrap();
     }
 
-    pub fn compile_to_wasm(&self, path: &Path, opts: WasmCompileOpts) {
+    pub fn compile_to_wasm(
+        &self,
+        path: &Path,
+        opts: WasmCompileOpts,
+    ) -> Result<(), ToolchainError> {
         use std::process::Command;
 
         Target::initialize_webassembly(&InitializationConfig::default());
@@ -2501,55 +2506,58 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             .arg(&obj_path)
             .arg(&opts.runtime_lib)
             .output()
-            .unwrap_or_else(|_| {
-                ice_usr!(
-                    "Failed to run wasm-ld (tried: {}). Make sure LLVM with wasm-ld is installed.",
-                    wasm_ld
-                )
-            });
+            .map_err(|error| {
+                ToolchainError::new(format!(
+                    "Failed to run wasm-ld (tried: {wasm_ld}): {error}. Make sure LLVM with \
+                     wasm-ld is installed."
+                ))
+            })?;
 
         if !output.status.success() {
-            eprintln!(
-                "wasm-ld stdout: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            eprintln!(
-                "wasm-ld stderr: {}",
+            return Err(ToolchainError::new(format!(
+                "wasm-ld failed ({}):\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
-            );
-            ice_usr!("wasm-ld failed with status: {}", output.status);
+            )));
         }
 
         let debug_path = wasm_debug_info_path(path);
         if opts.include_debug_info {
-            let linked = std::fs::read(path).unwrap_or_else(|error| {
-                ice_usr!("failed to read linked WASM {}: {error}", path.display())
-            });
+            let linked = std::fs::read(path).map_err(|error| {
+                ToolchainError::new(format!(
+                    "failed to read linked WASM {}: {error}",
+                    path.display()
+                ))
+            })?;
             let external_url = debug_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .expect("WASM debug sidecar path must have a UTF-8 filename");
             let (stripped, debug) = crate::wasm_debug::split_debug_info(&linked, external_url)
-                .unwrap_or_else(|error| {
-                    ice_usr!(
+                .map_err(|error| {
+                    ToolchainError::new(format!(
                         "failed to split WASM debug info from {}: {error}",
                         path.display()
-                    )
-                });
-            std::fs::write(path, stripped).unwrap_or_else(|error| {
-                ice_usr!("failed to write stripped WASM {}: {error}", path.display())
-            });
-            std::fs::write(&debug_path, debug).unwrap_or_else(|error| {
-                ice_usr!(
+                    ))
+                })?;
+            std::fs::write(path, stripped).map_err(|error| {
+                ToolchainError::new(format!(
+                    "failed to write stripped WASM {}: {error}",
+                    path.display()
+                ))
+            })?;
+            std::fs::write(&debug_path, debug).map_err(|error| {
+                ToolchainError::new(format!(
                     "failed to write WASM debug sidecar {}: {error}",
                     debug_path.display()
-                )
-            });
+                ))
+            })?;
         } else {
             std::fs::remove_file(debug_path).ok();
         }
 
         std::fs::remove_file(&obj_path).ok();
+        Ok(())
     }
 }
 
@@ -2723,12 +2731,15 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("a temporary directory");
         let wasm_path = dir.path().join("subject.wasm");
-        codegen.compile_to_wasm(
-            &wasm_path,
-            WasmCompileOpts::fast(
-                crate::wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}")),
-            ),
-        );
+        codegen
+            .compile_to_wasm(
+                &wasm_path,
+                WasmCompileOpts::fast(
+                    crate::wasm_runtime::locate_or_build()
+                        .unwrap_or_else(|error| panic!("{error}")),
+                ),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
 
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, &wasm_path)
@@ -3266,12 +3277,15 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("a temporary directory");
         let wasm_path = dir.path().join("subject.wasm");
-        codegen.compile_to_wasm(
-            &wasm_path,
-            opts_for(
-                crate::wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}")),
-            ),
-        );
+        codegen
+            .compile_to_wasm(
+                &wasm_path,
+                opts_for(
+                    crate::wasm_runtime::locate_or_build()
+                        .unwrap_or_else(|error| panic!("{error}")),
+                ),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
 
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, &wasm_path)

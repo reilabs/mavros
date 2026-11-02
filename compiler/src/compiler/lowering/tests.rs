@@ -8,6 +8,7 @@ use noirc_frontend::monomorphization::ast::{
 use super::*;
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::Types},
+    diagnostic::{Diagnostic, render_all},
     pass_manager::PassManager,
     passes::{defunctionalize::Defunctionalize, elide_tuples::ElideTuples},
     ssa::{
@@ -46,40 +47,93 @@ fn function(id: u32, body: Expression, return_type: AstType) -> AstFunction {
     }
 }
 
-fn lower(functions: Vec<AstFunction>) -> HLSSA {
+fn try_lower(functions: Vec<AstFunction>) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
     HLSSA::from_program(&Program {
         functions,
         ..Default::default()
     })
-    .0
+}
+
+fn lower(functions: Vec<AstFunction>) -> HLSSA {
+    try_lower(functions).unwrap().0
+}
+
+fn assert_refused(functions: Vec<AstFunction>, message: &str) {
+    let Err(diagnostics) = try_lower(functions) else {
+        panic!("expected lowering to refuse the program");
+    };
+    let rendered = render_all(&diagnostics);
+    assert!(
+        rendered.contains(message),
+        "missing {message:?}: {rendered}"
+    );
 }
 
 #[test]
-#[should_panic(
-    expected = "Unhandled error from user input: error: oracle functions are not supported by Mavros: `barnacle`"
-)]
 fn oracle_identifiers_are_refused_without_a_call() {
-    lower(vec![function(
-        0,
-        ident(
-            Definition::Oracle {
-                name: "barnacle".into(),
-                pure: true,
-            },
+    assert_refused(
+        vec![function(
+            0,
+            ident(
+                Definition::Oracle {
+                    name: "barnacle".into(),
+                    pure: true,
+                },
+                AstType::Unit,
+            ),
             AstType::Unit,
-        ),
-        AstType::Unit,
-    )]);
+        )],
+        "error: oracle functions are not supported by Mavros: `barnacle`",
+    );
+}
+
+/// An oracle bound as a function value is refused, and lowering carries on past it, whether the
+/// oracle is typed as one function or as its constrained/unconstrained pair.
+#[test]
+fn oracle_function_values_are_refused() {
+    let oracle_function = |unconstrained| {
+        AstType::Function(
+            vec![AstType::Field],
+            Rc::new(AstType::Field),
+            Rc::new(AstType::Unit),
+            unconstrained,
+        )
+    };
+    for oracle_type in [
+        oracle_function(true),
+        AstType::Tuple(vec![oracle_function(false), oracle_function(true)]),
+    ] {
+        let binding = Expression::Let(Let {
+            id: LocalId(0),
+            mutable: false,
+            name: "f".into(),
+            expression: Box::new(ident(
+                Definition::Oracle {
+                    name: "barnacle".into(),
+                    pure: true,
+                },
+                oracle_type,
+            )),
+        });
+        assert_refused(
+            vec![function(
+                0,
+                Expression::Block(vec![binding, unit()]),
+                AstType::Unit,
+            )],
+            "error: oracle functions are not supported by Mavros: `barnacle`",
+        );
+    }
 }
 
 #[test]
-#[should_panic(
-    expected = "Unhandled error from user input: error: #[fold] functions are not supported by Mavros"
-)]
 fn empty_folded_functions_are_refused_without_source_locations() {
     let mut folded = function(0, unit(), AstType::Unit);
     folded.inline_type = InlineType::Fold;
-    lower(vec![folded]);
+    assert_refused(
+        vec![folded],
+        "error: #[fold] functions are not supported by Mavros",
+    );
 }
 
 fn assert_return_shape(ssa: &HLSSA, expected: &[Type]) {
@@ -409,7 +463,7 @@ fn returned_field_constant(field: FieldConfig, body: Expression) -> crate::compi
         functions: vec![function(0, body, AstType::Field)],
         ..Default::default()
     };
-    let (ssa, _) = HLSSA::from_program_with_file_manager(&program, None, field);
+    let (ssa, _) = HLSSA::from_program_with_file_manager(&program, None, field).unwrap();
     assert_eq!(ssa.field(), field);
     let main = ssa.get_unique_entrypoint();
     let returned = main
@@ -452,18 +506,31 @@ fn a_negative_field_literal_negates_in_goldilocks() {
     );
 }
 
-#[test]
-#[should_panic(expected = "does not fit the field")]
-fn a_field_literal_at_the_goldilocks_modulus_is_refused() {
-    let modulus = i128::from(mavros_artifacts::field::goldilocks::MODULUS);
-    returned_field_constant(FieldConfig::goldilocks(), field_literal(modulus));
+/// Lowering `main` returning `body` over goldilocks is refused because a literal does not fit.
+fn assert_goldilocks_literal_refused(body: Expression) {
+    let program = Program {
+        functions: vec![function(0, body, AstType::Field)],
+        ..Default::default()
+    };
+    let Err(diagnostics) =
+        HLSSA::from_program_with_file_manager(&program, None, FieldConfig::goldilocks())
+    else {
+        panic!("expected lowering to refuse the literal");
+    };
+    let rendered = render_all(&diagnostics);
+    assert!(rendered.contains("does not fit the field"), "{rendered}");
 }
 
 #[test]
-#[should_panic(expected = "does not fit the field")]
+fn a_field_literal_at_the_goldilocks_modulus_is_refused() {
+    let modulus = i128::from(mavros_artifacts::field::goldilocks::MODULUS);
+    assert_goldilocks_literal_refused(field_literal(modulus));
+}
+
+#[test]
 fn a_negative_field_literal_of_the_goldilocks_modulus_is_refused() {
     let modulus = i128::from(mavros_artifacts::field::goldilocks::MODULUS);
-    returned_field_constant(FieldConfig::goldilocks(), field_literal(-modulus));
+    assert_goldilocks_literal_refused(field_literal(-modulus));
 }
 
 #[test]
