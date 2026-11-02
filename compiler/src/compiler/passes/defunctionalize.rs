@@ -1022,7 +1022,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA, types: Option<&TypeInfo>) -> ReachingFn
                         OpCode::Cmp { .. }
                         | OpCode::BinaryArithOp { .. }
                         | OpCode::Cast {
-                            target: CastTarget::Field | CastTarget::Int(_),
+                            target: CastTarget::Field | CastTarget::FieldLimbs | CastTarget::Int(_),
                             ..
                         }
                         | OpCode::SExt { .. }

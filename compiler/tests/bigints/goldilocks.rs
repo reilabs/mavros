@@ -12,7 +12,7 @@ use mavros_compiler::compiler::{
     ssa::{
         ValueId,
         hlssa::{
-            BinaryArithOpKind, CastTarget, CmpKind, Endianness, Type,
+            BinaryArithOpKind, CmpKind, Endianness, Type,
             builder::{HLBlockEmitter, HLEmitter as _},
         },
     },
@@ -93,6 +93,33 @@ fn assert_returns(
 // FIELD ARITHMETIC
 // ================================================================================================
 
+/// Both field casts of a pure value agree with the model at every corner, around the field's 64
+/// bits, the host limbs and the four-limb packing, and far past them.
+#[test]
+fn pure_field_casts_agree_with_the_model_on_goldilocks() {
+    let widths = [1usize, 32, 63, 64, 65, 128, 129, 256, 257, 1000, 16384];
+    let compiled = Compiled::<Goldilocks>::compile(crate::pure_field_casts_program(
+        FieldConfig::goldilocks(),
+        &widths,
+    ))
+    .unwrap_or_else(|error| panic!("a pure field cast does not compile: {error}"));
+    let verdict = compiled.run(&crate::unconstrained_inputs_in::<Goldilocks>(0));
+    assert!(verdict.is_accepted(), "{verdict:?}");
+}
+
+/// A pure element's bit window reads its canonical integer, whose bytes number 8 here.
+#[test]
+fn pure_field_bit_windows_read_the_canonical_integer_on_goldilocks() {
+    let field = FieldConfig::goldilocks();
+    for window in crate::pure_field_windows(field) {
+        let compiled =
+            Compiled::<Goldilocks>::compile(crate::pure_field_window_program(field, window))
+                .unwrap_or_else(|error| panic!("the window {window:?} does not compile: {error}"));
+        let verdict = compiled.run(&crate::unconstrained_inputs_in::<Goldilocks>(0));
+        assert!(verdict.is_accepted(), "{window:?}: {verdict:?}");
+    }
+}
+
 /// `a op b` on witnessed field operands agrees with the field at every boundary pair, and a zero
 /// divisor is refused.
 #[test]
@@ -171,19 +198,6 @@ fn field_constants_fold_modulo_the_goldilocks_prime() {
         input(expected),
         input(expected + Goldilocks::ONE),
     );
-}
-
-/// A witnessed field element narrowed to an integer, in the shape the Noir frontend gives
-/// `x as uN` (a bit window, then the cast), decomposes the element at bn254's 128-bit halves, so
-/// the lowering refuses it on Goldilocks (Layer 6). This pins the refusal until a Goldilocks
-/// decomposition exists.
-#[test]
-#[should_panic(expected = "decomposes the element into two 128-bit halves")]
-fn a_witnessed_field_bit_window_is_refused_on_goldilocks() {
-    compile(&[Type::field()], &[Type::int(8)], |e, p| {
-        let window = e.bit_range(p[0], 0, 8);
-        vec![e.cast_to(CastTarget::Int(8), window)]
-    });
 }
 
 // INTEGER ARITHMETIC

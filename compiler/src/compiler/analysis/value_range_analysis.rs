@@ -381,21 +381,7 @@ impl ValueRangeAnalysis {
                 value,
                 target,
             } => {
-                let in_r = range(bounds, *value);
-                let r = match target {
-                    // Every numeric cast is a raw-bit operation: the LLSSA lowering zero-extends or
-                    // truncates, and the field target assembles the raw bits into limbs. None of
-                    // them sign-extends — `SExt` is the opcode that does that — so a negative `i8`
-                    // casts to `Field` as 255 rather than `p − 1`.
-                    CastTarget::Field => in_r.reinterpret_to(Width::Field(field)),
-                    CastTarget::Int(n) => in_r.reinterpret_to(Width::Bits(*n)),
-                    // ValueOf strips the WitnessOf wrapper: payload unchanged.
-                    CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,
-                    // Sequence-level casts carry no scalar range.
-                    CastTarget::ArrayToSlice | CastTarget::Map(_) => {
-                        ValueRange::full(Width::NonScalar)
-                    }
-                };
+                let r = cast_range(target, range(bounds, *value), field);
                 Self::set(bounds, refinements, *result, types, field, r, changed);
             }
 
@@ -2225,6 +2211,26 @@ fn next_pow2_minus_one(m: &BigInt) -> BigInt {
     }
 }
 
+/// The range of a `Cast` to `target` of a value in `in_r`.
+fn cast_range(target: &CastTarget, in_r: ValueRange, field: FieldConfig) -> ValueRange {
+    match target {
+        // Every numeric cast is a raw-bit operation: an integer target zero-extends or truncates,
+        // and the field target reduces modulo `p`. None of them sign-extends.
+        CastTarget::Field => in_r.reinterpret_to(Width::Field(field)),
+
+        // One element per limb, under one `Field` type, so no single range holds it.
+        CastTarget::FieldLimbs => ValueRange::full(Width::Field(field)),
+
+        CastTarget::Int(n) => in_r.reinterpret_to(Width::Bits(*n)),
+
+        // ValueOf strips the WitnessOf wrapper: payload unchanged.
+        CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,
+
+        // Sequence-level casts carry no scalar range.
+        CastTarget::ArrayToSlice | CastTarget::Map(_) => ValueRange::full(Width::NonScalar),
+    }
+}
+
 // TESTS
 // ================================================================================================
 
@@ -3888,5 +3894,73 @@ mod int_semantics_conformance {
             checked > 50_000,
             "the sweep only reached {checked} accepted executions"
         );
+    }
+
+    /// The cast transfer is sound for both field casts on both fields: every corner's answer lies
+    /// in both readings of the range the transfer gives its singleton, and the range across the
+    /// modulus, `[p - 1, p + 1]`, keeps all three residues.
+    #[test]
+    fn the_field_cast_transfer_is_sound_on_both_fields() {
+        use crate::compiler::util::test::{
+            FIELDS, canonical_of, element_of, model_field_to_int, model_int_to_field, modulus_of,
+        };
+
+        let as_bigint = |v: &num_bigint::BigUint| BigInt::from(v.clone());
+        // Both readings, the signed one at `bits`, or equal to the unsigned one at a field width.
+        let admits = |range: &ValueRange, v: &IntBits| {
+            let magnitude = as_bigint(&v.into());
+            range.unsigned().contains(&magnitude) && range.signed().contains(&v.to_signed())
+        };
+        let admits_element = |range: &ValueRange, magnitude: &BigInt| {
+            range.unsigned().contains(magnitude) && range.signed().contains(magnitude)
+        };
+
+        for field in FIELDS {
+            let p = modulus_of(field);
+            let k = field.field_bit_size() as usize;
+            for bits in corners::field_cast_widths(k) {
+                for pattern in corners::field_cast_patterns(bits, &p) {
+                    let input = ValueRange::from_unsigned(
+                        Width::Bits(bits),
+                        Interval::singleton(as_bigint(&(&pattern).into())),
+                    );
+                    let out = cast_range(&CastTarget::Field, input, field);
+                    let want = as_bigint(&canonical_of(&model_int_to_field(field, &pattern)));
+                    assert!(
+                        admits_element(&out, &want),
+                        "{field:?}: {pattern:?} as Field is {want}, outside {out:?}"
+                    );
+                }
+                for canonical in corners::field_cast_elements(&p) {
+                    let element = element_of(field, &canonical);
+                    let input = ValueRange::from_unsigned(
+                        Width::Field(field),
+                        Interval::singleton(as_bigint(&canonical)),
+                    );
+                    let want = model_field_to_int(field, &element, bits);
+                    let target = CastTarget::Int(bits);
+                    let out = cast_range(&target, input.clone(), field);
+                    assert!(
+                        admits(&out, &want),
+                        "{field:?}: {canonical} as {target} is {want:?}, outside {out:?}"
+                    );
+                }
+
+                if bits > k {
+                    let p = as_bigint(&p);
+                    let across = ValueRange::from_unsigned(
+                        Width::Bits(bits),
+                        Interval::closed(&p - 1, &p + 1),
+                    );
+                    let out = cast_range(&CastTarget::Field, across, field);
+                    for residue in [&p - 1, BigInt::zero(), BigInt::one()] {
+                        assert!(
+                            admits_element(&out, &residue),
+                            "{field:?}: [p - 1, p + 1] at {bits} bits loses {residue} in {out:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -8,6 +8,7 @@ use crate::compiler::{
     passes::{
         instruction_lowering::{InstructionLoweringRule, LoweringContext},
         shared::seq_bounds::seq_bounds_operands,
+        wide_witness_ints::multi_cell_int_bits,
     },
     ssa::{
         ValueId,
@@ -498,7 +499,15 @@ impl LowerWitnessArrayOps {
                 } else {
                     hint
                 };
-                let leaf_field = b.cast_to_field(leaf_pure);
+                // The injective image, so a lookup cannot match an integer to another that differs
+                // from it by the modulus.
+                let image = match stripped.expr {
+                    TypeExpr::Int(bits) if bits > multi_cell_int_bits(b.field()) => {
+                        CastTarget::FieldLimbs
+                    }
+                    _ => CastTarget::Field,
+                };
+                let leaf_field = b.cast_to(image, leaf_pure);
                 let leaf_wit = b.write_witness(leaf_field);
                 b.lookup_arr(arr, base_key, leaf_wit, flag);
                 let cast_target = scalar_cast_target(&stripped, "witnessed array read");

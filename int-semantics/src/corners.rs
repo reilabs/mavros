@@ -287,6 +287,154 @@ pub fn wide_operands(op: IntOp, bits: usize) -> (Vec<IntBits>, Vec<IntBits>) {
     (values, rhs)
 }
 
+// THE FIELD CAST CORNER SET
+// ================================================================================================
+//
+// Corners for the two casts across the field boundary, for a field given by its modulus. They sit
+// around the modulus and around the field's bit width `k`, where a reduction, a canonicity check
+// or a limb count is wrong, and around the host limbs and the 256 bits of a four-limb packing.
+
+/// The cast widths a field cast sweep covers, for a field of `field_bits` bits.
+///
+/// Narrow widths, the host-limb boundaries, `k - 1` to `k + 1`, either side of 256 bits, and
+/// widths far past any field, up to [`MAX_BITS`](crate::MAX_BITS).
+#[must_use]
+pub fn field_cast_widths(field_bits: usize) -> Vec<usize> {
+    assert!(field_bits >= 2, "a {field_bits}-bit modulus is no field's");
+    let mut out = vec![
+        1,
+        8,
+        32,
+        63,
+        64,
+        65,
+        127,
+        128,
+        129,
+        field_bits - 1,
+        field_bits,
+        field_bits + 1,
+        255,
+        256,
+        257,
+        1000,
+        crate::MAX_BITS,
+    ];
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Corner patterns for a `bits`-wide integer cast into the field with this `modulus`,
+/// deduplicated.
+///
+/// Each corner is taken modulo `2^bits`, so at a narrow width the ones built from the modulus are
+/// merely more patterns.
+#[must_use]
+pub fn field_cast_patterns(bits: usize, modulus: &BigUint) -> Vec<IntBits> {
+    assert!(
+        (1..=crate::MAX_BITS).contains(&bits),
+        "width {bits} is outside 1..={}",
+        crate::MAX_BITS
+    );
+    let one = BigUint::from(1u8);
+    let pow2 = |k: usize| &one << k;
+    let p = modulus;
+    let k = usize::try_from(p.bits()).expect("a modulus width fits a usize");
+
+    let mut out = vec![
+        BigUint::ZERO,
+        one.clone(),
+        BigUint::from(2u8),
+        p - 2u8,
+        p - 1u8,
+        p.clone(),
+        p + 1u8,
+        p * 2u8 - 1u8,
+        p * 2u8,
+        p * 2u8 + 1u8,
+        p * 3u8 - 1u8,
+        p * 3u8,
+        p * 3u8 + 1u8,
+        pow2(k - 1),
+        pow2(k) - 1u8,
+        pow2(k),
+        pow2(k) + 1u8,
+        pow2(k + 1) - 1u8,
+        pow2(HOST_LIMB_BITS) - 1u8,
+        pow2(HOST_LIMB_BITS),
+        pow2(2 * HOST_LIMB_BITS) - 1u8,
+        pow2(256) - 1u8,
+        pow2(256),
+        pow2(bits) - 1u8,
+    ];
+
+    // The largest multiple of the modulus the width holds, and the values either side of it, which
+    // reduce to `p - 1` and 1: a reduction that drops the top limb gets them wrong.
+    let top = pow2(bits) - 1u8;
+    let multiple = (&top / p) * p;
+    if multiple > BigUint::ZERO {
+        out.push(&multiple - 1u8);
+        if multiple < top {
+            out.push(&multiple + 1u8);
+        }
+        out.push(multiple);
+    }
+
+    // Alternating patterns, which every limb of a multi-limb reduction sees differently.
+    let limbs = IntBits::limbs_for_bits(bits);
+    for word in [0x5555_5555_5555_5555u64, 0xAAAA_AAAA_AAAA_AAAA] {
+        out.push(BigUint::from(&IntBits::from_limbs(
+            bits,
+            &vec![word; limbs],
+        )));
+    }
+
+    let mut out: Vec<BigUint> = out.into_iter().map(|v| v % pow2(bits)).collect();
+    out.sort_unstable();
+    out.dedup();
+    out.iter().map(|v| IntBits::from_biguint(bits, v)).collect()
+}
+
+/// Corner canonical representatives to cast out of the field with this `modulus`, sorted and
+/// deduplicated.
+///
+/// `p - 1`, the halves, and `2^j - 1` and `2^j` for every `j` at a host-limb boundary or just
+/// below the field's width, wherever they are below the modulus.
+#[must_use]
+pub fn field_cast_elements(modulus: &BigUint) -> Vec<BigUint> {
+    let one = BigUint::from(1u8);
+    let p = modulus;
+    assert!(*p >= BigUint::from(2u8), "modulus {p} is not a field's");
+    let k = usize::try_from(p.bits()).expect("a modulus width fits a usize");
+
+    let mut out = vec![
+        BigUint::ZERO,
+        one.clone(),
+        BigUint::from(2u8),
+        p - 1u8,
+        p - 2u8,
+        (p - 1u8) >> 1,
+        (p + 1u8) >> 1,
+    ];
+    for j in [1, 7, 8, 31, 32, 33, 63, 64, 65, 127, 128, 129, k - 2, k - 1] {
+        out.push((&one << j) - 1u8);
+        out.push(&one << j);
+    }
+    for word in [0x5555_5555_5555_5555u64, 0xAAAA_AAAA_AAAA_AAAA] {
+        let bits = k - 1;
+        out.push(BigUint::from(&IntBits::from_limbs(
+            bits,
+            &vec![word; IntBits::limbs_for_bits(bits)],
+        )));
+    }
+
+    out.retain(|v| v < p);
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Remove duplicates from a corner list, preserving order. Quadratic, as the lists are a few dozen
 /// entries and a pattern has no ordering to sort by.
 fn dedup_patterns(patterns: Vec<IntBits>) -> Vec<IntBits> {

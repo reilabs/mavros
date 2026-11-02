@@ -30,7 +30,7 @@ use crate::{
                 LookupTarget, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
             },
         },
-        util::{field_constant, host_word, ice_non_elided_tuple},
+        util::{field_constant, field_residue, host_word, ice_non_elided_tuple},
     },
 };
 
@@ -592,9 +592,9 @@ impl Value {
                 ice!("a cast to int0 describes a value with no bits")
             }
             (Value::Int(v), CastTarget::Int(s2)) => Value::Int(v.cast(*s2)),
-            // A pattern the field cannot carry has no element, so it is `Unknown`.
-            (Value::Int(v), CastTarget::Field) => field_constant(instrumenter.field(), v)
-                .map_or(Value::Unknown(ScalarKind::Field), Value::Field),
+            (Value::Int(v), CastTarget::Field) => {
+                Value::Field(field_residue(instrumenter.field(), v))
+            }
             (Value::Field(f), CastTarget::Field) => Value::Field(*f),
             (Value::Field(f), CastTarget::Int(s)) => {
                 Value::Int(IntBits::from_field_limbs(&f.into_bigint().0, *s))
@@ -2512,6 +2512,45 @@ mod tests {
                 checked > 1_000,
                 "only {checked} wide pairs of {kind:?} were checked"
             );
+        }
+    }
+
+    /// Both field casts answer the model at every corner on both fields, never `Unknown`: a cast
+    /// the cost interpreter cannot see through prices everything downstream of it as unknown.
+    #[test]
+    fn the_field_casts_delegate_to_the_model_on_both_fields() {
+        use crate::compiler::{
+            ssa::hlssa::CastTarget,
+            util::test::{FIELDS, element_of, model_field_to_int, model_int_to_field, modulus_of},
+        };
+
+        for field in FIELDS {
+            let mut dummy = DummyInstrumenter { field };
+            let p = modulus_of(field);
+            for bits in corners::field_cast_widths(field.field_bit_size() as usize) {
+                for pattern in corners::field_cast_patterns(bits, &p) {
+                    match Value::Int(pattern.clone()).cast_op(&CastTarget::Field, &mut dummy) {
+                        Value::Field(got) => assert_eq!(
+                            got,
+                            model_int_to_field(field, &pattern),
+                            "{field:?}: {pattern:?} as Field"
+                        ),
+                        other => panic!("{field:?}: {pattern:?} as Field gave {other:?}"),
+                    }
+                }
+                for canonical in corners::field_cast_elements(&p) {
+                    let element = element_of(field, &canonical);
+                    let target = CastTarget::Int(bits);
+                    match Value::Field(element).cast_op(&target, &mut dummy) {
+                        Value::Int(got) => assert_eq!(
+                            got,
+                            model_field_to_int(field, &element, bits),
+                            "{field:?}: {canonical} as {target}"
+                        ),
+                        other => panic!("{field:?}: {canonical} as {target} gave {other:?}"),
+                    }
+                }
+            }
         }
     }
 

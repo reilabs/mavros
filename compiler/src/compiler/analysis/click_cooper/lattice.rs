@@ -11,7 +11,7 @@ use crate::compiler::{
         ArithGroup, BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, MAX_SUPPORTED_INT_BITS,
         SliceOpDir, Type,
     },
-    util::field_constant,
+    util::{field_constant, field_residue},
 };
 
 // CONSTNESS
@@ -171,19 +171,22 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
 
 /// Folds a constant cast.
 ///
-/// HLSSA casts are raw-bits conversions (`SExt` is separate): an integer zero-extends into a field
-/// when every value of its type fits, a field truncates to its low bits, and an integer-to-integer
-/// cast zero-extends or truncates.
+/// HLSSA casts are raw-bits conversions (`SExt` is separate): an integer's unsigned reading reduces
+/// modulo the field's modulus, a field's canonical value truncates to its low bits or zero-extends,
+/// and an integer-to-integer cast zero-extends or truncates.
+///
+/// `FieldLimbs` is not one element, so it never folds.
 pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -> Option<Constant> {
     match target {
         CastTarget::Nop => Some(v.clone()),
         CastTarget::WitnessOf
         | CastTarget::ArrayToSlice
         | CastTarget::ValueOf
-        | CastTarget::Map(_) => None,
+        | CastTarget::Map(_)
+        | CastTarget::FieldLimbs => None,
         CastTarget::Field => match v {
             // FIELD-ASSUMPTION: L4-eval
-            Constant::Int(x) => field_constant(field, x).map(Constant::Field),
+            Constant::Int(x) => Some(Constant::Field(field_residue(field, x))),
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
         },
@@ -504,7 +507,7 @@ mod tests {
 
     /// The other half of the wide fold.
     #[test]
-    fn a_cast_to_field_is_bounded_by_the_modulus_and_not_by_a_host_word() {
+    fn a_cast_to_field_reduces_at_the_modulus_and_is_not_bounded_by_a_host_word() {
         let field = FieldConfig::bn254();
 
         // The widest pattern a host word holds folds, and folds to the right element.
@@ -525,16 +528,55 @@ mod tests {
             wide
         );
 
-        // At the modulus there is no element to answer, and the residue is not the value.
+        // At and past the modulus the answer is the residue: `2^256 - 1` is `2^256 - 1 - 5p`.
+        let top = IntBits::all_ones(256);
+        let residue = field.two_pow(256) - field.one();
         assert_eq!(
-            eval_cast(
-                &CastTarget::Field,
-                &Constant::Int(IntBits::all_ones(256)),
-                field
-            ),
-            None,
-            "a pattern at or above the modulus has no field constant this analysis may mint"
+            eval_cast(&CastTarget::Field, &Constant::Int(top), field),
+            Some(Constant::Field(residue))
         );
+
+        // The injective image is one element per limb, which no constant holds.
+        assert_eq!(
+            eval_cast(&CastTarget::FieldLimbs, &Constant::int(8, 1), field),
+            None
+        );
+    }
+
+    /// Both field casts are total, so the folder answers every corner on both fields, with the
+    /// model's answer.
+    #[test]
+    fn the_field_casts_fold_to_the_reference_model_on_both_fields() {
+        use crate::compiler::util::test::{
+            FIELDS, element_of, model_field_to_int, model_int_to_field, modulus_of,
+        };
+
+        for field in FIELDS {
+            let p = modulus_of(field);
+            let widths = corners::field_cast_widths(field.field_bit_size() as usize);
+            let mut checked = 0usize;
+            for &bits in &widths {
+                for pattern in corners::field_cast_patterns(bits, &p) {
+                    assert_eq!(
+                        eval_cast(&CastTarget::Field, &Constant::Int(pattern.clone()), field),
+                        Some(Constant::Field(model_int_to_field(field, &pattern))),
+                        "{field:?}: {pattern:?} as Field"
+                    );
+                    checked += 1;
+                }
+                for canonical in corners::field_cast_elements(&p) {
+                    let element = element_of(field, &canonical);
+                    let target = CastTarget::Int(bits);
+                    assert_eq!(
+                        eval_cast(&target, &Constant::Field(element), field),
+                        Some(Constant::Int(model_field_to_int(field, &element, bits))),
+                        "{field:?}: {canonical} as {target}"
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 500, "only {checked} casts on {field:?}");
+        }
     }
 
     /// Every arithmetic group, so a new one is a compile error here rather than a silent gap in

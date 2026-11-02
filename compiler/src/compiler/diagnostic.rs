@@ -280,25 +280,25 @@ mod tests {
 
     #[test]
     fn a_diagnostic_draws_carets_under_its_span() {
-        let source = "fn main() {\n    let f = wide as Field;\n}\n";
-        let (file, location) = located(source, "wide as Field");
+        let source = "fn main() {\n    let f = wide * wide;\n}\n";
+        let (file, location) = located(source, "wide * wide");
         let path = file.path().to_string_lossy().to_string();
 
-        let rendered = Diagnostic::error("an int254 cannot be cast to Field", location)
-            .with_label("2^254 exceeds the bn254 modulus")
-            .with_note("the widest integer this field carries injectively is int253")
+        let rendered = Diagnostic::error("wide multiplication is not supported", location)
+            .with_label("this operand is int1000")
+            .with_note("support arrives with the wide arithmetic lowering")
             .to_string();
 
         assert_eq!(
             rendered,
             format!(
-                "error: an int254 cannot be cast to Field\n  \
+                "error: wide multiplication is not supported\n  \
                  --> {path}:2:13\n  \
                  |\n\
-                 2 |     let f = wide as Field;\n  \
-                 |             ^^^^^^^^^^^^^ 2^254 exceeds the bn254 modulus\n  \
+                 2 |     let f = wide * wide;\n  \
+                 |             ^^^^^^^^^^^ this operand is int1000\n  \
                  |\n  \
-                 = note: the widest integer this field carries injectively is int253\n\n"
+                 = note: support arrives with the wide arithmetic lowering\n\n"
             )
         );
     }
