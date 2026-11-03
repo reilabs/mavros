@@ -217,7 +217,7 @@ impl std::fmt::Display for Error {
             }
             Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
             Error::Toolchain(error) => write!(f, "{error}"),
-            Error::PassFailed(diagnostics) => write!(f, "{}", diagnostic::render_all(diagnostics))
+            Error::PassFailed(diagnostics) => write!(f, "{}", diagnostic::render_all(diagnostics)),
         }
     }
 }
