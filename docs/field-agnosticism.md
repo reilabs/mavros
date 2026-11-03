@@ -114,10 +114,12 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
 
 Goldilocks is tested through hand-built SSA (`compiler/tests/bigints/goldilocks.rs`): field
 arithmetic, equality and constant folding at the field's boundary values, a witnessed 64-bit
-decomposition, and the integer operations of Phase 5b. Two gaps refuse through the `unsupported`
-funnel: a witnessed `Field` bit window (`x as uN`), whose canonical decomposition is bn254's, and an
-integer entry parameter wider than 63 bits, since an `Int` entry parameter is one entry-blob
-element.
+decomposition, the integer operations of Phase 5b, and the pure casts across the field boundary; the
+witnessed casts run on both fields in `compiler/tests/bigints/main.rs`. One gap refuses through the
+`unsupported` funnel: an integer entry parameter wider than 63 bits, since an `Int` entry parameter
+is one entry-blob element. An integer return that wide is not refused: it is bound as its residue
+modulo `p` in one public column, so two returns one modulus apart publish the same value, and the
+published value can be one the program's assertions on the integer exclude.
 
 **Phase 5b (integer arithmetic on Goldilocks):** the witness limb is the widest power of two `h`
 whose limb product is an injective integer, `2h <= widest_injective_int_bits`
@@ -141,21 +143,36 @@ shared multiplicities, so the pre-commitment witness is unchanged. bn254 keeps `
 byte-identical constraints and witnesses; the artifact's witness layout and the VM header both carry
 `K`. The layout is under `L4-logup-challenges` below.
 
+**Cast semantics:** an HLSSA cast across the field boundary is total on every field, but for the
+bare witnessed narrowing below. `Int(n) → Field` reduces the integer modulo `p`, and
+`Field → Int(n)` truncates or zero-extends the element's canonical value (`docs/int-semantics.md`,
+"Field Casts"). Mavros refuses no cast into `Field`; Noir's elaborator refuses a non-injective
+`uN as Field` in Noir source. The SCCP folder and the specializer through it, the cost interpreter,
+the value ranges, R1CS generation and the VM are checked against the `mavros-int-semantics` model on
+both fields, and LLVM and the WASM runtime on bn254. On a witness:
+
+- a wide integer's single residue is its limb sum, and the injective image a lookup needs is a
+  separate cast target, `FieldLimbs`, of one element per limb;
+- a witnessed `Field`'s bit window (`x as uN`) decomposes the element into its canonical bytes,
+  `B = ⌈k/8⌉` of them for a `k`-bit modulus, and compares them against `p − 1` in two halves split
+  at `8·⌈B/2⌉` bits (128 on bn254, 32 on Goldilocks);
+- a bare witnessed narrowing `Field → Int(n)`, with no window in front, relabels the element, so its
+  emitter owes the bound (`L1-noir-frontend`).
+
+bn254's constraints, witnesses and bytecode are byte-identical, except where a witnessed `Field`'s
+bit window starts or ends inside a byte: the split of that byte checks its low part too, one more
+8-bit lookup, since the two gap checks alone let the prover push it negative.
+
 The rest of Phase 5 is open:
 
-- **A witnessed `Field`'s bit window** (`L3-felt-limbs`): a decomposition against the configured
-  modulus in `bit_range.rs::lower_witness_field_bit_range`.
 - **Integer entry parameters wider than 63 bits** (`prepare_entry_point.rs`): parameters assembled
   from ABI limbs.
+- **Integer returns wider than 63 bits** (`prepare_entry_point.rs::bind_return_deep`): bound as
+  their residue modulo `p`, which publishes `v` and `v + p` alike, so a value the program's
+  assertions on the integer exclude can be published. Noir refuses such an entry point, nested types
+  included, so only a hand-built HLSSA program reaches this.
 - **The Noir path** (`L1-noir-frontend`): remaining field-specific builtins and BN254-only crypto
   implementations.
-- **Cast semantics** (`analysis/types.rs::check_casts_into_field`, which is to be removed): the
-  frontend refuses a non-injective `Int → Field` cast, and HLSSA defines `Int → Field` as reduction
-  modulo `p` and `Field → Int` as truncation or zero-extension of the canonical value. Every
-  evaluator (the VM, `hlssa_to_r1cs`, the symbolic evaluators, WASM and `WideWitnessInts`' limb
-  casts) must implement exactly these semantics, and the witness lowering of a reducing cast of a
-  wide witnessed integer needs dedicated constraints. This subsumes the bare
-  `cast WitnessOf(Field) -> Int(n)` item under `L1-noir-frontend`.
 - **A Goldilocks WASM runtime** (`L3-llstruct`, the `[4 x i64]` runtime ABI, `field_runtime!`), with
   repeated LogUp: a Goldilocks lookup argument needs `K = 3` or 4, and the LLVM and WASM paths
   refuse `K > 1` (`Error::WasmLogupRepetitionsUnsupported`) because the LLSSA AD emitters
@@ -186,7 +203,7 @@ Repetitive clusters of the same operation get one marker per file with a count.
 Completion gate (Phase 5):
 `rg -t rust 'ark_bn254|into_bigint\(|\.0\.0|FELT_LIMBS|FIELD_SIZE|\b254\b'` over
 `compiler/ vm/ mavros-artifacts/ opcode-gen/ wasm-runtime/` returns only façade-internal hits. The
-gate is open: the search returns 158 lines, 43 of them in `compiler/tests/`.
+gate is open: the search returns 162 lines, 44 of them in `compiler/tests/`.
 
 ---
 
@@ -284,10 +301,12 @@ before conversion to the chosen VM field.
       the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and retains
       the packed spread implementation on BN254. BLAKE's small-field additions likewise use integer
       carries, avoiding native-field bit decomposition. AES is shared.
-- [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is unsatisfiable
-      for a value at or above `2^n`, on every field: `LowerWitnessNarrowingCast` windows an `Int`
-      source only, and a `Field` source relies on the frontend emitting `bit_range(v, 0, n)` before
-      the cast, which it always does.
+- [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is a relabel, on
+      every field: `LowerWitnessNarrowingCast` windows an `Int` source only. The constraints carry
+      the whole element while the witness generator truncates it, so an honest witness of a value at
+      or above `2^n` is unsatisfiable, and a dishonest one is bound only by what the program checks.
+      The frontend puts `bit_range(v, 0, n)` before Noir's `x as uN`; `unsafe_cast` emits the bare
+      cast and leaves the bound to its caller.
 
 ---
 
@@ -336,9 +355,10 @@ before conversion to the chosen VM field.
       `cells <= F::CANONICAL_LIMBS`; `codegen::bytecode::lookup_elem_kind` asserts the matching
       bound where the cell count is chosen.
 - [ ] `compiler/src/compiler/passes/instruction_lowering/bit_range.rs` —
-      `decompose_canonical_field_bytes` assumes 32 bytes / four 64-bit limbs / a 2×128-bit modulus
-      split. Its modulus _values_ are now read from `FieldConfig` (see `L4-modulus-literal`); only
-      this shape is left, and it needs a per-field-width canonicalization.
+      `decompose_canonical_field_bytes` reads the modulus through its four-limb `BigInt` and holds
+      each half in a `u128`, so the field fits 256 bits. Its shape already follows the modulus
+      (`CanonicalBytes`: `⌈k/8⌉` bytes, split at `8·⌈bytes/2⌉` bits, which needs `p > 2^(split+1)`),
+      so a witnessed `Field`'s bit window works on Goldilocks.
 - [ ] `compiler/src/compiler/util.rs` — `field_constant` builds a `[u64; 4]` because
       `FieldConfig::from_bigint` takes an `ark_ff::BigInt<4>`. The count moves with that signature,
       and the width bound it computes then becomes the per-value question it already asks.
@@ -436,7 +456,9 @@ No literal field width remains in the tree; every one of these reads `field_bit_
 Each does add/sub/mul/div/inverse/eq/lt/cast/to_bits over the concrete field. All four evaluators
 hold a `FieldConfig` and mint/compare through it (`field.zero()`, `field.constant(..)`,
 `field.from_bigint(..)`); their arithmetic runs on `FieldElement`, which follows the configured
-field. What each assumes about the field's _width_ is tracked under `L4-decompose`.
+field. What each assumes about the field's _width_ is tracked under `L4-decompose`. Their casts
+across the field boundary answer the integer model's `int_to_field` and `field_to_int` on both
+fields, which the `mavros-int-semantics` register checks.
 
 - [x] `compiler/src/compiler/analysis/click_cooper/lattice.rs` — SCCP
       `eval_binary`/`eval_cmp`/`eval_cast` (shared by click_cooper/SCS/PRE) take a `FieldConfig`,
@@ -470,16 +492,16 @@ are instantiated over.
 
 ### `L4-decompose` — Bit/Byte Decomposition & Range Reasoning (Representation + Modulus, P5)
 
-- [ ] `compiler/src/compiler/passes/specializer.rs:392-408,565-576` — `to_bits` const-fold
+- [ ] `compiler/src/compiler/passes/specializer.rs:400-412` — `to_bits` const-fold
       (`into_bigint().to_bits_le()`).
-- [ ] `compiler/src/compiler/passes/specializer.rs:477-479,518-524` — field `bit_range`/cast reads
-      low limb `f.into_bigint().as_ref()[0]`.
-- [ ] `compiler/src/compiler/analysis/instrumenter.rs:604-630,830-917` —
+- [x] `compiler/src/compiler/passes/specializer.rs` — a field `bit_range` or cast folds through
+      `lattice::eval_bit_range`/`eval_cast`, so it is the lattice's item below.
+- [ ] `compiler/src/compiler/analysis/instrumenter.rs:487-515,636-728` —
       `bit_range_op`/`to_bits`/`to_radix`.
 - [ ] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` — the constant reads of a `Value`'s canonical
       integer, `bit_range`/`to_bits`/`rangecheck`/`to_radix`, and the pow2 table's widest row.
 - [ ] `compiler/src/compiler/analysis/click_cooper/lattice.rs` — the field constant's canonical
-      integer in the cast and bit-range folds.
+      integer in the bit-range fold. The cast fold is checked against the model on both fields.
 - [ ] `compiler/src/compiler/passes/instruction_lowering/witness_field.rs` — `lower_to_bits` and
       `lower_to_radix` (the radix-256 byte path).
 - [ ] `compiler/src/compiler/passes/instruction_lowering/integer_digits.rs` — the byte chunk the
@@ -512,12 +534,10 @@ reading the canonical integer would convert out of Montgomery form and corrupt t
 ### `L4-modulus-literal` — Literal Prime Digits (Hardcoded, P5)
 
 - [x] `compiler/src/compiler/passes/instruction_lowering/bit_range.rs` —
-      `decompose_canonical_field_bytes` no longer writes any prime digits: all four constants
-      (`modulus_hi`, `modulus_lo_m1`, and the `mod_limb2`/`mod_limb3` comparison limbs) are derived
-      from `b.field().modulus_limbs()`. **No literal prime remains anywhere in the middle-end.** The
-      residual is structural — 32 bytes / four 64-bit limbs / a 2×128-bit modulus split — and is
-      tracked as `L3-felt-limbs` (which is what the inline marker on that function now says); it
-      becomes a per-field-width canonicalization in P5.
+      `decompose_canonical_field_bytes` writes no prime digits: its constants (`modulus_hi`,
+      `modulus_lo_m1`, and the `mod_limbs` the borrow's hint compares) are derived from
+      `b.field().modulus()`. **No literal prime remains anywhere in the middle-end.** The byte count
+      and split follow the modulus too (`L3-felt-limbs`).
 
 ### `L4-modulus-query` — Modulus/Width derived from the type (Type-Parametric, P3 done / width P5)
 
@@ -717,10 +737,9 @@ of this register.
 The call sites: `witness_bitwise`'s `lower_word_bitwise` (spread width); `witness_integer_arith`'s
 `lower_unsigned_mul` (both the single-field product and the two-limb packing, the latter covering
 the limb _count_ as well as the packing); `shared/limbs.rs`'s `combine_limbs_of_value` (the
-recombination); `witness_field`'s `to_bits` and `to_radix`; `bit_range`'s
-`lower_witness_field_bit_range` (the canonical decomposition at 128-bit halves, which Noir's
-`x as uN` on a witnessed `Field` reaches); and `wide_witness_ints`' `schoolbook` (the product and
-the division).
+recombination); `witness_field`'s `to_bits` and `to_radix`; `wide_witness_ints`' `schoolbook` (the
+product and the division); and `prepare_entry_point`'s integer entry parameter wider than the
+injective width.
 
 One kind of neighboring check deliberately stays out: an internal invariant no field choice can
 violate (`bit_range`'s "a field `BitRange` cannot exceed a field element").

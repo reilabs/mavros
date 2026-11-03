@@ -29,6 +29,8 @@ tracing.workspace = true
 # `int_limbs.rs` and `interpreter.rs`.
 # A dev-dependency rather than a real one: the VM computes, it does not consult a spec at runtime.
 mavros-int-semantics.workspace = true
+# The field-cast conformance test hands the model its modulus as a `BigUint`.
+num-bigint.workspace = true
 serde_json = { version = "1.0" }
 
 [lints]

@@ -384,16 +384,16 @@ fn plan_function(
     // do not identify.
     //
     // A witness-indexed array read moves its element through a field element: the lowering reads
-    // the hint, strips it to the pure domain, casts that to `Field`, writes it as a witness, pins
-    // it with `constrain_lookup`, and casts back to the element's width. Only the first and last
-    // of those are typed as the wide integer. The middle ones are a pure `int`, a `Field` and a
-    // `WitnessOf(Field)`, each of which `limb_types` treats as a single value, as it is everywhere
-    // else.
+    // the hint, strips it to the pure domain, casts that to `FieldLimbs`, writes it as a witness,
+    // pins it with `constrain_lookup`, and casts back to the element's width. Only the first and
+    // last of those are typed as the wide integer. The middle ones are a pure `int`, a `Field` and
+    // a `WitnessOf(Field)`, each of which `limb_types` treats as a single value, as it is
+    // everywhere else.
     //
     // So the expansion is propagated, to a fixed point, along the instructions that carry a value
     // without reading it. This is sound, not a heuristic: a value the modulus cannot carry has no
-    // single field element **in either domain**, so its field image is one element per limb
-    // whether stripped or not; and every step below preserves the value.
+    // single injective field element **in either domain**, so its injective image is one element
+    // per limb whether stripped or not; and every step below preserves the value.
     let expansion = |map: &HashMap<ValueId, Vec<ValueId>>, value: ValueId| -> usize {
         map.get(&value).map_or(1, Vec::len)
     };
@@ -402,11 +402,12 @@ fn plan_function(
         for bid in reachable {
             for instr in func.get_block(*bid).get_instructions() {
                 let (result, count) = match instr {
-                    // The field image of a wide integer, pure or witnessed.
+                    // The injective field image of a wide integer, pure or witnessed. A `Field`
+                    // cast is one element, the residue.
                     OpCode::Cast {
                         result,
                         value,
-                        target: CastTarget::Field,
+                        target: CastTarget::FieldLimbs,
                     } => {
                         let Some(bits) = fti
                             .get_value_type(*value)
@@ -931,13 +932,11 @@ impl Rewriter<'_> {
             fields.push(limb_field);
         }
 
-        let mut sum = fields[0];
-        for (index, limb_field) in fields.iter().enumerate().skip(1) {
-            let place = self.place_value(index);
-            let scaled = self.bin(BinaryArithOpKind::UMul, *limb_field, place);
-            sum = self.bin(BinaryArithOpKind::UAdd, sum, scaled);
+        let mut sum = None;
+        for (index, limb_field) in fields.iter().enumerate() {
+            sum = Some(self.add_at_place(sum, *limb_field, index));
         }
-        (limbs, sum)
+        (limbs, sum.expect("an integer has at least one limb"))
     }
 
     /// A witnessed field element read as an integer of `to_bits` held as limbs, into `results`.
@@ -1085,21 +1084,36 @@ impl Rewriter<'_> {
             }
 
             let limb_field = self.cast(limb, CastTarget::Field);
-            let scaled = if index == 0 {
-                limb_field
-            } else {
-                let place = self.place_value(index);
-                self.bin(BinaryArithOpKind::UMul, limb_field, place)
-            };
-
-            sum = Some(match sum {
-                None => scaled,
-                Some(acc) => self.bin(BinaryArithOpKind::UAdd, acc, scaled),
-            });
+            sum = Some(self.add_at_place(sum, limb_field, index));
         }
 
         let sum = sum.expect("an integer has at least one limb");
         self.cast(sum, CastTarget::Int(bits))
+    }
+
+    /// `sum + element · 2^(h·index)` in one field element.
+    fn add_at_place(&mut self, sum: Option<ValueId>, element: ValueId, index: usize) -> ValueId {
+        let scaled = if index == 0 {
+            element
+        } else {
+            let place = self.place_value(index);
+            self.bin(BinaryArithOpKind::UMul, element, place)
+        };
+        match sum {
+            None => scaled,
+            Some(acc) => self.bin(BinaryArithOpKind::UAdd, acc, scaled),
+        }
+    }
+
+    /// `Σ limbᵢ · 2^(h·i)` in one field element: the integer the limbs spell, reduced modulo the
+    /// field's modulus.
+    fn limb_sum(&mut self, limbs: &[ValueId]) -> ValueId {
+        let mut sum = None;
+        for (index, limb) in limbs.iter().enumerate() {
+            let limb_field = self.cast(*limb, CastTarget::Field);
+            sum = Some(self.add_at_place(sum, limb_field, index));
+        }
+        sum.expect("an integer has at least one limb")
     }
 
     /// Pure limbs shifted into place and or-ed together, as one pure value of `bits`.
@@ -5052,10 +5066,10 @@ impl Rewriter<'_> {
                 }
             }
 
-            // A wide value's field image is one element per limb; the array lowering's lookup
-            // chain moves it through a field. Each limb is already held to its width, so each is
-            // an element.
-            CastTarget::Field => {
+            // A wide value's injective field image is one element per limb; the array lowering's
+            // lookup chain moves it through a field. Each limb is already held to its width, so
+            // each is an element.
+            CastTarget::FieldLimbs => {
                 let results = self.limbs(result);
                 let limbs = self.operand_limbs(value, results.len());
                 for (result, limb) in results.into_iter().zip(limbs) {
@@ -5065,6 +5079,19 @@ impl Rewriter<'_> {
                         target: CastTarget::Field,
                     });
                 }
+            }
+
+            // A wide witnessed value's residue: its limbs at their place values, summed in one
+            // element. Each limb is held to its width, so the sum is the integer reduced modulo
+            // the field's modulus, and as a linear combination of pinned limbs it is pinned.
+            CastTarget::Field => {
+                let limbs = self.limbs(value);
+                let sum = self.limb_sum(&limbs);
+                self.push(OpCode::Cast {
+                    result,
+                    value: sum,
+                    target: CastTarget::Nop,
+                });
             }
 
             // A whole sequence entering the representation: `k` sequences out, each holding one

@@ -133,7 +133,7 @@ macro_rules! field_runtime {
             unsafe { write_field(result_ptr, a * b) };
         }
 
-        /// Canonical limbs to Montgomery storage. Panics on limbs not less than the modulus.
+        /// A four-limb integer to Montgomery storage, reduced modulo the modulus.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $from_limbs(
             result_ptr: *mut u64,
@@ -142,9 +142,17 @@ macro_rules! field_runtime {
             a2: i64,
             a3: i64,
         ) {
-            use ark_ff::PrimeField;
-            let bigint = ark_ff::BigInt::new([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
-            let fr = <$field>::from_bigint(bigint).expect("Constructing a field from limbs failed");
+            use ark_ff::{BigInteger, PrimeField};
+
+            // A modulus of at least `2^252` leaves at most 15 subtractions below.
+            const { assert!(<$field>::MODULUS.0[3] >> 60 != 0) };
+
+            let mut value = ark_ff::BigInt::new([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
+            while value >= <$field>::MODULUS {
+                value.sub_with_borrow(&<$field>::MODULUS);
+            }
+
+            let fr = <$field>::from_bigint(value).expect("the value was reduced below the modulus");
             unsafe { write_field(result_ptr, fr) };
         }
 
@@ -941,6 +949,53 @@ mod int_semantics_conformance {
         );
     }
 
+    /// The bn254 limb conversions, which both field casts lower through, answer the model at every
+    /// corner the four-limb packing holds: `from_limbs` reduces, and `to_limbs` gives the canonical
+    /// value, which the lowering then truncates or zero-extends.
+    #[test]
+    fn the_helper_field_conversions_agree_with_the_model() {
+        use ark_ff::PrimeField;
+        use num_bigint::BigUint;
+
+        type Fr = ark_bn254::Fr;
+        let modulus = BigUint::from(Fr::MODULUS);
+        let packing = 4 * HOST_LIMB_BITS;
+        let field_bits = usize::try_from(modulus.bits()).expect("a modulus width fits a usize");
+        let storage = |canonical: &BigUint| Fr::from(canonical.clone()).0.0;
+
+        let mut checked = 0usize;
+        for bits in corners::field_cast_widths(field_bits) {
+            if bits > packing {
+                continue;
+            }
+            for pattern in corners::field_cast_patterns(bits, &modulus) {
+                let mut limbs = [0u64; 4];
+                limbs[..pattern.limb_count()].copy_from_slice(pattern.limbs());
+                let [l0, l1, l2, l3] = limbs.map(|limb| limb as i64);
+                let mut out = [0u64; 4];
+                unsafe { super::__field_from_limbs(out.as_mut_ptr(), l0, l1, l2, l3) };
+                assert_eq!(
+                    out,
+                    storage(&mavros_int_semantics::int_to_field(&pattern, &modulus)),
+                    "__field_from_limbs of {pattern:?}"
+                );
+                checked += 1;
+            }
+        }
+        for canonical in corners::field_cast_elements(&modulus) {
+            let [l0, l1, l2, l3] = storage(&canonical).map(|limb| limb as i64);
+            let mut out = [0u64; 4];
+            unsafe { super::__field_to_limbs(out.as_mut_ptr(), l0, l1, l2, l3) };
+            assert_eq!(
+                IntBits::from_limbs(packing, &out),
+                mavros_int_semantics::field_to_int(&canonical, &modulus, packing),
+                "__field_to_limbs of {canonical}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "only {checked} conversions were checked");
+    }
+
     #[test]
     fn the_helper_multiply_agrees_with_the_model() {
         let mut checked = 0usize;
@@ -1081,8 +1136,7 @@ mod int_semantics_conformance {
 }
 
 /// The bn254 field entry points against arkworks, through the storage-limb ABI codegen calls them
-/// with. A panic cannot unwind out of an `extern "C"` function, so `from_limbs`' refusal of an
-/// out-of-range integer aborts the process and has no `should_panic` test here.
+/// with.
 #[cfg(test)]
 mod field_entry_points {
     use ark_bn254::Fr;

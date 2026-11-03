@@ -1202,6 +1202,10 @@ fn lower_instruction(
             let ll_value = val_map[value];
             let source_type = fn_type_info.get_value_type(*value);
             let result_type = fn_type_info.get_value_type(*result);
+            // Ahead of the witness-to-witness no-op below, which would let one through.
+            if matches!(target, CastTarget::FieldLimbs) {
+                ice!("{target} cast should have been lowered by WideWitnessInts");
+            }
             if source_type.is_witness_of()
                 && result_type.is_witness_of()
                 && !matches!(target, CastTarget::WitnessOf)
@@ -1224,10 +1228,7 @@ fn lower_instruction(
                             HLTypeExpr::Int(bits) => *bits,
                             _ => ice!("Cast to Field from unsupported type: {}", source_type),
                         };
-                        let limb_values = int_to_raw_limbs(e, ll_value, source_bits);
-                        let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
-                        // FIELD-ASSUMPTION: L3-limb-op (6 sites)
-                        let field_val = e.field_from_limbs(limbs);
+                        let field_val = cast_int_to_field(e, ll_value, source_bits);
                         val_map.insert(*result, field_val);
                     }
                 }
@@ -1238,7 +1239,7 @@ fn lower_instruction(
                             // truncated to its width. The reading is the element's magnitude, so
                             // this agrees with the constant folders, which read the same limbs
                             // through `IntBits::from_field_limbs`.
-                            // FIELD-ASSUMPTION: L3-limb-op (6 sites)
+                            // FIELD-ASSUMPTION: L3-limb-op (5 sites)
                             let limbs = e.field_to_limbs(ll_value);
                             int_from_raw_limbs(e, limbs, *target_bits)
                         }
@@ -1277,6 +1278,7 @@ fn lower_instruction(
                         target
                     );
                 }
+                CastTarget::FieldLimbs => ice_unreachable!("refused above"),
             }
         }
 
@@ -2374,6 +2376,45 @@ fn int_to_raw_limbs(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> 
         .collect()
 }
 
+/// A `bits`-wide integer as a field element, its unsigned reading reduced modulo the modulus.
+///
+/// The runtime's `from_limbs` reduces one packing's worth, so a wider integer is folded from the
+/// top a packing at a time, `acc · 2^256 + chunk`.
+fn cast_int_to_field(e: &mut LLBlockEmitter<'_>, value: ValueId, bits: usize) -> ValueId {
+    let packed = |e: &mut LLBlockEmitter<'_>, chunk: ValueId, chunk_bits: usize| {
+        let limb_values = int_to_raw_limbs(e, chunk, chunk_bits);
+        let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
+        // FIELD-ASSUMPTION: L3-limb-op (5 sites)
+        e.field_from_limbs(limbs)
+    };
+    if bits <= INT_TO_FIELD_MAX_BITS {
+        return packed(e, value, bits);
+    }
+
+    let base = Constant::Field(e.ssa.field().two_pow(INT_TO_FIELD_MAX_BITS));
+    let base = e.emit_constant(lower_constant_to_ll_constant(&base));
+    let mut acc = None;
+    for offset in (0..bits).step_by(INT_TO_FIELD_MAX_BITS).rev() {
+        let chunk_bits = (bits - offset).min(INT_TO_FIELD_MAX_BITS);
+        let shifted = if offset == 0 {
+            value
+        } else {
+            let amount = e.emit_int_const(bits as u32, offset as u64);
+            e.int_arith(IntArithOp::UShr, value, amount)
+        };
+        let chunk = e.truncate(shifted, chunk_bits as u32);
+        let chunk = packed(e, chunk, chunk_bits);
+        acc = Some(match acc {
+            None => chunk,
+            Some(acc) => {
+                let scaled = e.field_arith(FieldArithOp::Mul, acc, base);
+                e.field_arith(FieldArithOp::Add, scaled, chunk)
+            }
+        });
+    }
+    acc.expect("a width past the packing has at least two chunks")
+}
+
 /// A `bits`-wide integer read out of the raw little-endian limbs of a field element. A target
 /// wider than [`INT_TO_FIELD_MAX_BITS`] is zero-filled above them; the element has no bits there.
 fn int_from_raw_limbs(e: &mut LLBlockEmitter<'_>, limbs: ValueId, bits: usize) -> ValueId {
@@ -2399,9 +2440,7 @@ fn int_from_raw_limbs(e: &mut LLBlockEmitter<'_>, limbs: ValueId, bits: usize) -
     combined
 }
 
-/// Ensure a value is Field-sized, with non-field integer types packed into raw little-endian limbs.
-///
-/// Bounded by [`INT_TO_FIELD_MAX_BITS`]; a wider source is refused by [`int_to_raw_limbs`].
+/// Ensure a value is Field-sized, with non-field integer types cast into the field.
 fn ensure_field_sized(
     e: &mut LLBlockEmitter<'_>,
     ll_val: ValueId,
@@ -2413,10 +2452,7 @@ fn ensure_field_sized(
     let HLTypeExpr::Int(bits) = &source_type.expr else {
         ice!("ensure_field_sized: unsupported type: {}", source_type)
     };
-    let limb_values = int_to_raw_limbs(e, ll_val, *bits);
-    // FIELD-ASSUMPTION: L3-limb-op
-    let limbs = e.mk_struct(LLStruct::limbs(), limb_values);
-    e.field_from_limbs(limbs)
+    cast_int_to_field(e, ll_val, *bits)
 }
 
 /// Allocate an ADConstNode wrapping a pure field value.

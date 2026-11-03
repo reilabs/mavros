@@ -134,10 +134,9 @@ impl LowerWitnessAssertOps {
     ) {
         let lhs_type = context.types().get_value_type(lhs);
         let rhs_type = context.types().get_value_type(rhs);
-        // A pure integer wider than the field carries has no field image, so two of them are
-        // compared as integers and the answer asserted. Only a guarded assertion reaches here with
-        // both operands pure. A witnessed one is limbs, which has already been lowered before this
-        // pass.
+        // A pure integer wider than the field carries has no injective field image, so two of them
+        // are compared as integers with the answer asserted. Only a guarded assertion reaches here
+        // with both operands pure. A witnessed one is limbs, and has already been lowered by now.
         if !lhs_type.is_witness_of()
             && !rhs_type.is_witness_of()
             && matches!(lhs_type.expr, TypeExpr::Int(bits) if bits > widest_injective_int_bits(b.field()))
