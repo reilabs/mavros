@@ -9,7 +9,7 @@
 //! The standalone pass handles source bit decompositions. The frontend emits dynamic radices
 //! for byte decompositions, whose fit checks are emitted by the radix lowerer after validation.
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 use crate::compiler::ssa::{
     ValueId,
     hlssa::{
@@ -30,19 +30,19 @@ impl InstructionLoweringRule for LowerPureBitDecompositions {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (op, guard) = match instruction {
             OpCode::Guard { condition, inner } => (inner.as_ref(), Some(*condition)),
             op => (op, None),
         };
         let OpCode::ToBits { value, count, .. } = op else {
-            return false;
+            return Ok(false);
         };
         if !emit_fit_check(b, context, guard, *value, *count) {
-            return false;
+            return Ok(false);
         }
         b.emit(instruction.clone());
-        true
+        Ok(true)
     }
 }
 

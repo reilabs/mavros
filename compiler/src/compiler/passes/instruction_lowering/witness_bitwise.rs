@@ -14,7 +14,7 @@ use crate::compiler::{
     },
     passes::{
         instruction_lowering::{
-            InstructionLoweringRule, LoweringContext, integer_bits,
+            InstructionLoweringRule, LoweringContext, LoweringResult, integer_bits,
             witness_integer_arith::guarded_or_zero_field,
         },
         shared::{
@@ -52,12 +52,12 @@ impl InstructionLoweringRule for LowerWitnessBitwiseOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
+    ) -> LoweringResult {
+        Ok(if let OpCode::Guard { condition, inner } = instruction {
             self.process_guarded_shift(b, context, *condition, inner.as_ref())
         } else {
             self.process_op(b, context, instruction)
-        }
+        })
     }
 }
 

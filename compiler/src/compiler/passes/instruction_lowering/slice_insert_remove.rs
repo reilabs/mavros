@@ -5,7 +5,7 @@ use crate::compiler::{
     analysis::types::push_witness_of_to_leaves,
     passes::{
         instruction_lowering::{
-            InstructionLoweringRule, LoweringContext, witness_array::select_leaves,
+            InstructionLoweringRule, LoweringContext, LoweringResult, witness_array::select_leaves,
         },
         shared::seq_bounds::{build_insert_bounds_assert, build_remove_bounds_assert},
     },
@@ -25,7 +25,7 @@ impl InstructionLoweringRule for LowerSliceInsert {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
         let OpCode::SliceInsert {
             result,
@@ -34,7 +34,7 @@ impl InstructionLoweringRule for LowerSliceInsert {
             value,
         } = op
         else {
-            return false;
+            return Ok(false);
         };
 
         let elem_ty = context.types().get_value_type(*slice).get_array_element();
@@ -90,7 +90,7 @@ impl InstructionLoweringRule for LowerSliceInsert {
             value: rebuilt,
             target: CastTarget::Nop,
         });
-        true
+        Ok(true)
     }
 }
 
@@ -103,7 +103,7 @@ impl InstructionLoweringRule for LowerSliceRemove {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
         let OpCode::SliceRemove {
             result_slice,
@@ -112,7 +112,7 @@ impl InstructionLoweringRule for LowerSliceRemove {
             index,
         } = op
         else {
-            return false;
+            return Ok(false);
         };
 
         let elem_ty = context.types().get_value_type(*slice).get_array_element();
@@ -165,6 +165,6 @@ impl InstructionLoweringRule for LowerSliceRemove {
             value: rebuilt,
             target: CastTarget::Nop,
         });
-        true
+        Ok(true)
     }
 }

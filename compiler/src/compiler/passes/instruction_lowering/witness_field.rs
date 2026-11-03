@@ -1,6 +1,6 @@
 use crate::compiler::{
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
         shared::unsupported::unsupported_on_this_field,
     },
     ssa::{
@@ -22,7 +22,7 @@ impl InstructionLoweringRule for LowerWitnessFieldOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         if let OpCode::Guard { condition, inner } = instruction {
             self.process_op(b, context, Some(*condition), inner.as_ref())
         } else {
@@ -42,8 +42,8 @@ impl LowerWitnessFieldOps {
         context: &LoweringContext<'_>,
         guard: Option<ValueId>,
         op: &OpCode,
-    ) -> bool {
-        match op {
+    ) -> LoweringResult {
+        Ok(match op {
             OpCode::BinaryArithOp {
                 kind,
                 result,
@@ -95,7 +95,7 @@ impl LowerWitnessFieldOps {
                         condition: guard.unwrap(),
                         inner: Box::new(op.clone()),
                     },
-                )
+                )?
             }
             OpCode::Rangecheck { value, max_bits }
                 if context.types().get_value_type(*value).is_witness_of() =>
@@ -104,7 +104,7 @@ impl LowerWitnessFieldOps {
                 true
             }
             _ => false,
-        }
+        })
     }
 
     fn lower_divmod(

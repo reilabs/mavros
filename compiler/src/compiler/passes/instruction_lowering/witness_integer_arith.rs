@@ -7,7 +7,9 @@ use mavros_artifacts::FieldConfig;
 use crate::compiler::{
     analysis::value_range_analysis::{Interval, field_modulus},
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
+        instruction_lowering::{
+            InstructionLoweringRule, LoweringContext, LoweringResult, integer_bits,
+        },
         shared::{
             divmod_guard::nonzero_hint_divisor,
             limbs::{
@@ -35,9 +37,9 @@ impl InstructionLoweringRule for LowerWitnessIntegerArithOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
-        self.process_arith(b, context, guard, op)
+        Ok(self.process_arith(b, context, guard, op))
     }
 }
 

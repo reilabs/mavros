@@ -8,7 +8,9 @@
 
 use crate::compiler::{
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
+        instruction_lowering::{
+            InstructionLoweringRule, LoweringContext, LoweringResult, integer_bits,
+        },
         shared::limbs::widest_injective_int_bits,
     },
     ssa::hlssa::{
@@ -30,7 +32,7 @@ impl InstructionLoweringRule for WideBitWindows {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let OpCode::BitRange {
             result,
             value,
@@ -38,17 +40,17 @@ impl InstructionLoweringRule for WideBitWindows {
             width,
         } = *instruction
         else {
-            return false;
+            return Ok(false);
         };
         let Some(bits) = context
             .types()
             .try_get_value_type(value)
             .and_then(integer_bits)
         else {
-            return false;
+            return Ok(false);
         };
         if bits <= widest_injective_int_bits(b.field()) {
-            return false;
+            return Ok(false);
         }
 
         let shifted = if offset == 0 {
@@ -63,6 +65,6 @@ impl InstructionLoweringRule for WideBitWindows {
             value: window,
             target: CastTarget::Int(bits),
         });
-        true
+        Ok(true)
     }
 }

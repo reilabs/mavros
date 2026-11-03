@@ -31,7 +31,7 @@
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
         shared::{
             divmod_guard::{
                 divisor_checked_by_its_lowering, divmod_can_fail, divmod_provably_defined,
@@ -67,9 +67,9 @@ impl InstructionLoweringRule for LowerPureGuards {
         emitter: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let type_info = context.types();
-        match instruction {
+        Ok(match instruction {
             OpCode::Guard { condition, inner } => {
                 self.lower_guard(emitter, context, *condition, inner.as_ref().clone())
             }
@@ -130,7 +130,7 @@ impl InstructionLoweringRule for LowerPureGuards {
                         // Discharged where the domain already pins the amount in range, exactly as
                         // the guarded arm below discharges it.
                         if self.shift_discharged(context, bits, *rhs) {
-                            return false;
+                            return Ok(false);
                         }
                         self.lower_unguarded_shift(emitter, *kind, *result, *lhs, *rhs, bits);
                         true
@@ -167,7 +167,7 @@ impl InstructionLoweringRule for LowerPureGuards {
                         // exactly as the two arms above discharge theirs. This is what keeps an
                         // ordinary loop counter's `i + 1` from paying for a check.
                         if self.overflow_discharged(context, *kind, bits, *lhs, *rhs) {
-                            return false;
+                            return Ok(false);
                         }
                         self.lower_unguarded_overflow(emitter, *kind, *result, *lhs, *rhs, bits);
                         true
@@ -176,7 +176,7 @@ impl InstructionLoweringRule for LowerPureGuards {
                 }
             }
             _ => false,
-        }
+        })
     }
 }
 

@@ -6,7 +6,7 @@
 use crate::compiler::{
     analysis::types::{FunctionTypeInfo, push_witness_of_to_leaves},
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
         shared::seq_bounds::seq_bounds_operands,
         wide_witness_ints::multi_cell_int_bits,
     },
@@ -29,10 +29,10 @@ impl InstructionLoweringRule for LowerWitnessArrayOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let function_type_info = context.types();
         let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
-        self.process_array_op(b, function_type_info, guard, op)
+        Ok(self.process_array_op(b, function_type_info, guard, op))
     }
 }
 
