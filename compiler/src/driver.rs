@@ -17,8 +17,8 @@ use noirc_frontend::{
 use tracing::info;
 
 use mavros_artifacts::{
-    FieldConfig, FieldId, ManifestParam, MavrosField, ParamVisibility, R1CSArtifact, ReturnSlot,
-    WitnessManifest,
+    FieldConfig, FieldId, LogupStrides, ManifestParam, MavrosField, ParamVisibility, R1CSArtifact,
+    ReturnSlot, WitnessManifest,
 };
 
 use crate::{
@@ -158,18 +158,15 @@ pub enum Error {
     /// Carries every failing assertion so a single compile reports them all.
     AssertConstantFailed(Vec<SourceLocation>),
 
-    /// A program to compile to WASM over a field the runtime archive has no instance for.
-    WasmFieldUnsupported(FieldId),
-
-    /// A program to compile to LLVM or WASM whose LogUp argument repeats: the LLSSA AD emitters
-    /// bind a single repetition's challenges.
-    WasmLogupRepetitionsUnsupported(usize),
-
-    /// R1CS coefficients requested in a field other than the program's.
+    /// R1CS coefficients requested, or an R1CS handed in, over a field other than the program's.
     R1csFieldMismatch {
         requested: FieldId,
         program: FieldId,
     },
+
+    /// An R1CS handed in whose LogUp sections do not split into the repetitions its layout names.
+    R1csLayoutInvalid(String),
+
     /// Missing ABI or inconsistent entry-point/R1CS layouts.
     WitnessManifest(String),
 
@@ -187,17 +184,10 @@ impl std::fmt::Display for Error {
                 write!(f, "{}", diagnostic::render_all(diagnostics))
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
-            Error::WasmFieldUnsupported(field) => {
-                write!(f, "the WASM backend does not support the {field:?} field")
-            }
-            Error::WasmLogupRepetitionsUnsupported(repetitions) => write!(
-                f,
-                "the LLVM and WASM backends run one LogUp repetition, but --logup-soundness \
-                 needs {repetitions} for this program; lower it or use the VM"
-            ),
             Error::R1csFieldMismatch { requested, program } => write!(
                 f,
-                "R1CS generation in {requested:?} was requested for a program over {program:?}"
+                "an R1CS over {requested:?} was requested or handed in for a program over \
+                 {program:?}"
             ),
             Error::AssertConstantFailed(locations) => {
                 for (i, location) in locations.iter().enumerate() {
@@ -210,6 +200,9 @@ impl std::fmt::Display for Error {
                     )?;
                 }
                 Ok(())
+            }
+            Error::R1csLayoutInvalid(message) => {
+                write!(f, "an inconsistent R1CS layout: {message}")
             }
             Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
             Error::Toolchain(error) => write!(f, "{error}"),
@@ -1217,14 +1210,14 @@ impl Driver {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn compile_llvm_targets(
+    pub fn compile_llvm_targets<F: MavrosField>(
         &mut self,
         emit_llvm: bool,
-        r1cs: &R1CS,
+        r1cs: &R1CS<F>,
         wasm_config: Option<(std::path::PathBuf, WasmCompileOpts)>,
         options: CodeGenOptions,
     ) -> Result<Option<String>, Error> {
-        use crate::compiler::codegen::llssa_to_llvm::{FieldRuntimeSymbols, LLVMCodeGen};
+        use crate::compiler::codegen::llssa_to_llvm::LLVMCodeGen;
         use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::context::Context;
 
@@ -1234,14 +1227,15 @@ impl Driver {
             .as_ref()
             .expect("a driver holds its initial SSA")
             .field();
-        if FieldRuntimeSymbols::of(field).is_none() {
-            return Err(Error::WasmFieldUnsupported(field.id()));
+        if field.id() != F::ID {
+            return Err(Error::R1csFieldMismatch {
+                requested: F::ID,
+                program: field.id(),
+            });
         }
-        if r1cs.witness_layout.logup_repetitions > 1 {
-            return Err(Error::WasmLogupRepetitionsUnsupported(
-                r1cs.witness_layout.logup_repetitions,
-            ));
-        }
+        // The lowering places each LogUp repetition by these strides.
+        LogupStrides::try_new(&r1cs.witness_layout, &r1cs.constraints_layout)
+            .map_err(Error::R1csLayoutInvalid)?;
 
         self.prepare_program_ssa();
         let ssa = self.program_ssa.as_ref().unwrap();
@@ -1312,7 +1306,11 @@ impl Driver {
     ///
     /// The sidecar names the entry point's parameters, so it exists only for a project-backed
     /// driver. A driver seeded with [`Self::from_ssa`] has no ABI and writes none.
-    fn write_wasm_metadata(&self, wasm_path: &Path, r1cs: &R1CS) -> Result<(), Error> {
+    fn write_wasm_metadata<F: MavrosField>(
+        &self,
+        wasm_path: &Path,
+        r1cs: &R1CS<F>,
+    ) -> Result<(), Error> {
         let Some(abi) = self.abi.as_ref() else {
             info!(message = %"WASM metadata skipped: driver has no ABI");
             return Ok(());
@@ -1335,6 +1333,7 @@ impl Driver {
 
         let manifest = serde_json::to_value(self.witness_manifest(r1cs)?).unwrap();
         let metadata = serde_json::json!({
+            "field": mavros_artifacts::field_tag(F::ID),
             "witnessCount": r1cs.witness_layout.size(),
             "constraintCount": r1cs.constraints.len(),
             "parameters": parameters,
@@ -1484,17 +1483,17 @@ mod tests {
         );
     }
 
-    /// The runtime archive has no Goldilocks instance, so the WASM path refuses a Goldilocks
-    /// program with an error before lowering it.
-    #[test]
-    fn the_wasm_path_refuses_a_goldilocks_program() {
-        use mavros_artifacts::{FieldConfig, FieldId, Goldilocks};
+    /// A pipeline over the empty Goldilocks `main`, up to its R1CS, with the directory holding its
+    /// debug output.
+    fn empty_goldilocks_program() -> (
+        super::Driver,
+        mavros_artifacts::SealedR1CS<mavros_artifacts::Goldilocks>,
+        tempfile::TempDir,
+    ) {
+        use mavros_artifacts::{FieldConfig, Goldilocks};
 
         use super::Driver;
-        use crate::compiler::{
-            codegen::CodeGenOptions,
-            ssa::hlssa::{HLSSA, builder::HLSSABuilder},
-        };
+        use crate::compiler::ssa::hlssa::{HLSSA, builder::HLSSABuilder};
 
         let mut ssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
@@ -1510,20 +1509,112 @@ mod tests {
         driver.monomorphize().unwrap();
         driver.spill_witness().unwrap();
         let r1cs = driver.generate_r1cs::<Goldilocks>().unwrap();
-        let options = CodeGenOptions {
-            check_constraints: false,
-            include_debug_info: false,
-        };
-        // The refusal precedes any read of the R1CS, so a bn254 one stands in for this program's.
-        let bn254_r1cs = mavros_artifacts::R1CS {
+        (driver, r1cs, scratch)
+    }
+
+    /// The same layouts as an R1CS over bn254, which stands in for a host over another field.
+    fn over_bn254(
+        r1cs: &mavros_artifacts::R1CS<mavros_artifacts::Goldilocks>,
+    ) -> mavros_artifacts::R1CS {
+        mavros_artifacts::R1CS {
+            witness_layout: r1cs.witness_layout,
+            constraints_layout: r1cs.constraints_layout,
+            constraints: vec![],
+        }
+    }
+
+    /// The WASM path takes an R1CS over the program's field only.
+    #[test]
+    fn the_wasm_path_refuses_an_r1cs_over_another_field() {
+        use mavros_artifacts::FieldId;
+
+        let (mut driver, r1cs, _scratch) = empty_goldilocks_program();
+        let options = crate::compiler::codegen::CodeGenOptions::default();
+        match driver.compile_llvm_targets(false, &over_bn254(&r1cs), None, options) {
+            Err(Error::R1csFieldMismatch {
+                requested: FieldId::Bn254,
+                program: FieldId::Goldilocks,
+            }) => {}
+            other => panic!("expected a field mismatch, got {other:?}"),
+        }
+    }
+
+    /// An R1CS whose layout names a LogUp repetition with no lookup sections is refused before the
+    /// lowering, which would place every repetition by its strides.
+    #[test]
+    fn the_wasm_path_refuses_an_inconsistent_logup_layout() {
+        let (mut driver, r1cs, _scratch) = empty_goldilocks_program();
+        let mut inconsistent = mavros_artifacts::R1CS::<mavros_artifacts::Goldilocks> {
             witness_layout: r1cs.witness_layout,
             constraints_layout: r1cs.constraints_layout,
             constraints: vec![],
         };
-        match driver.compile_llvm_targets(false, &bn254_r1cs, None, options) {
-            Err(Error::WasmFieldUnsupported(FieldId::Goldilocks)) => {}
-            other => panic!("expected the WASM path to refuse Goldilocks, got {other:?}"),
+        inconsistent.witness_layout.logup_repetitions = 1;
+        let options = crate::compiler::codegen::CodeGenOptions::default();
+        match driver.compile_llvm_targets(false, &inconsistent, None, options) {
+            Err(Error::R1csLayoutInvalid(message)) => {
+                assert_eq!(message, "1 LogUp repetitions over 0 multiplicities");
+            }
+            other => panic!("expected an inconsistent layout, got {other:?}"),
         }
+    }
+
+    /// The empty Goldilocks `main`, linked, with its R1CS over bn254 for a host over another field.
+    fn linked_goldilocks_module() -> (
+        crate::wasm_host::LoadedModule,
+        mavros_artifacts::R1CS,
+        tempfile::TempDir,
+    ) {
+        use crate::compiler::codegen::{CodeGenOptions, llssa_to_llvm::WasmCompileOpts};
+
+        let (mut driver, r1cs, scratch) = empty_goldilocks_program();
+        let path = scratch.path().join("program.wasm");
+        let options = WasmCompileOpts::fast(crate::wasm_runtime::locate_or_build().unwrap());
+        driver
+            .compile_llvm_targets(
+                false,
+                &r1cs,
+                Some((path.clone(), options)),
+                CodeGenOptions::default(),
+            )
+            .unwrap();
+        let module = crate::wasm_host::LoadedModule::load(&path).unwrap();
+        (module, over_bn254(&r1cs), scratch)
+    }
+
+    /// Witgen reads a module's buffers at the host's stride, so a host over another field refuses
+    /// the module.
+    #[test]
+    fn a_witgen_host_refuses_a_module_over_another_field() {
+        let (module, r1cs, _scratch) = linked_goldilocks_module();
+        let error = crate::wasm_host::run_witgen_loaded(&module, &r1cs, &[], 0)
+            .err()
+            .expect("a host over bn254 ran a Goldilocks module");
+        assert!(
+            error.is::<crate::wasm_host::ModuleFieldMismatch>(),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "a WASM module over Goldilocks cannot run over Bn254"
+        );
+    }
+
+    /// As [`a_witgen_host_refuses_a_module_over_another_field`], for AD.
+    #[test]
+    fn an_ad_host_refuses_a_module_over_another_field() {
+        let (module, r1cs, _scratch) = linked_goldilocks_module();
+        let error = crate::wasm_host::run_ad_loaded(&module, &r1cs, &[])
+            .err()
+            .expect("a host over bn254 ran a Goldilocks module");
+        assert!(
+            error.is::<crate::wasm_host::ModuleFieldMismatch>(),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "a WASM module over Goldilocks cannot run over Bn254"
+        );
     }
 
     /// R1CS generation refuses coefficients in a field other than the program's.

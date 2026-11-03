@@ -7,6 +7,7 @@ use itertools::Itertools;
 use std::fmt::{self, Display, Formatter};
 use std::mem::size_of_val;
 
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 
 use crate::compiler::ssa::{
@@ -73,7 +74,7 @@ impl Blob {
 /// The value type stored in the low-level SSA's constants table.
 ///
 /// Most LLSSA constants are scalar leaves: integers of a given bit width and the null pointer.
-/// Aggregate constants (e.g. the four-limb field element struct) are representable via `Struct`,
+/// Aggregate constants (e.g. the field element struct) are representable via `Struct`,
 /// which pairs a struct layout with one constant value per field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Constant {
@@ -779,26 +780,19 @@ pub struct LLStruct {
 }
 
 impl LLStruct {
-    // FIELD-ASSUMPTION: L3-llstruct
-    /// How many `i64`s a field element occupies, in either limb form.
-    ///
-    /// The two layouts below (Montgomery storage and canonical raw limbs) have the same shape, so
-    /// they share this count, and anything packing an integer into a field element reads it here.
-    pub const FIELD_LIMBS: usize = 4;
-
     pub fn new(fields: Vec<LLFieldType>) -> Self {
         LLStruct { fields }
     }
 
-    // FIELD-ASSUMPTION: L3-llstruct
     /// A field element's Montgomery storage, one `i64` per cell.
-    pub fn field_elem() -> Self {
-        Self::new(vec![LLFieldType::Int(64); Self::FIELD_LIMBS])
+    pub fn field_elem(field: FieldConfig) -> Self {
+        Self::new(vec![LLFieldType::Int(64); field.storage_cells()])
     }
 
-    /// Struct representing raw (non-Montgomery) limbs.
-    pub fn limbs() -> Self {
-        Self::new(vec![LLFieldType::Int(64); Self::FIELD_LIMBS])
+    /// A field element's canonical raw limbs, one `i64` per limb. Anything packing an integer into
+    /// a field element reads the count here.
+    pub fn limbs(field: FieldConfig) -> Self {
+        Self::new(vec![LLFieldType::Int(64); field.canonical_limbs()])
     }
 
     /// RC header: { Int(64) } — just a refcount.
@@ -833,11 +827,11 @@ impl LLStruct {
     }
 
     /// AD constant node: { RC, tag, FieldElem(value) }
-    pub fn ad_const_node() -> Self {
+    pub fn ad_const_node(field: FieldConfig) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(32),
-            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem(field)),
         ])
     }
 
@@ -851,15 +845,15 @@ impl LLStruct {
     }
 
     /// AD sum node: { RC, tag, Ptr(a), Ptr(b), FieldElem(da), FieldElem(db), FieldElem(dc) }
-    pub fn ad_sum_node() -> Self {
+    pub fn ad_sum_node(field: FieldConfig) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(32),
             LLFieldType::Ptr,
             LLFieldType::Ptr,
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem(field)),
+            LLFieldType::Inline(Self::field_elem(field)),
+            LLFieldType::Inline(Self::field_elem(field)),
         ])
     }
 
@@ -893,15 +887,15 @@ impl LLStruct {
     pub const TABLE_INFO_LENGTH: usize = 5;
 
     /// AD mul-const node: { RC, tag, FieldElem(coeff), Ptr(value), FieldElem(da), FieldElem(db), FieldElem(dc) }
-    pub fn ad_mul_const_node() -> Self {
+    pub fn ad_mul_const_node(field: FieldConfig) -> Self {
         Self::new(vec![
             LLFieldType::Inline(Self::rc_header()),
             LLFieldType::Int(32),
-            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem(field)),
             LLFieldType::Ptr,
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
-            LLFieldType::Inline(Self::field_elem()),
+            LLFieldType::Inline(Self::field_elem(field)),
+            LLFieldType::Inline(Self::field_elem(field)),
+            LLFieldType::Inline(Self::field_elem(field)),
         ])
     }
 
@@ -1229,12 +1223,45 @@ mod tests {
     #[test]
     fn accepts_matching_field_elem() {
         let values: Vec<Constant> = (0..4).map(|v| Constant::int(64, v)).collect();
-        assert!(LLStruct::field_elem().accepts(&values));
+        assert!(LLStruct::field_elem(FieldConfig::bn254()).accepts(&values));
+        assert!(!LLStruct::field_elem(FieldConfig::goldilocks()).accepts(&values));
+        assert!(LLStruct::field_elem(FieldConfig::goldilocks()).accepts(&values[..1]));
+    }
+
+    /// Every layout holding field elements follows the field's width.
+    #[test]
+    fn field_layouts_follow_the_field() {
+        for (field, cells) in [
+            (FieldConfig::bn254(), 4usize),
+            (FieldConfig::goldilocks(), 1),
+        ] {
+            let inline = |count| count * cells;
+            let leaves = |layout: LLStruct| {
+                fn count(layout: &LLStruct) -> usize {
+                    layout
+                        .fields
+                        .iter()
+                        .map(|field| match field {
+                            LLFieldType::Int(64) => 1,
+                            LLFieldType::Inline(inner) => count(inner),
+                            _ => 0,
+                        })
+                        .sum()
+                }
+                count(&layout)
+            };
+            assert_eq!(leaves(LLStruct::field_elem(field)), inline(1));
+            assert_eq!(leaves(LLStruct::limbs(field)), inline(1));
+            // The refcount header is one more `i64` in every node.
+            assert_eq!(leaves(LLStruct::ad_const_node(field)), 1 + inline(1));
+            assert_eq!(leaves(LLStruct::ad_sum_node(field)), 1 + inline(3));
+            assert_eq!(leaves(LLStruct::ad_mul_const_node(field)), 1 + inline(4));
+        }
     }
 
     #[test]
     fn accepts_rejects_mismatches() {
-        let field_elem = LLStruct::field_elem();
+        let field_elem = LLStruct::field_elem(FieldConfig::bn254());
 
         // Wrong arity: only three values for a four-field struct.
         let three: Vec<Constant> = (0..3).map(|v| Constant::int(64, v)).collect();
@@ -1290,7 +1317,7 @@ mod tests {
                 Constant::int(64, 0),
                 Constant::int(64, 0),
             ];
-            e.emit_struct_const(LLStruct::field_elem(), values);
+            e.emit_struct_const(LLStruct::field_elem(FieldConfig::bn254()), values);
         });
     }
 
