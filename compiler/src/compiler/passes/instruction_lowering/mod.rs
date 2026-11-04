@@ -28,8 +28,7 @@ use crate::compiler::{
             FunctionValueRanges, Interval, ValueRange, ValueRangeAnalysis, Width,
         },
     },
-    diagnostic::Diagnostic,
-    pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassFailure, PassResult},
     ssa::{
         BlockId, ValueId,
         hlssa::{
@@ -154,7 +153,7 @@ pub(super) fn integer_bits(ty: &Type) -> Option<usize> {
 }
 
 /// What a rule reports for one instruction
-pub(super) type LoweringResult = Result<bool, Diagnostic>;
+pub(super) type LoweringResult = Result<bool, PassFailure>;
 
 pub(super) trait InstructionLoweringRule {
     /// Whether this rule reads the [`LoweringContext`]'s value ranges.
@@ -417,16 +416,12 @@ impl Pass for InstructionLowering {
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         if !self.fixed_point {
-            self.run_iteration(ssa)
-                .map_err(|diagnostic| vec![diagnostic])?;
+            self.run_iteration(ssa)?;
             return Ok(());
         }
 
         for _ in 0..ITERATION_LIMIT {
-            if !self
-                .run_iteration(ssa)
-                .map_err(|diagnostic| vec![diagnostic])?
-            {
+            if !self.run_iteration(ssa)? {
                 return Ok(());
             }
         }

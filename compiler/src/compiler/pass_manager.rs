@@ -182,7 +182,13 @@ impl AnalysisStore {
 // Pass trait — parametric
 // ---------------------------------------------------------------------------
 
-pub type PassResult = Result<(), Vec<Diagnostic>>;
+#[derive(Debug)]
+pub enum PassFailure {
+    Unsatisfiable(Vec<Diagnostic>),
+    Unsupported(Vec<Diagnostic>),
+}
+
+pub type PassResult = Result<(), PassFailure>;
 
 pub trait Pass<
     Op: Instruction = OpCode,

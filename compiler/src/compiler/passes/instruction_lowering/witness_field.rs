@@ -1,8 +1,7 @@
 use crate::compiler::{
-    passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
-        shared::unsupported::unsupported_on_this_field,
-    },
+    diagnostic::Diagnostic,
+    pass_manager::PassFailure,
+    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
     ssa::{
         ValueId,
         hlssa::{
@@ -66,7 +65,7 @@ impl LowerWitnessFieldOps {
                 value,
                 endianness,
                 count,
-            } => self.lower_to_bits(b, context, guard, *result, *value, *endianness, *count),
+            } => self.lower_to_bits(b, context, guard, *result, *value, *endianness, *count)?,
             OpCode::ToRadix {
                 result,
                 value,
@@ -82,7 +81,7 @@ impl LowerWitnessFieldOps {
                 *radix,
                 *endianness,
                 *count,
-            ),
+            )?,
             // Radix normalization can introduce a pure fit check after the pure-guard phase.
             // Lower only this check with the existing rule, leaving raw arithmetic hints alone.
             OpCode::Rangecheck { value, .. }
@@ -274,6 +273,24 @@ impl LowerWitnessFieldOps {
         }
     }
 
+    /// Refuse a decomposition into more digits than a field element has.
+    fn wider_than_the_field(
+        b: &HLBlockEmitter<'_>,
+        guard: Option<ValueId>,
+        message: String,
+    ) -> PassFailure {
+        let diagnostic = Diagnostic::error(message, b.source_location());
+        match guard {
+            None => PassFailure::Unsatisfiable(vec![diagnostic]),
+            // TODO: this is valid Noir. Lowering it with a dummy result would compile it instead of
+            // refusing.
+            Some(_) => PassFailure::Unsupported(vec![diagnostic.with_note(
+                "under a witness condition this fails only when the branch runs, which Mavros \
+                 cannot compile for now",
+            )]),
+        }
+    }
+
     /// Lower the bit-decomposition builtin. The builtin is designed to provide a raw decomposition,
     /// so this intentionally adds no canonicity check. That check is provided in unconstrained Noir
     /// code by the user-facing `to_le_bits`/`to_be_bits` wrappers.
@@ -287,19 +304,22 @@ impl LowerWitnessFieldOps {
         value: ValueId,
         endianness: Endianness,
         count: usize,
-    ) -> bool {
+    ) -> LoweringResult {
         if !context.types().get_value_type(value).is_witness_of() {
-            return false;
+            return Ok(false);
         }
         // This refuses rather than pads: a wider decomposition needs a decision on how its
         // leading zeroes fit the field-agnostic lowering contract.
-        if count > b.field().field_bit_size() as usize {
-            unsupported_on_this_field(
-                format_args!(
-                    "a witness `to_bits` of {count} bits asks for more bits than a field element has"
+        let field_bits = b.field().field_bit_size() as usize;
+        if count > field_bits {
+            return Err(Self::wider_than_the_field(
+                b,
+                guard,
+                format!(
+                    "a decomposition into {count} bits does not fit a field element, which has \
+                     {field_bits} bits"
                 ),
-                b.field(),
-            );
+            ));
         }
 
         // Compute the decomposition in witgen, then bind each hinted bit to a fresh circuit
@@ -353,7 +373,7 @@ impl LowerWitnessFieldOps {
             seq_type: SequenceTargetType::Array(count),
             elem_type: Type::witness_of(Type::int(1)),
         });
-        true
+        Ok(true)
     }
 
     /// Lower the radix-decomposition builtin. Like `lower_to_bits`, this is designed to provide a
@@ -370,7 +390,7 @@ impl LowerWitnessFieldOps {
         radix: Radix<ValueId>,
         endianness: Endianness,
         count: usize,
-    ) -> bool {
+    ) -> LoweringResult {
         let radix = match radix {
             Radix::Dyn(rv) => {
                 let const_256 = b.int_const(IntBits::from_u128(32, 256));
@@ -389,7 +409,7 @@ impl LowerWitnessFieldOps {
                 Radix::Bytes
             }
             Radix::Bytes if !context.types().get_value_type(value).is_witness_of() => {
-                return false;
+                return Ok(false);
             }
             Radix::Bytes => Radix::Bytes,
         };
@@ -420,19 +440,21 @@ impl LowerWitnessFieldOps {
                 count.saturating_mul(8),
             );
             b.emit(decomposition);
-            return true;
+            return Ok(true);
         }
 
         // Unlike bits, the top byte may be only partially occupied (BN254 needs 32 bytes). Wider
         // zero-padded decompositions need an explicit field-agnostic contract.
         let max_bytes = (b.field().field_bit_size() as usize).div_ceil(8);
         if count > max_bytes {
-            unsupported_on_this_field(
-                format_args!(
-                    "a witness `to_radix` of {count} bytes asks for more than the {max_bytes} bytes a field element occupies"
+            return Err(Self::wider_than_the_field(
+                b,
+                guard,
+                format!(
+                    "a decomposition into {count} bytes does not fit a field element, which fits \
+                     in {max_bytes} bytes"
                 ),
-                b.field(),
-            );
+            ));
         }
 
         let pure_value = b.value_of(value);
@@ -478,7 +500,7 @@ impl LowerWitnessFieldOps {
             seq_type: SequenceTargetType::Array(count),
             elem_type: Type::witness_of(Type::int(8)),
         });
-        true
+        Ok(true)
     }
 
     fn lower_rangecheck(

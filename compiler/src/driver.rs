@@ -36,7 +36,7 @@ use crate::{
         },
         diagnostic::{self, Diagnostic},
         located::synthetic_file,
-        pass_manager::PassManager,
+        pass_manager::{PassFailure, PassManager},
         passes::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
@@ -524,14 +524,20 @@ impl Driver {
         Ok(())
     }
 
-    /// [`Error::PassFailed`] for what a pass reported with compiled sources.
-    fn pass_failed(&self, failures: Vec<Diagnostic>) -> Error {
-        Error::PassFailed(
+    /// [`Error`] for what a pass reported with compiled sources.
+    fn pass_failed(&self, failure: PassFailure) -> Error {
+        let with_sources = |failures: Vec<Diagnostic>| {
             failures
                 .into_iter()
                 .map(|diagnostic| self.attach_compiled_source(diagnostic))
-                .collect(),
-        )
+                .collect()
+        };
+        match failure {
+            PassFailure::Unsatisfiable(failures) => {
+                Error::UnsatisfiableProgram(with_sources(failures))
+            }
+            PassFailure::Unsupported(failures) => Error::PassFailed(with_sources(failures)),
+        }
     }
 
     /// Attach the source text the compiler read for `diagnostic`'s file, where there is one, so the
