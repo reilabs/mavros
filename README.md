@@ -26,17 +26,21 @@ information on how to use Mavros.
 To use Mavros, navigate to the **root of a Noir project** (the directory containing `Nargo.toml`) in
 your shell. Then run `mavros compile`.
 
-This will produce the following two files inside the project's `target/` directory:
+This writes one file, `target/program.mavros`:
 
-| File                | Contents                                                                                      |
-| ------------------- | --------------------------------------------------------------------------------------------- |
-| `target/basic.json` | ABI and the program binary (`binary`) containing the witgen and AD entry points               |
-| `target/r1cs.bin`   | Versioned R1CS artifact (`MAVR1CS` header): format version, field tag, digest, manifest, R1CS |
+| Part   | Contents                                                                      |
+| ------ | ----------------------------------------------------------------------------- |
+| Header | `MAVR1CS` magic, format version, compiler version, field tag, artifact digest |
+| Body   | Witness manifest, R1CS, VM bytecode (witgen and AD entry points), ABI as JSON |
 
-Pass `--include-debug-info` to additionally write `target/basic.debug.json`. This standalone,
+The circuit digest covers the R1CS, which hashes its field tag, and the manifest. The artifact
+digest covers the circuit digest, the bytecode and the ABI, and is checked whenever the file is
+read. The magic, format version and compiler version are not hashed.
+
+Pass `--include-debug-info` to additionally write `target/program.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;
-the executable bytecode in `basic.json` remains byte-for-byte unchanged. Source paths are relative
-to the Noir package root by default; pass `--absolute-paths` to retain absolute paths.
+the artifact itself remains byte-for-byte unchanged. Source paths are relative to the Noir package
+root by default; pass `--absolute-paths` to retain absolute paths.
 
 ### Verifier Mode
 
@@ -63,29 +67,35 @@ The command compiles the project and prints a JSON object with `r_aw`, `r_bw`, a
 strings. It needs no `Prover.toml` and does not check R1CS satisfaction. This operation is a
 component of a verifier, not a complete proof verification protocol.
 
-Prover artifacts contain only witgen and AD. To additionally emit a separate verifier artifact:
+The bytecode in `program.mavros` holds only the witgen and AD entry points. To additionally emit a
+separate verifier artifact:
 
 ```bash
 mavros compile ./my-noir-project --verifier-output target/verifier.json
 ```
 
-`verifier.json` contains only verifier bytecode plus `witness_layout` and `constraints_layout`; it
-contains no matrix rows or prover entry points. `--include-debug-info` also writes
-`verifier.debug.json`. Default compilation emits no verifier code. `--verify` compiles and runs only
-the verifier artifact.
+`verifier.json` contains the verifier bytecode, `witness_layout`, `constraints_layout` and the
+`circuit_digest` of the `program.mavros` written alongside it; it contains no matrix rows or prover
+entry points. `--include-debug-info` also writes `verifier.debug.json`. Default compilation emits no
+verifier code. `--verify` compiles and runs only the verifier artifact.
 
 Rust callers compile it with `mavros_compiler::api::compile_verifier_bytecode(&mut driver, options)`
 and pass that binary to
 `run_verifier_from_binary(&binary, &r, &w, witness_layout, constraints_layout, None)`. No R1CS
-matrices are required at runtime. Both artifacts must come from the same circuit compilation;
-applications must associate the verifier artifact with their trusted circuit configuration. Verifier
-execution uses a dedicated forward bytecode entry point: witness writes read the next value from
-`w`, linear combinations use field arithmetic, and constraints accumulate three scalars weighted by
-`r`. It allocates no AD expression nodes or matrix output vectors. Lookup and table constraints are
-evaluated from the same layouts. Bytecode format version 5 binds the field and constraint layouts to
-each compiled artifact; recompile older artifacts before using the current VM. AD and verifier
-execution reject mismatched layouts. LLVM and WASM artifacts still expose the existing witgen and AD
-entry points; the forward verifier is currently available through the VM API and CLI.
+matrices are required at runtime.
+
+Both artifacts must come from the same circuit compilation; applications must associate the verifier
+artifact with their trusted circuit configuration. Comparing the two `circuit_digest`s catches a
+verifier from another circuit, not a forged one: nothing hashes the verifier bytecode.
+
+The verifier runs forward through its own bytecode entry point, allocating no AD nodes or matrix
+outputs: witness writes read the next value from `w`, and every constraint, lookups and tables
+included, adds to three scalars weighted by `r`.
+
+The bytecode header names its artifact's field and constraint layouts, and AD and verifier execution
+reject mismatched layouts. Recompile older artifacts before using the current VM. LLVM and WASM
+artifacts expose only the witgen and AD entry points; the forward verifier runs through the VM API
+and CLI.
 
 ### Per-Function FlameGraphs
 
@@ -126,10 +136,10 @@ compiles every binary member in manifest order; library members remain available
 Each binary uses its own `Prover.toml` and `mavros_debug` directory. A failed member makes the
 workspace run fail, while the remaining members are still checked.
 
-When `mavros compile` resolves a package root different from the supplied path, relative output
-paths use that package root, including for a single default member. The defaults then produce
-`<member>/target/basic.json` and `<member>/target/r1cs.bin`. Absolute output paths and paths
-containing `..` are rejected for multi-binary compilations. Point Mavros directly at a member
+When `mavros compile` resolves a package root different from the supplied path, a relative
+`--output` (and `--verifier-output`) is taken relative to that package root, including for a single
+default member, so the default produces `<member>/target/program.mavros`. An absolute output path,
+or one containing `..`, is rejected for multi-binary compilations. Point Mavros directly at a member
 directory to compile just that package with the usual output-path behavior.
 
 The functional test runner reports each selected binary workspace member as a separate test, with
@@ -140,8 +150,7 @@ its own checks, circuit size, and artifact sizes. Libraries are not separate exe
 ```bash
 cd my-noir-project
 mavros compile
-# → target/basic.json
-# → target/r1cs.bin
+# → target/program.mavros
 ```
 
 ## Noir Feature Support and Completeness
