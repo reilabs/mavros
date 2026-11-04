@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, return_reachability::non_returning_entries},
     diagnostic::Diagnostic,
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
     ssa::hlssa::HLSSA,
 };
 
@@ -28,7 +28,8 @@ impl Pass for ReturnReachabilityValidation {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         *self.failures.borrow_mut() = Some(non_returning_entries(ssa, store.get::<FlowAnalysis>()));
+        Ok(())
     }
 }

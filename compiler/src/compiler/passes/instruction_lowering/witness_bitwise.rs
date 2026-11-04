@@ -14,7 +14,7 @@ use crate::compiler::{
     },
     passes::{
         instruction_lowering::{
-            InstructionLoweringRule, LoweringContext, integer_bits,
+            InstructionLoweringRule, LoweringContext, LoweringResult, integer_bits,
             witness_integer_arith::guarded_or_zero_field,
         },
         shared::{
@@ -27,7 +27,7 @@ use crate::compiler::{
                 emit_pure_shift_amount_check, shift_amount_pinned_to,
                 shift_amount_provably_in_range,
             },
-            unsupported::unsupported_on_this_field,
+            unreachable::unreachable_on_this_field,
         },
     },
     ssa::{
@@ -52,12 +52,12 @@ impl InstructionLoweringRule for LowerWitnessBitwiseOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
+    ) -> LoweringResult {
+        Ok(if let OpCode::Guard { condition, inner } = instruction {
             self.process_guarded_shift(b, context, *condition, inner.as_ref())
         } else {
             self.process_op(b, context, instruction)
-        }
+        })
     }
 }
 
@@ -1023,7 +1023,7 @@ fn lower_word_bitwise(
     bits: usize,
 ) -> ValueId {
     if !spread_sum_fits_field(bits, b.field()) {
-        unsupported_on_this_field(
+        unreachable_on_this_field(
             format_args!(
                 "a {bits}-bit bitwise op spreads each operand to {} bits, and the sum of the two spreads no longer fits one field element, so `Unspread` would read a residue rather than the interleaved bits",
                 2 * bits
@@ -1479,7 +1479,8 @@ mod tests {
             vec![Box::new(LowerWitnessBitwiseOps::new())],
             false,
         )
-        .run(&mut ssa, &AnalysisStore::new());
+        .run(&mut ssa, &AnalysisStore::new())
+        .unwrap();
 
         let answer = ssa
             .get_unique_entrypoint()

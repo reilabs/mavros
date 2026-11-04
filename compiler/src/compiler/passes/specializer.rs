@@ -22,7 +22,7 @@ use crate::{
             symbolic_executor::{self, AssertionFailure, SymbolicExecutor},
             types::TypeInfo,
         },
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::{
             BlockId, FunctionId, SourceLocation, ValueId,
             hlssa::{
@@ -850,7 +850,7 @@ impl Pass for Specializer {
         vec![Summary::id(), TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let summary = store.get::<Summary>();
         let mut speculative_ids: HashSet<FunctionId> = HashSet::default();
         let mut accepted_ids: HashSet<FunctionId> = HashSet::default();
@@ -873,6 +873,7 @@ impl Pass for Specializer {
         // unreferenced and are cleaned up by the DCE pass that runs immediately after the
         // specializer.
         ssa.retain_functions(|id, _| !speculative_ids.contains(&id) || accepted_ids.contains(&id));
+        Ok(())
     }
 }
 

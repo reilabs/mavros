@@ -23,7 +23,7 @@ use crate::compiler::{
 };
 use mavros_int_semantics::IntBits;
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 fn emit_elem_select(
     b: &mut HLBlockEmitter<'_>,
@@ -65,7 +65,7 @@ impl InstructionLoweringRule for LowerSliceSelect {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
         let OpCode::Select {
             result,
@@ -74,14 +74,14 @@ impl InstructionLoweringRule for LowerSliceSelect {
             if_f,
         } = op
         else {
-            return false;
+            return Ok(false);
         };
         let result_ty = context.types().get_value_type(*result).clone();
         if !result_ty.is_slice() {
-            return false;
+            return Ok(false);
         }
         if !context.types().get_value_type(*cond).is_witness_of() {
-            return false;
+            return Ok(false);
         }
 
         // Nothing this rule emits can fail (every read is bounded by `len_a`/`len_c`), so the
@@ -136,6 +136,6 @@ impl InstructionLoweringRule for LowerSliceSelect {
             value: acc,
             target: CastTarget::Nop,
         });
-        true
+        Ok(true)
     }
 }

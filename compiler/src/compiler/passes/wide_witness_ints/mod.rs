@@ -148,7 +148,7 @@ use crate::compiler::{
         types::{FunctionTypeInfo, TypeInfo},
         value_range_analysis::field_modulus,
     },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     passes::shared::{
         divmod_guard::nonzero_hint_divisor,
         limbs::{
@@ -158,7 +158,7 @@ use crate::compiler::{
         },
         overflow_guard::abs_as_u,
         shift_guard::emit_pure_shift_amount_check,
-        unsupported::unsupported_on_this_field,
+        unreachable::unreachable_on_this_field,
     },
     ssa::{
         BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
@@ -196,7 +196,7 @@ impl Pass for WideWitnessInts {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let field = ssa.field();
         let globals = Globals::split(ssa, field);
 
@@ -254,6 +254,7 @@ impl Pass for WideWitnessInts {
             }
             rewrite_function(ssa, fid, &reachable, &value_map, type_info, field, &globals);
         }
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -2210,7 +2211,7 @@ impl Rewriter<'_> {
             evaluate,
         )
         .unwrap_or_else(|| {
-            unsupported_on_this_field(
+            unreachable_on_this_field(
                 format_args!(
                     "a {bits}-bit unsigned {operation} is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element"
                 ),

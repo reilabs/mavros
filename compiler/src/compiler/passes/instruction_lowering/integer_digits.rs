@@ -11,7 +11,9 @@
 
 use crate::compiler::{
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
+        instruction_lowering::{
+            InstructionLoweringRule, LoweringContext, LoweringResult, integer_bits,
+        },
         shared::limbs::widest_injective_int_bits,
     },
     ssa::{
@@ -36,18 +38,18 @@ impl InstructionLoweringRule for IntegerDigits {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (value, digit_bits, radix) = match instruction {
             OpCode::ToBits { value, .. } => (*value, 1, None),
             OpCode::ToRadix { value, radix, .. } => (*value, 8, Some(*radix)),
-            _ => return false,
+            _ => return Ok(false),
         };
         let Some(bits) = context
             .types()
             .try_get_value_type(value)
             .and_then(integer_bits)
         else {
-            return false;
+            return Ok(false);
         };
 
         let (result, endianness, count) = match instruction {
@@ -74,7 +76,7 @@ impl InstructionLoweringRule for IntegerDigits {
                 _ => unreachable!("matched above"),
             }
             b.emit(op);
-            return true;
+            return Ok(true);
         }
         // FIELD-ASSUMPTION: L4-decompose
         // A chunk is the widest whole number of bytes the field carries injectively.
@@ -138,7 +140,7 @@ impl InstructionLoweringRule for IntegerDigits {
             seq_type: SequenceTargetType::Array(count),
             elem_type: digit_type,
         });
-        true
+        Ok(true)
     }
 }
 
@@ -182,7 +184,9 @@ mod tests {
             .get_entry_mut()
             .set_terminator(Terminator::Return(vec![result]));
 
-        InstructionLowering::operand_shapes().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::operand_shapes()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
 
         let mut widths = Vec::new();
         for (_, block) in ssa.get_unique_entrypoint().get_blocks() {

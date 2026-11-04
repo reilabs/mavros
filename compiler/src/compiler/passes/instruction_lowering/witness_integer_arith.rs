@@ -7,7 +7,9 @@ use mavros_artifacts::FieldConfig;
 use crate::compiler::{
     analysis::value_range_analysis::{Interval, field_modulus},
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext, integer_bits},
+        instruction_lowering::{
+            InstructionLoweringRule, LoweringContext, LoweringResult, integer_bits,
+        },
         shared::{
             divmod_guard::nonzero_hint_divisor,
             limbs::{
@@ -15,7 +17,7 @@ use crate::compiler::{
                 split_into_limbs, two_limb_product_packing_fits, widest_cell_sum_bits,
                 witness_limb_bits,
             },
-            unsupported::unsupported_on_this_field,
+            unreachable::unreachable_on_this_field,
         },
     },
     ssa::{
@@ -35,9 +37,9 @@ impl InstructionLoweringRule for LowerWitnessIntegerArithOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
-        self.process_arith(b, context, guard, op)
+        Ok(self.process_arith(b, context, guard, op))
     }
 }
 
@@ -212,7 +214,7 @@ impl LowerWitnessIntegerArithOps {
             // from a wrapped residue. The same question covers the limb _count_, because the code
             // below reads each split as a pair.
             if !two_limb_product_packing_fits(b.field(), bits) {
-                unsupported_on_this_field(
+                unreachable_on_this_field(
                     format_args!(
                         "a {bits}-bit unsigned multiplication falls back to a two-limb schoolbook product, which needs the operands to be two witness limbs and needs its `lo + cross * 2^h` packing — about 2^(3h+1) — not to wrap modulo the field"
                     ),
@@ -252,7 +254,7 @@ impl LowerWitnessIntegerArithOps {
         }
 
         if !range_fits_field_injectively(&product_range, b.field()) {
-            unsupported_on_this_field(
+            unreachable_on_this_field(
                 format_args!(
                     "a {bits}-bit unsigned multiplication whose product spans {product_range:?} needs a schoolbook multi-limb lowering: that span has representatives a single field product cannot tell apart"
                 ),

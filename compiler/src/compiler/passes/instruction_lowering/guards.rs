@@ -24,7 +24,7 @@ use crate::compiler::{
 };
 use mavros_int_semantics::IntBits;
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 pub(super) struct LowerGuards {}
 
@@ -38,9 +38,9 @@ impl InstructionLoweringRule for LowerGuards {
         emitter: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let type_info = context.types();
-        match instruction {
+        Ok(match instruction {
             OpCode::Guard { condition, inner } => {
                 let results: Vec<_> = inner.get_results().copied().collect();
                 if results.is_empty() {
@@ -75,7 +75,7 @@ impl InstructionLoweringRule for LowerGuards {
                 true
             }
             _ => false,
-        }
+        })
     }
 }
 

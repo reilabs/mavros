@@ -11,7 +11,7 @@ use crate::{
     compiler::{
         Field,
         analysis::flow_analysis::{CFG, FlowAnalysis},
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::{availability::can_replace, value_replacements::ValueReplacements},
         ssa::{
             BlockId, ProgramPoint, SSAConstantsSnapshot, ValueId,
@@ -42,8 +42,9 @@ impl Pass for CSE {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<FlowAnalysis>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

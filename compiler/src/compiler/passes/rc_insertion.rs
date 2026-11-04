@@ -16,7 +16,7 @@ use crate::{
             liveness::{FunctionLiveness, LivenessAnalysis},
             types::{FunctionTypeInfo, TypeInfo},
         },
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::{
             Instruction, Located, SourceLocation, Terminator, ValueId,
             hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
@@ -36,7 +36,7 @@ impl Pass for RCInsertion {
         vec![FlowAnalysis::id(), TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let cfg = store.get::<FlowAnalysis>();
 
         let liveness = LivenessAnalysis::new().run(ssa, cfg);
@@ -47,6 +47,7 @@ impl Pass for RCInsertion {
             let type_info = store.get::<TypeInfo>().get_function(*function_id);
             self.run_function(function, cfg, type_info, &liveness);
         }
+        Ok(())
     }
 }
 

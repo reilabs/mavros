@@ -26,7 +26,6 @@ use mavros_compiler::{
         r1cs_compact,
     },
     driver::{Driver, Error as DriverError},
-    ice_usr,
     vm::interpreter,
     wasm_host, wasm_runtime,
 };
@@ -1731,8 +1730,8 @@ impl StatusTable {
 }
 
 fn parse_status_table(path: &Path) -> StatusTable {
-    let content =
-        fs::read_to_string(path).unwrap_or_else(|_| ice_usr!("Cannot read {}", path.display()));
+    let content = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("Cannot read {}: {error}", path.display()));
     parse_status_content(&content)
 }
 

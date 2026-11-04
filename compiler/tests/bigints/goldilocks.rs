@@ -453,7 +453,9 @@ fn a_field_element_decomposes_into_its_64_bits() {
 
 /// A Goldilocks element has 64 bits, so a witnessed decomposition into 65 is refused.
 #[test]
-#[should_panic(expected = "asks for more bits than a field element has")]
+#[should_panic(
+    expected = "a decomposition into 65 bits does not fit a field element, which has 64 bits"
+)]
 fn a_65_bit_decomposition_is_refused_on_goldilocks() {
     compile(&[Type::field()], &[Type::int(1).array_of(65)], |e, p| {
         vec![e.to_bits(p[0], Endianness::Little, 65)]

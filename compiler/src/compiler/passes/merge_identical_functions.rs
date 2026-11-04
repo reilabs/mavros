@@ -59,7 +59,7 @@
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        pass_manager::{AnalysisStore, Pass},
+        pass_manager::{AnalysisStore, Pass, PassResult},
         ssa::{
             Function, FunctionId, Instruction, Terminator, ValueId,
             hlssa::{HLSSA, OpCode, Type},
@@ -78,8 +78,9 @@ impl Pass for MergeIdenticalFunctions {
         "merge_identical_functions"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         self.do_run(ssa);
+        Ok(())
     }
 }
 

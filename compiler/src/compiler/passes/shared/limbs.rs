@@ -12,7 +12,7 @@ use mavros_int_semantics::int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS};
 
 use crate::compiler::{
     analysis::value_range_analysis::field_modulus,
-    passes::shared::unsupported::unsupported_on_this_field,
+    passes::shared::unreachable::unreachable_on_this_field,
     ssa::{
         ValueId,
         hlssa::{CastTarget, MAX_POW2_TABLE_SIZE, builder::HLEmitter},
@@ -373,7 +373,7 @@ pub fn combine_limbs_of_value(
         "cannot recombine an empty decomposition"
     );
     if value_bits > widest_injective_int_bits(b.field()) {
-        unsupported_on_this_field(
+        unreachable_on_this_field(
             format_args!(
                 "recombining an int{value_bits} reaches 2^{value_bits} and so wraps modulo the field, leaving a residue no rangecheck on the result can tell from the value it should have been"
             ),

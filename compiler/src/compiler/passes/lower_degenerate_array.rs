@@ -25,7 +25,7 @@ use crate::compiler::{
         flow_analysis::FlowAnalysis,
         types::{FunctionTypeInfo, TypeInfo},
     },
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     ssa::{
         BlockId, ValueId,
         hlssa::{
@@ -48,8 +48,9 @@ impl Pass for LowerDegenerateArray {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<TypeInfo>(), store.get::<FlowAnalysis>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

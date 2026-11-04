@@ -88,7 +88,7 @@ use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         analysis::{points_to::PointsTo, types::TypeInfo},
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::{
             BlockId, FunctionId, SourceLocation, Terminator, ValueId,
             hlssa::{
@@ -129,8 +129,9 @@ impl Pass for ArrayBoundaryExpansion {
         vec![TypeInfo::id(), PointsTo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<TypeInfo>(), store.get::<PointsTo>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

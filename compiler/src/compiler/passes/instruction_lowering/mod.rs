@@ -28,7 +28,7 @@ use crate::compiler::{
             FunctionValueRanges, Interval, ValueRange, ValueRangeAnalysis, Width,
         },
     },
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassFailure, PassResult},
     ssa::{
         BlockId, ValueId,
         hlssa::{
@@ -152,6 +152,9 @@ pub(super) fn integer_bits(ty: &Type) -> Option<usize> {
     }
 }
 
+/// What a rule reports for one instruction
+pub(super) type LoweringResult = Result<bool, PassFailure>;
+
 pub(super) trait InstructionLoweringRule {
     /// Whether this rule reads the [`LoweringContext`]'s value ranges.
     ///
@@ -171,7 +174,7 @@ pub(super) trait InstructionLoweringRule {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool;
+    ) -> LoweringResult;
 }
 
 impl InstructionLowering {
@@ -328,7 +331,7 @@ impl InstructionLowering {
         }
     }
 
-    fn run_iteration(&self, ssa: &mut HLSSA) -> bool {
+    fn run_iteration(&self, ssa: &mut HLSSA) -> LoweringResult {
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
         let value_ranges = self
@@ -343,11 +346,11 @@ impl InstructionLowering {
             let function_value_ranges = value_ranges
                 .as_ref()
                 .map(|ranges| ranges.get_function(function_id));
-            sb.modify_function(function_id, |fb| {
-                changed |= self.run_on_function(fb, function_type_info, function_value_ranges);
-            });
+            changed |= sb.modify_function(function_id, |fb| {
+                self.run_on_function(fb, function_type_info, function_value_ranges)
+            })?;
         }
-        changed
+        Ok(changed)
     }
 
     fn run_on_function(
@@ -355,7 +358,7 @@ impl InstructionLowering {
         fb: &mut HLFunctionBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
         function_value_ranges: Option<&FunctionValueRanges>,
-    ) -> bool {
+    ) -> LoweringResult {
         let context = LoweringContext::new(function_type_info, function_value_ranges);
         let mut changed = false;
         let block_ids: Vec<_> = fb.function.get_blocks().map(|(bid, _)| *bid).collect();
@@ -378,7 +381,7 @@ impl InstructionLowering {
                 let location = instruction.location().clone();
                 if b.emit_with_location(location, |b| {
                     self.try_lower_instruction(b, &context, instruction.as_ref())
-                }) {
+                })? {
                     changed = true;
                 } else {
                     b.emit_located(instruction);
@@ -388,7 +391,7 @@ impl InstructionLowering {
                 b.set_terminator(terminator);
             }
         }
-        changed
+        Ok(changed)
     }
 
     fn try_lower_instruction(
@@ -396,13 +399,13 @@ impl InstructionLowering {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         for lowerer in &self.lowerers {
-            if lowerer.lower_instruction(b, context, instruction) {
-                return true;
+            if lowerer.lower_instruction(b, context, instruction)? {
+                return Ok(true);
             }
         }
-        false
+        Ok(false)
     }
 }
 
@@ -411,15 +414,15 @@ impl Pass for InstructionLowering {
         self.name
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         if !self.fixed_point {
-            self.run_iteration(ssa);
-            return;
+            self.run_iteration(ssa)?;
+            return Ok(());
         }
 
         for _ in 0..ITERATION_LIMIT {
-            if !self.run_iteration(ssa) {
-                return;
+            if !self.run_iteration(ssa)? {
+                return Ok(());
             }
         }
         ice!("instruction lowering did not reach a fixed point");
@@ -500,7 +503,9 @@ mod tests {
             .get_entry_mut()
             .set_terminator(Terminator::Return(returned));
 
-        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::witness_integer_ops()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         (ssa, op)
     }
 
