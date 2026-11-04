@@ -45,7 +45,7 @@ use crate::{
     compiler::{
         pass_manager::{AnalysisStore, Pass, PassResult},
         passes::{
-            shared::{limbs::widest_injective_int_bits, unsupported::unsupported_on_this_field},
+            shared::{limbs::widest_injective_int_bits, unreachable::unreachable_on_this_field},
             wide_witness_ints::multi_cell_int_bits,
         },
         ssa::{
@@ -787,9 +787,10 @@ impl PrepareEntryPoint {
             TypeExpr::Int(size) => {
                 // This ABI carries each integer in one input element, so its width must fit
                 // injectively. Wider integers can be assembled inside the program from ABI limbs.
+                // The Noir frontend rejects wider entry point integers with a located error first.
                 let widest = widest_injective_int_bits(e.field());
                 if *size > widest {
-                    unsupported_on_this_field(
+                    unreachable_on_this_field(
                         format_args!(
                             "an int{size} crosses the entry point as one field element, which \
                              carries integers up to int{widest}"

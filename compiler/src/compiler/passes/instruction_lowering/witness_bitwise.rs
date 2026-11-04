@@ -27,7 +27,7 @@ use crate::compiler::{
                 emit_pure_shift_amount_check, shift_amount_pinned_to,
                 shift_amount_provably_in_range,
             },
-            unsupported::unsupported_on_this_field,
+            unreachable::unreachable_on_this_field,
         },
     },
     ssa::{
@@ -1023,7 +1023,7 @@ fn lower_word_bitwise(
     bits: usize,
 ) -> ValueId {
     if !spread_sum_fits_field(bits, b.field()) {
-        unsupported_on_this_field(
+        unreachable_on_this_field(
             format_args!(
                 "a {bits}-bit bitwise op spreads each operand to {} bits, and the sum of the two spreads no longer fits one field element, so `Unspread` would read a residue rather than the interleaved bits",
                 2 * bits

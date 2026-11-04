@@ -158,7 +158,7 @@ use crate::compiler::{
         },
         overflow_guard::abs_as_u,
         shift_guard::emit_pure_shift_amount_check,
-        unsupported::unsupported_on_this_field,
+        unreachable::unreachable_on_this_field,
     },
     ssa::{
         BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
@@ -2211,7 +2211,7 @@ impl Rewriter<'_> {
             evaluate,
         )
         .unwrap_or_else(|| {
-            unsupported_on_this_field(
+            unreachable_on_this_field(
                 format_args!(
                     "a {bits}-bit unsigned {operation} is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element"
                 ),
