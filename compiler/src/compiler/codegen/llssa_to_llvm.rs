@@ -27,6 +27,7 @@ use mavros_int_semantics::{
     IntBits,
     int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS},
 };
+use mavros_wasm_layout::FIELD_TAG_EXPORT;
 
 use crate::{
     collections::HashMap,
@@ -214,8 +215,8 @@ fn ll_struct_flex_elem(s: &LLStruct) -> Option<&LLStruct> {
     })
 }
 
-/// The runtime archive's entry points for one field's arithmetic, by symbol name: the names
-/// `field_runtime!` in `wasm-runtime/src/lib.rs` gives that field's instance.
+/// The runtime archive's entry points for one field's arithmetic, by the symbol names
+/// `wasm-runtime/src` defines them under.
 ///
 /// The names reach the module's `name` section, so renaming one changes the bytes of every module
 /// that calls it.
@@ -231,20 +232,27 @@ pub struct FieldRuntimeSymbols {
 }
 
 impl FieldRuntimeSymbols {
-    /// The entry points of `field`'s runtime instance, or [`None`] when the runtime has no instance
-    /// for `field`, which the WASM path then refuses.
-    pub fn of(field: FieldConfig) -> Option<Self> {
+    /// The entry points of `field`'s runtime instance.
+    pub fn of(field: FieldConfig) -> Self {
         match field.id() {
-            FieldId::Bn254 => Some(FieldRuntimeSymbols {
-                mul: "__field_mul",
-                add: "__field_add",
-                sub: "__field_sub",
-                div: "__field_div",
-                lt: "__field_lt",
-                from_limbs: "__field_from_limbs",
-                to_limbs: "__field_to_limbs",
-            }),
-            FieldId::Goldilocks => None,
+            FieldId::Bn254 => FieldRuntimeSymbols {
+                mul: "__bn254_mul",
+                add: "__bn254_add",
+                sub: "__bn254_sub",
+                div: "__bn254_div",
+                lt: "__bn254_lt",
+                from_limbs: "__bn254_from_limbs",
+                to_limbs: "__bn254_to_limbs",
+            },
+            FieldId::Goldilocks => FieldRuntimeSymbols {
+                mul: "__goldilocks_mul",
+                add: "__goldilocks_add",
+                sub: "__goldilocks_sub",
+                div: "__goldilocks_div",
+                lt: "__goldilocks_lt",
+                from_limbs: "__goldilocks_from_limbs",
+                to_limbs: "__goldilocks_to_limbs",
+            },
         }
     }
 }
@@ -823,18 +831,30 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         }
     }
 
-    /// The LLVM type for a field element, derived from `LLStruct::field_elem()`.
-    // FIELD-ASSUMPTION: L3-llstruct
+    /// The LLVM type for a field element, derived from `LLStruct::field_elem`.
     fn field_llvm_type(&self) -> BasicTypeEnum<'ctx> {
-        self.convert_struct_type(&LLStruct::field_elem())
+        self.convert_struct_type(&LLStruct::field_elem(self.field))
     }
 
-    /// The LLVM type for raw (non-Montgomery) limbs, derived from `LLStruct::limbs()`.
+    /// The LLVM type for raw (non-Montgomery) limbs, derived from `LLStruct::limbs`.
     fn limbs_llvm_type(&self) -> BasicTypeEnum<'ctx> {
-        self.convert_struct_type(&LLStruct::limbs())
+        self.convert_struct_type(&LLStruct::limbs(self.field))
     }
 
     // ── Runtime functions ───────────────────────────────────────────────
+
+    /// Defines the function that names this module's field to its host; the link exports it.
+    fn define_field_tag(&mut self) {
+        let i32_type = self.context.i32_type();
+        let tag = self
+            .module
+            .add_function(FIELD_TAG_EXPORT, i32_type.fn_type(&[], false), None);
+        self.builder
+            .position_at_end(self.context.append_basic_block(tag, "entry"));
+        self.builder
+            .build_return(Some(&i32_type.const_int(self.field.id().code(), false)))
+            .unwrap();
+    }
 
     fn declare_runtime_functions(&mut self) {
         let field_type = self.field_llvm_type();
@@ -843,12 +863,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         let bool_type = self.context.bool_type();
         let void_type = self.context.void_type();
         let limbs_type = self.limbs_llvm_type();
-        let field_symbols = FieldRuntimeSymbols::of(self.field).unwrap_or_else(|| {
-            ice!(
-                "{:?} has no WASM runtime, which the driver refuses before codegen",
-                self.field.id()
-            )
-        });
+        let field_symbols = FieldRuntimeSymbols::of(self.field);
 
         // mul(FieldElem, FieldElem) -> FieldElem
         let field_mul_type = field_type.fn_type(&[field_type.into(), field_type.into()], false);
@@ -900,8 +915,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 .add_function(field_symbols.lt, field_lt_type, None),
         );
 
-        // FIELD-ASSUMPTION: L3-limb-op
-        // from_limbs([4 x i64]) -> FieldElem  (raw limbs → Montgomery)
+        // from_limbs(Limbs) -> FieldElem  (raw limbs → Montgomery)
         let field_from_limbs_type = field_type.fn_type(&[limbs_type.into()], false);
         self.field_from_limbs_fn = Some(self.module.add_function(
             field_symbols.from_limbs,
@@ -909,7 +923,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             Some(Linkage::External),
         ));
 
-        // to_limbs(FieldElem) -> [4 x i64]  (Montgomery → raw limbs)
+        // to_limbs(FieldElem) -> Limbs  (Montgomery → raw limbs)
         let field_to_limbs_type = limbs_type.fn_type(&[field_type.into()], false);
         self.field_to_limbs_fn = Some(self.module.add_function(
             field_symbols.to_limbs,
@@ -1083,6 +1097,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         self.constants = llssa.const_snapshot();
 
         self.entry_symbols = (0..entry_points.len()).map(entry_export_symbol).collect();
+        self.define_field_tag();
 
         // First pass: declare all functions
         for (fn_id, function) in llssa.iter_functions() {
@@ -2075,7 +2090,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 let a_val = self.value_map[a].into_struct_value();
                 let b_val = self.value_map[b].into_struct_value();
                 let mut eq_acc = self.context.bool_type().const_int(1, false);
-                for i in 0..LLStruct::FIELD_LIMBS as u32 {
+                for i in 0..self.field.storage_cells() as u32 {
                     let a_limb = self
                         .builder
                         .build_extract_value(a_val, i, "a_l")
@@ -2493,6 +2508,9 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     .map(|symbol| format!("--export={symbol}")),
             )
             .args([
+                // Without this a runtime entry point of the wrong signature links as a stub that
+                // traps on its first call.
+                "--fatal-warnings",
                 "--import-memory",
                 "--allow-undefined",
                 "--stack-first",
@@ -2500,6 +2518,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 &format!("stack-size={WASM_STACK_SIZE_BYTES}"),
                 "--export=__data_end",
                 "--export=__live_bytes",
+                &format!("--export={FIELD_TAG_EXPORT}"),
                 "-o",
             ])
             .arg(path)
@@ -2613,8 +2632,9 @@ mod tests {
             let mut block = function.test_block(entry);
             // The VM pointer every function takes first.
             block.add_parameter(Type::Ptr);
-            let a = block.add_parameter(Type::Struct(LLStruct::field_elem()));
-            let b = block.add_parameter(Type::Struct(LLStruct::field_elem()));
+            let field = LLStruct::field_elem(FieldConfig::bn254());
+            let a = block.add_parameter(Type::Struct(field.clone()));
+            let b = block.add_parameter(Type::Struct(field));
             let eq = block.field_eq(a, b);
             block.terminate_return(vec![eq]);
         });
@@ -2630,40 +2650,22 @@ mod tests {
         let ir = codegen.get_ir();
         assert_eq!(
             ir.matches("icmp eq i64").count(),
-            LLStruct::FIELD_LIMBS,
+            FieldConfig::bn254().storage_cells(),
             "{ir}"
         );
     }
 
-    /// bn254's field runtime entry points keep these names: every bn254 module's `name` section
-    /// carries them.
-    #[test]
-    fn bn254_keeps_its_field_runtime_symbol_names() {
-        assert_eq!(
-            FieldRuntimeSymbols::of(FieldConfig::bn254()),
-            Some(FieldRuntimeSymbols {
-                mul: "__field_mul",
-                add: "__field_add",
-                sub: "__field_sub",
-                div: "__field_div",
-                lt: "__field_lt",
-                from_limbs: "__field_from_limbs",
-                to_limbs: "__field_to_limbs",
-            })
-        );
-    }
-
-    /// The runtime archive has no Goldilocks instance, so the WASM path refuses Goldilocks.
-    #[test]
-    fn goldilocks_has_no_field_runtime() {
-        assert_eq!(FieldRuntimeSymbols::of(FieldConfig::goldilocks()), None);
-    }
-
     /// The runtime archive defines every field entry point codegen declares, at the ABI codegen
     /// calls it with: a module calling all seven links with no import past its memory, and computes
-    /// `(12·4 + (12 − 4)) / 4 = 14`, `4 < 12` and `12 ≮ 4`.
+    /// `(12·4 + (12 − 4)) / 4 = 14`, `4 < 12` and `12 ≮ 4`. A wrong signature links as a stub that
+    /// traps, so this runs the module on each field, whose elements lower differently.
     #[test]
     fn the_runtime_archive_defines_the_field_entry_points() {
+        the_runtime_archive_defines_the_entry_points_of(FieldConfig::bn254());
+        the_runtime_archive_defines_the_entry_points_of(FieldConfig::goldilocks());
+    }
+
+    fn the_runtime_archive_defines_the_entry_points_of(field: FieldConfig) {
         fn call<'ctx>(
             codegen: &LLVMCodeGen<'ctx>,
             function: Option<FunctionValue<'ctx>>,
@@ -2679,7 +2681,7 @@ mod tests {
         }
 
         let context = Context::create();
-        let mut codegen = LLVMCodeGen::new(&context, "field_entry_points", FieldConfig::bn254());
+        let mut codegen = LLVMCodeGen::new(&context, "field_entry_points", field);
         let i64_type = context.i64_type();
         let subject = codegen
             .module
@@ -2690,7 +2692,10 @@ mod tests {
 
         let limbs = |low: u64| -> BasicValueEnum<'_> {
             let mut values = vec![i64_type.const_int(low, false).into()];
-            values.resize(LLStruct::FIELD_LIMBS, i64_type.const_zero().into());
+            values.resize(
+                codegen.field.canonical_limbs(),
+                i64_type.const_zero().into(),
+            );
             codegen
                 .limbs_llvm_type()
                 .into_struct_type()
@@ -3680,7 +3685,7 @@ mod tests {
         ssa_builder.modify_function(main_id, |function| {
             let entry = function.function.get_entry_id();
             let mut block = function.block(entry).with_source_location(location);
-            let field_type = LLStruct::field_elem();
+            let field_type = LLStruct::field_elem(FieldConfig::bn254());
             let one = block.emit_struct_const(
                 field_type.clone(),
                 vec![
@@ -3716,7 +3721,7 @@ mod tests {
         assert!(ir.contains("!DILocation(line: 12, column: 7"));
         assert!(
             ir.lines().any(|line| {
-                line.contains("call") && line.contains("@__field_add") && line.contains("!dbg")
+                line.contains("call") && line.contains("@__bn254_add") && line.contains("!dbg")
             }),
             "field add must carry a debug location:\n{ir}"
         );

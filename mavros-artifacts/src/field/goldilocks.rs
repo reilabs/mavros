@@ -6,17 +6,16 @@
 //! handlers, costing bn254 programs 2–14% more instructions.
 //!
 //! The Montgomery radix is `R = 2^64`, so a storage cell is bit-for-bit arkworks' `Fp64` cell for
-//! the same element, and the storage cell differs from the canonical integer as it does for
-//! bn254. `p^-1 = 2^32 + 1 (mod 2^64)`, which [`montgomery_reduce`] uses.
-//!
-//! `2^64 = 2^32 - 1 (mod p)` and `2^96 = -1 (mod p)`, so a 128-bit integer reduces with shifts,
-//! one subtraction and one multiplication by `2^32 - 1` ([`reduce128`]).
+//! the same element, and the storage cell differs from the canonical integer as it does for bn254.
+//! The reductions are in [`mavros_limb_arith::goldilocks`], which is shared with the wasm runtime.
 
 use std::{
     cmp::Ordering,
     fmt,
     ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+
+use mavros_limb_arith::goldilocks::{self as arith, EPSILON};
 
 use crate::field::{
     element::FieldElement,
@@ -26,17 +25,7 @@ use crate::field::{
 // FIELD DEFINITION
 // ================================================================================================
 
-/// The Goldilocks modulus, `2^64 - 2^32 + 1`.
-pub const MODULUS: u64 = 0xffff_ffff_0000_0001;
-
-/// `2^64 mod p = 2^32 - 1`, which is also `R mod p`, the Montgomery form of 1.
-const EPSILON: u64 = 0xffff_ffff;
-
-/// `p^-1 mod 2^64`: `p = 1 - 2^32 (mod 2^64)` and `(1 - 2^32)(1 + 2^32) = 1 - 2^64`.
-const MODULUS_INVERSE: u64 = (1 << 32) + 1;
-
-/// `R^2 mod p`, which takes a canonical integer into Montgomery form.
-const R_SQUARED: u64 = ((EPSILON as u128 * EPSILON as u128) % MODULUS as u128) as u64;
+pub use mavros_limb_arith::goldilocks::MODULUS;
 
 /// An element of the Goldilocks field, held as `x·R mod p` for the integer `x` it denotes.
 ///
@@ -45,66 +34,6 @@ const R_SQUARED: u64 = ((EPSILON as u128 * EPSILON as u128) % MODULUS as u128) a
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Goldilocks(u64);
-
-/// `value·R^-1 mod p`, for `value < p·2^64`.
-///
-/// `m = lo·p^-1 (mod 2^64)` makes `m·p` agree with `value` in the low word, so `value - m·p` is
-/// `(hi - (m·p)_hi)·2^64` exactly. Both high words are below `p`, so the difference lies in
-/// `(-p, p)` and one addition of `p` makes it canonical.
-#[inline]
-const fn montgomery_reduce(value: u128) -> u64 {
-    let lo = value as u64;
-    let hi = (value >> 64) as u64;
-    let m = lo.wrapping_mul(MODULUS_INVERSE);
-    let mp_hi = ((m as u128 * MODULUS as u128) >> 64) as u64;
-    let (difference, borrow) = hi.overflowing_sub(mp_hi);
-    if borrow {
-        difference.wrapping_add(MODULUS)
-    } else {
-        difference
-    }
-}
-
-/// The Montgomery form of the canonical integer `value < p`.
-#[inline]
-const fn to_montgomery(value: u64) -> u64 {
-    montgomery_reduce(value as u128 * R_SQUARED as u128)
-}
-
-/// `value mod p`, for any `u64`. A `u64` is below `2p`, so one subtraction suffices.
-#[inline]
-fn reduce64(value: u64) -> u64 {
-    if value >= MODULUS {
-        value - MODULUS
-    } else {
-        value
-    }
-}
-
-/// `value mod p`, for any `u128`.
-///
-/// With `value = lo + 2^64·hi_lo + 2^96·hi_hi` (`hi_lo` and `hi_hi` the low and high 32 bits of
-/// the high word), `value = lo - hi_hi + hi_lo·(2^32 - 1) (mod p)`.
-#[inline]
-fn reduce128(value: u128) -> u64 {
-    let lo = value as u64;
-    let hi = (value >> 64) as u64;
-    let (hi_hi, hi_lo) = (hi >> 32, hi & EPSILON);
-
-    // A borrow wrapped the difference by `+2^64`, which is `+(2^32 - 1)`, so subtract that. The
-    // borrow means `lo < hi_hi < 2^32`, so the wrapped difference is at least `2^64 - 2^32` and
-    // this cannot borrow again.
-    let (mut sum, borrow) = lo.overflowing_sub(hi_hi);
-    if borrow {
-        sum = sum.wrapping_sub(EPSILON);
-    }
-
-    // `hi_lo·(2^32 - 1) < 2^64`. A carry out of the sum wrapped it by `-2^64`, so add `2^32 - 1`
-    // back; the wrapped sum is below `hi_lo·(2^32 - 1) <= 2^64 - 2^33 + 1`, so this cannot carry.
-    let (sum, carry) = sum.overflowing_add(hi_lo * EPSILON);
-    let sum = if carry { sum + EPSILON } else { sum };
-    reduce64(sum)
-}
 
 impl Goldilocks {
     /// The additive identity.
@@ -118,7 +47,7 @@ impl Goldilocks {
     #[must_use]
     pub const fn from_canonical(value: u64) -> Option<Goldilocks> {
         if value < MODULUS {
-            Some(Goldilocks(to_montgomery(value)))
+            Some(Goldilocks(arith::to_montgomery(value)))
         } else {
             None
         }
@@ -128,7 +57,7 @@ impl Goldilocks {
     #[inline]
     #[must_use]
     pub const fn value(self) -> u64 {
-        montgomery_reduce(self.0 as u128)
+        arith::from_montgomery(self.0)
     }
 
     /// The element's one storage cell, as a slice.
@@ -154,22 +83,13 @@ impl Goldilocks {
     /// Raises this element to `exp` (little-endian 64-bit limbs).
     #[must_use]
     pub fn pow(self, exp: impl AsRef<[u64]>) -> Goldilocks {
-        let mut result = Goldilocks::ONE;
-        for &limb in exp.as_ref().iter().rev() {
-            for bit in (0..64).rev() {
-                result = result * result;
-                if (limb >> bit) & 1 == 1 {
-                    result = result * self;
-                }
-            }
-        }
-        result
+        Goldilocks(arith::pow(self.0, exp.as_ref()))
     }
 
-    /// The multiplicative inverse, or `None` for zero: `self^(p - 2)`.
+    /// The multiplicative inverse, or `None` for zero.
     #[must_use]
     pub fn inverse(self) -> Option<Goldilocks> {
-        (!self.is_zero()).then(|| self.pow([MODULUS - 2]))
+        arith::inverse(self.0).map(Goldilocks)
     }
 }
 
@@ -179,43 +99,27 @@ impl Goldilocks {
 impl Add for Goldilocks {
     type Output = Goldilocks;
 
-    // Both operands are below `p`, so a carried sum is `a + b - 2^64 < 2^64 - 2^33 + 2`, which
-    // stays below `2^64` once `2^32 - 1` is added back.
     #[inline]
     fn add(self, rhs: Goldilocks) -> Goldilocks {
-        let (sum, carry) = self.0.overflowing_add(rhs.0);
-        let sum = if carry {
-            sum.wrapping_add(EPSILON)
-        } else {
-            sum
-        };
-        Goldilocks(reduce64(sum))
+        Goldilocks(arith::add(self.0, rhs.0))
     }
 }
 
 impl Sub for Goldilocks {
     type Output = Goldilocks;
 
-    // A borrowed difference is `a - b + 2^64`, so subtracting `2^64 - p = 2^32 - 1` gives
-    // `a - b + p`, which is below `p` and cannot borrow again.
     #[inline]
     fn sub(self, rhs: Goldilocks) -> Goldilocks {
-        let (difference, borrow) = self.0.overflowing_sub(rhs.0);
-        Goldilocks(if borrow {
-            difference.wrapping_sub(EPSILON)
-        } else {
-            difference
-        })
+        Goldilocks(arith::sub(self.0, rhs.0))
     }
 }
 
 impl Mul for Goldilocks {
     type Output = Goldilocks;
 
-    // `(a·R)(b·R)·R^-1 = (ab)·R`.
     #[inline]
     fn mul(self, rhs: Goldilocks) -> Goldilocks {
-        Goldilocks(montgomery_reduce(u128::from(self.0) * u128::from(rhs.0)))
+        Goldilocks(arith::mul(self.0, rhs.0))
     }
 }
 
@@ -238,11 +142,7 @@ impl Neg for Goldilocks {
 
     #[inline]
     fn neg(self) -> Goldilocks {
-        Goldilocks(if self.0 == 0 {
-            0
-        } else {
-            MODULUS.wrapping_sub(self.0)
-        })
+        Goldilocks(arith::neg(self.0))
     }
 }
 
@@ -273,14 +173,14 @@ impl MulAssign for Goldilocks {
 impl From<u64> for Goldilocks {
     #[inline]
     fn from(value: u64) -> Goldilocks {
-        Goldilocks(to_montgomery(reduce64(value)))
+        Goldilocks(arith::to_montgomery(arith::reduce64(value)))
     }
 }
 
 impl From<u128> for Goldilocks {
     #[inline]
     fn from(value: u128) -> Goldilocks {
-        Goldilocks(to_montgomery(reduce128(value)))
+        Goldilocks(arith::to_montgomery(arith::reduce128(value)))
     }
 }
 
@@ -496,10 +396,20 @@ mod tests {
     #[test]
     fn integers_reduce_as_arkworks_does() {
         let mut rng = ark_std::test_rng();
-        let wide: Vec<u128> = [0, 1, u128::from(MODULUS), u128::from(u64::MAX), u128::MAX]
-            .into_iter()
-            .chain((0..400).map(|_| u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64())))
-            .collect();
+        // The last two borrow from the top half and then carry, a branch random inputs reach
+        // about once in 2^32.
+        let wide: Vec<u128> = [
+            0,
+            1,
+            u128::from(MODULUS),
+            u128::from(u64::MAX),
+            u128::MAX,
+            u128::MAX << 64,
+            u128::MAX << 64 | 5,
+        ]
+        .into_iter()
+        .chain((0..400).map(|_| u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64())))
+        .collect();
         for value in wide {
             assert!(
                 agrees(Goldilocks::from(value), Oracle::from(value)),
