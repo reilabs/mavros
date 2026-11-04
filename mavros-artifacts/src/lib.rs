@@ -742,8 +742,8 @@ impl<F: MavrosField> SealedR1CS<F> {
         F::ID
     }
 
-    /// Use [`Artifact::circuit_digest`] to also bind the witness manifest, and [`Artifact::digest`]
-    /// for the bytecode and ABI too.
+    /// Covers the R1CS only: [`Artifact::circuit_digest`] adds the manifest, and
+    /// [`Artifact::digest`] the bytecode and ABI.
     pub fn digest(&self) -> [u8; 32] {
         *self.digest.get_or_init(|| self.system.digest())
     }

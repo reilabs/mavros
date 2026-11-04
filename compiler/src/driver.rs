@@ -1092,8 +1092,8 @@ impl Driver {
         Ok(manifest)
     }
 
-    /// Packs `r1cs` and `bytecode` with this driver's witness manifest and ABI; requires what
-    /// [`Self::witness_manifest`] does.
+    /// Packs `r1cs` and `bytecode` with this driver's manifest and ABI; needs what
+    /// [`Self::witness_manifest`] needs.
     pub fn artifact<F: MavrosField>(
         &self,
         r1cs: SealedR1CS<F>,

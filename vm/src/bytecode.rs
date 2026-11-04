@@ -3750,7 +3750,7 @@ impl Display for Function {
 }
 
 pub use mavros_artifacts::program_header::{
-    ConstraintLayouts, ENTRY_AD, ENTRY_VERIFIER, ENTRY_WITGEN, NO_ENTRY_POINT,
+    ConstraintLayouts, ENTRY_AD, ENTRY_VERIFIER, ENTRY_WITGEN, FUNCTION_MARKER, NO_ENTRY_POINT,
     PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC, ProgramHeader,
 };
 
@@ -3830,7 +3830,7 @@ impl Program {
         binary.push(self.entry_blob_field_count as u64);
 
         // Entry-point table: [num_entries, marker_offset_0, ...]. The offsets are absolute word
-        // indices of each entry function's `u64::MAX` marker; they are patched in once function
+        // indices of each entry function's `FUNCTION_MARKER`; they are patched in once function
         // positions are known.
         binary.push(self.entry_points.len() as u64);
         let entry_table_start = binary.len();
@@ -3855,7 +3855,7 @@ impl Program {
             // Function marker
             function_markers.push(binary.len());
             let function_offset = binary.len();
-            binary.push(u64::MAX);
+            binary.push(FUNCTION_MARKER);
             binary.push(function.frame_size as u64);
 
             let mut locations = debug_info.as_ref().map(|_| Vec::new());
@@ -3916,7 +3916,8 @@ impl Program {
 ///
 /// If the binary does not open with [`PROGRAM_MAGIC`] followed by [`PROGRAM_FORMAT_VERSION`]: a
 /// binary of any other format numbers its opcodes differently, so they would select the wrong
-/// handlers. If its field word names no supported field, or it ends inside the header.
+/// handlers. If its field word names no supported field, it ends inside the header, or an entry
+/// point is not on a function marker with room for a frame size and an opcode.
 pub fn parse_program_header(program: &[u64]) -> ProgramHeader {
     ProgramHeader::parse(program).unwrap_or_else(|error| panic!("{error}"))
 }
@@ -6130,7 +6131,7 @@ mod tests {
             0,
             0,
             0,
-            u64::MAX,
+            FUNCTION_MARKER,
             0,
         ];
         let header = parse_program_header(&binary);
@@ -6165,7 +6166,26 @@ mod tests {
             0,
             0,
             0,
-            u64::MAX,
+            FUNCTION_MARKER,
+            0,
+        ]);
+    }
+
+    #[test]
+    #[should_panic(expected = "entry point 0 at word 5 lies outside its code")]
+    fn an_entry_point_inside_the_header_is_refused() {
+        parse_program_header(&[
+            PROGRAM_MAGIC,
+            PROGRAM_FORMAT_VERSION,
+            FieldId::Goldilocks.code(),
+            0,
+            0,
+            0,
+            0,
+            1,
+            5,
+            FUNCTION_MARKER,
+            0,
             0,
         ]);
     }

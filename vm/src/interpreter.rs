@@ -263,7 +263,7 @@ pub(crate) fn prepare_dispatch(program: &mut [u64], code_start: usize) {
     let mut current_offset = code_start;
     while current_offset < program.len() {
         let opcode = program[current_offset];
-        if opcode == u64::MAX {
+        if opcode == bytecode::FUNCTION_MARKER {
             current_offset += 2;
             continue;
         }

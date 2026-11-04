@@ -5,16 +5,18 @@
 //! [ field: u32 LE ][ artifact digest: 32 bytes ][ bincode { manifest, r1cs, bytecode, abi } ]
 //! ```
 //!
-//! The magic, format version and compiler version form the [`ArtifactPreamble`], laid out the same
-//! in every format version so that a reader can name the compiler that wrote a file it cannot
-//! otherwise open. Everything after it belongs to [`ARTIFACT_FORMAT_VERSION`]; bump that when
-//! changing the header, the serialized body or the layouts.
+//! A reader must learn a file's format before it can decode the file, and should still be able to
+//! name the compiler of a file it cannot decode. So a file opens with the [`ArtifactPreamble`]: the
+//! magic, the format version and the compiler version. In formats older than the compiler field,
+//! the preamble ends at the version.
 //!
-//! Two digests identify an artifact. [`Artifact::circuit_digest`] binds the field, the R1CS and the
-//! witness manifest: the constraint system a proof is about. [`Artifact::digest`] binds the circuit
-//! digest, the VM bytecode and the ABI: the whole file. The header carries the latter and reading
-//! verifies it; the header itself is checked, not hashed, and the compiler version is informational.
-//! Reading also checks the manifest and the bytecode header against the R1CS and refuses bytes after
+//! The format version covers how everything after the preamble is encoded: bump
+//! [`ARTIFACT_FORMAT_VERSION`] when that changes. The bytecode's words are the exception, with
+//! their own [`PROGRAM_FORMAT_VERSION`]. The format version cannot cover the preamble that holds
+//! it, so changing the preamble takes a new magic.
+//!
+//! Reading checks that a file is intact and consistent: [`Artifact::digest`] must match, the
+//! manifest must agree with the R1CS and the bytecode's header with both, and no bytes may follow
 //! the body.
 //!
 //! The manifest records only what the R1CS cannot say: each parameter's name, visibility, width and
@@ -28,6 +30,8 @@
 //! write order instead: column 0 is the constant one, then the public parameters in ABI order,
 //! then the private parameters that survived dead-code elimination in ABI order, and the computed
 //! return after `main`'s internal columns.
+//!
+//! [`PROGRAM_FORMAT_VERSION`]: crate::program_header::PROGRAM_FORMAT_VERSION
 
 use std::ops::Range;
 
@@ -162,13 +166,11 @@ impl WitnessManifest {
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
 pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
-/// The first format whose header records the compiler version; the two `r1cs.bin` formats
-/// recorded none.
+/// The first format version with a compiler field.
 const COMPILER_SINCE_VERSION: u32 = 3;
 
-/// Domain separator of [`Artifact::circuit_digest`]. Its bytes and preimage are those of the
-/// `r1cs.bin` digest this format replaced, so a circuit keeps the digest it had there. Bump when
-/// the preimage encoding changes.
+/// Domain separator of [`Artifact::circuit_digest`], the one `r1cs.bin`'s digest used, so that a
+/// circuit keeps its digest. Bump when its preimage encoding changes.
 pub const CIRCUIT_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-artifact-v1\0";
 
 /// Domain separator of [`Artifact::digest`]. Bump when its preimage encoding changes.
@@ -182,9 +184,7 @@ const DIGEST_LEN: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
-    #[error(
-        "the file does not start with a well-formed MAVR1CS header, so it is not a Mavros artifact"
-    )]
+    #[error("the file does not start with a well-formed MAVR1CS header")]
     MissingHeader,
     #[error(
         "unsupported artifact format version {found}, written by {}; this reader expects \
@@ -235,8 +235,7 @@ fn u32_at(bytes: &[u8], start: usize) -> Result<u32, ArtifactError> {
         .ok_or(ArtifactError::MissingHeader)
 }
 
-/// The start of every artifact, laid out the same in every format version: enough to name the
-/// compiler that wrote the file before, or instead of, decoding the rest.
+/// The start of every artifact. Later format versions must keep this layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactPreamble {
     pub format_version: u32,
@@ -246,7 +245,7 @@ pub struct ArtifactPreamble {
 }
 
 impl ArtifactPreamble {
-    /// Needs only the magic, so it reads an artifact of any format version.
+    /// Reads the preamble of any format version, including ones [`Artifact::from_bytes`] refuses.
     pub fn peek(bytes: &[u8]) -> Result<Self, ArtifactError> {
         if bytes.get(..ARTIFACT_MAGIC.len()) != Some(&ARTIFACT_MAGIC[..]) {
             return Err(ArtifactError::MissingHeader);
@@ -267,14 +266,6 @@ impl ArtifactPreamble {
             format_version,
             compiler,
         })
-    }
-
-    /// Where the format-specific part of the header begins.
-    pub(crate) fn encoded_len(&self) -> usize {
-        match &self.compiler {
-            Some(compiler) => COMPILER_OFFSET + compiler.len(),
-            None => COMPILER_LEN_OFFSET,
-        }
     }
 }
 
@@ -351,17 +342,16 @@ impl<F: MavrosField> Artifact<F> {
         self.r1cs.field()
     }
 
-    /// SHA-256 over [`ARTIFACT_DIGEST_DOMAIN`], [`Self::circuit_digest`] and the bincode-encoded
-    /// bytecode and ABI: the identity of the whole file, which the header carries. Pin it to mean
-    /// "these exact bytes".
+    /// SHA-256 over [`ARTIFACT_DIGEST_DOMAIN`], [`Self::circuit_digest`], the bytecode and the ABI.
+    /// The magic, format version and compiler version are not hashed, so two files that differ
+    /// only in those share a digest. Reading checks it to catch corruption; a forger can recompute
+    /// it.
     pub fn digest(&self) -> [u8; 32] {
         self.digest
     }
 
-    /// SHA-256 over [`CIRCUIT_DIGEST_DOMAIN`], the field-bound [`R1CS::digest`] and the
-    /// bincode-encoded manifest: the identity of the constraint system and its witness layout,
-    /// which a codegen-only change leaves alone. Pin it to mean "the same circuit", as a verifier
-    /// or a proof transcript should.
+    /// SHA-256 over [`CIRCUIT_DIGEST_DOMAIN`], [`R1CS::digest`] (which covers the field) and the
+    /// manifest. A change to only the bytecode or the ABI does not move it.
     pub fn circuit_digest(&self) -> [u8; 32] {
         self.circuit_digest
     }
@@ -386,8 +376,7 @@ impl<F: MavrosField> Artifact<F> {
         &self.compiler
     }
 
-    /// For a consumer that must own the R1CS without cloning it. Read [`Self::digest`] or
-    /// [`Self::circuit_digest`] first; they are not among the parts.
+    /// Moves the contents out. The digests are left behind, so read them first.
     pub fn into_parts(self) -> ArtifactParts<F> {
         ArtifactParts {
             compiler: self.compiler,
@@ -421,18 +410,20 @@ impl<F: MavrosField> Artifact<F> {
         Ok(bytes)
     }
 
-    /// Reads an artifact, verifying its digest, then the manifest and the LogUp layout
-    /// ([`LogupStrides::try_new`]) against the R1CS, and the bytecode header against both.
-    /// Trailing bytes are an error.
+    /// Reads an artifact, checking its digest, the manifest and LogUp layout against the R1CS, and
+    /// the bytecode's header against both. Trailing bytes are an error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArtifactError> {
-        let preamble = ArtifactPreamble::peek(bytes)?;
-        if preamble.format_version != ARTIFACT_FORMAT_VERSION {
-            return Err(ArtifactError::UnsupportedVersion {
-                found: preamble.format_version,
-                compiler: preamble.compiler,
-            });
-        }
-        let field_offset = preamble.encoded_len();
+        let compiler = match ArtifactPreamble::peek(bytes)? {
+            ArtifactPreamble {
+                format_version: ARTIFACT_FORMAT_VERSION,
+                compiler: Some(compiler),
+            } => compiler,
+            ArtifactPreamble {
+                format_version: found,
+                compiler,
+            } => return Err(ArtifactError::UnsupportedVersion { found, compiler }),
+        };
+        let field_offset = COMPILER_OFFSET + compiler.len();
         let digest_offset = field_offset + FIELD_LEN;
         let body_offset = digest_offset + DIGEST_LEN;
         let field_code = u32_at(bytes, field_offset)?;
@@ -450,9 +441,6 @@ impl<F: MavrosField> Artifact<F> {
             .try_into()
             .expect("32 bytes");
         let body: Body<F> = body_options().deserialize(&bytes[body_offset..])?;
-        let compiler = preamble
-            .compiler
-            .expect("the current format records the compiler version");
         let artifact = Self::new(
             compiler,
             body.manifest,
@@ -483,7 +471,7 @@ impl<F: MavrosField> Artifact<F> {
     }
 }
 
-/// The bytecode header must describe the program the R1CS and manifest describe.
+/// Checks the bytecode's header against the R1CS and manifest. The opcode stream is not validated.
 fn check_bytecode<F: MavrosField>(
     bytecode: &[u64],
     r1cs: &R1CS<F>,
@@ -499,15 +487,6 @@ fn check_bytecode<F: MavrosField>(
     }
     if !header.has_layouts(r1cs.witness_layout, r1cs.constraints_layout) {
         return Err("the bytecode's constraint layouts disagree with the R1CS".to_string());
-    }
-    let len = bytecode.len();
-    if header.code_start > len
-        || header
-            .entry_points
-            .iter()
-            .any(|&entry| entry != NO_ENTRY_POINT && entry >= len)
-    {
-        return Err("the bytecode's header points past its end".to_string());
     }
     for (entry, name) in [(ENTRY_WITGEN, "witgen"), (ENTRY_AD, "AD")] {
         if header
@@ -534,8 +513,10 @@ fn check_bytecode<F: MavrosField>(
 mod tests {
     use super::*;
     use crate::{
-        ConstraintsLayout, Field, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout,
-        program_header::{ConstraintLayouts, PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC},
+        ConstraintsLayout, Field, Goldilocks, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout,
+        program_header::{
+            ConstraintLayouts, FUNCTION_MARKER, PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC,
+        },
     };
 
     /// `fn main(x: Field, y: pub Field) -> pub Field { x * y }`: columns are
@@ -588,7 +569,7 @@ mod tests {
     }
 
     /// A header agreeing with `manifest` and `r1cs`: no constant pool or globals, witgen and AD
-    /// entries at the one function marker that follows, no code.
+    /// entries at the one function that follows, which is a marker, a frame size and one opcode.
     fn bytecode(manifest: &WitnessManifest, r1cs: &R1CS) -> Vec<u64> {
         let mut words = vec![
             PROGRAM_MAGIC,
@@ -606,7 +587,7 @@ mod tests {
             marker,
             marker,
         ]);
-        words.push(u64::MAX);
+        words.extend([FUNCTION_MARKER, 0, 0]);
         words
     }
 
@@ -642,7 +623,8 @@ mod tests {
     }
 
     fn digest_range(bytes: &[u8]) -> Range<usize> {
-        let start = ArtifactPreamble::peek(bytes).unwrap().encoded_len() + FIELD_LEN;
+        let compiler = ArtifactPreamble::peek(bytes).unwrap().compiler.unwrap();
+        let start = COMPILER_OFFSET + compiler.len() + FIELD_LEN;
         start..start + DIGEST_LEN
     }
 
@@ -700,6 +682,13 @@ mod tests {
     fn artifact_rejects_invalid_headers() {
         assert!(matches!(read(&[]), Err(ArtifactError::MissingHeader)));
         let mut bytes = bytes_of(manifest(), r1cs());
+        assert!(matches!(
+            Artifact::<Goldilocks>::from_bytes(&bytes),
+            Err(ArtifactError::WrongField {
+                expected: FieldId::Goldilocks,
+                found: FieldId::Bn254,
+            })
+        ));
         let body = digest_range(&bytes).end;
         for cut in [COMPILER_OFFSET + 1, body - 1] {
             assert!(
@@ -742,6 +731,29 @@ mod tests {
                 found: 1,
                 compiler: None,
             })
+        ));
+    }
+
+    /// A new format version must not change the preamble. This spells it in literal bytes at the
+    /// highest version, so a version bump does not need to touch it.
+    #[test]
+    fn preamble_layout_is_stable() {
+        let mut bytes = b"MAVR1CS\0".to_vec();
+        bytes.extend_from_slice(&[0xff; 4]);
+        bytes.extend_from_slice(&[3, 0, 0, 0]);
+        bytes.extend_from_slice(b"9.9");
+        bytes.extend_from_slice(b"whatever a later format puts here");
+        assert_eq!(
+            ArtifactPreamble::peek(&bytes).unwrap(),
+            ArtifactPreamble {
+                format_version: u32::MAX,
+                compiler: Some("9.9".to_string()),
+            }
+        );
+        assert!(matches!(
+            read(&bytes),
+            Err(ArtifactError::UnsupportedVersion { found: u32::MAX, compiler: Some(compiler) })
+                if compiler == "9.9"
         ));
     }
 
@@ -855,33 +867,116 @@ mod tests {
         }
     }
 
-    /// Words: 0 magic, 1 version, 2 field, 3 layout tag, 4..12 layouts, 12 pool length,
-    /// 13 globals, 14 entry blob, 15 entry count, 16 witgen entry, 17 AD entry, 18 marker.
+    /// Words: 0 magic, 1 version, 2 field, 3 layout tag, 4..13 layouts, 13 pool length,
+    /// 14 globals, 15 entry blob, 16 entry count, 17 witgen entry, 18 AD entry, 19 marker,
+    /// 20 frame size, 21 opcode.
     #[test]
     fn artifact_rejects_bytecode_that_disagrees_with_the_circuit() {
-        let cases: [(&str, fn(&mut Vec<u64>)); 10] = [
-            ("empty", |b| b.clear()),
-            ("no magic", |b| b[0] = 0),
-            ("another format version", |b| b[1] += 1),
-            ("another field", |b| b[2] = FieldId::Goldilocks.code()),
-            ("another algebraic size", |b| b[4] += 1),
-            ("another entry blob", |b| b[15] += 1),
-            ("entry past the end", |b| b[17] = 99),
-            ("no code after the header", |b| b.truncate(19)),
-            ("no AD entry", |b| b[18] = NO_ENTRY_POINT as u64),
-            ("witgen entry only", |b| {
-                b[16] = 1;
-                b.remove(17);
-            }),
+        let cases: [(&str, fn(&mut Vec<u64>), &str); 22] = [
+            ("empty", |b| b.clear(), "not a mavros VM program binary"),
+            ("no magic", |b| b[0] = 0, "not a mavros VM program binary"),
+            (
+                "another format version",
+                |b| b[1] += 1,
+                "unsupported VM program format version",
+            ),
+            ("unknown field", |b| b[2] = 99, "names no supported field"),
+            (
+                "another field",
+                |b| b[2] = FieldId::Goldilocks.code(),
+                "the bytecode is over",
+            ),
+            (
+                "invalid layout tag",
+                |b| b[3] = 2,
+                "invalid constraint layout tag",
+            ),
+            ("no layouts", |b| b[3] = 0, "constraint layouts disagree"),
+            (
+                "another algebraic size",
+                |b| b[4] += 1,
+                "constraint layouts disagree",
+            ),
+            ("another entry blob", |b| b[15] += 1, "entry blob of"),
+            (
+                "ends inside the header",
+                |b| b.truncate(3),
+                "ends inside its header",
+            ),
+            (
+                "pool past the end",
+                |b| b[13] = u64::MAX,
+                "ends inside its header",
+            ),
+            (
+                "entry table past the end",
+                |b| b[16] = u64::MAX,
+                "ends inside its header",
+            ),
+            (
+                "entry past the end",
+                |b| b[17] = 99,
+                "lies outside its code",
+            ),
+            (
+                "entry at the top of the address space",
+                |b| b[17] = u64::MAX - 1,
+                "lies outside its code",
+            ),
+            (
+                "entry inside the header",
+                |b| b[17] = 5,
+                "lies outside its code",
+            ),
+            (
+                "entry one word before the code",
+                |b| b[17] = 18,
+                "lies outside its code",
+            ),
+            (
+                "no code after the header",
+                |b| b.truncate(19),
+                "lies outside its code",
+            ),
+            (
+                "entry without an opcode",
+                |b| b.truncate(21),
+                "lies outside its code",
+            ),
+            (
+                "entry not at a marker",
+                |b| b[19] = 0,
+                "is not a function marker",
+            ),
+            (
+                "no witgen entry",
+                |b| b[17] = NO_ENTRY_POINT as u64,
+                "no witgen entry point",
+            ),
+            (
+                "no AD entry",
+                |b| b[18] = NO_ENTRY_POINT as u64,
+                "no AD entry point",
+            ),
+            (
+                "witgen entry only",
+                |b| {
+                    b[16] = 1;
+                    b.remove(17);
+                    // The marker moved down with the removed slot.
+                    b[17] = 18;
+                },
+                "no AD entry point",
+            ),
         ];
-        for (case, mutate) in cases {
+        for (case, mutate, expected) in cases {
             let mut words = bytecode(&manifest(), &r1cs());
             mutate(&mut words);
             let bytes = build(manifest(), r1cs(), words, abi()).to_bytes().unwrap();
-            assert!(
-                matches!(read(&bytes), Err(ArtifactError::Bytecode(_))),
-                "{case}"
-            );
+            match read(&bytes) {
+                Err(ArtifactError::Bytecode(message)) if message.contains(expected) => {}
+                other => panic!("{case}: expected {expected:?}, got {:?}", other.err()),
+            }
         }
     }
 
@@ -900,7 +995,7 @@ mod tests {
         );
         assert_eq!(
             hex(&pinned.digest()),
-            "b9c22073231d955fba155a857fb6f5cbf099f28df986f8c2065b1e2fc63ac0e5"
+            "102d64fce93fcfd06a24434db0568142ea92ec39e04078c99cc47e6274b08545"
         );
 
         // The compiler version stays outside both digests.

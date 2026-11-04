@@ -26,13 +26,16 @@ information on how to use Mavros.
 To use Mavros, navigate to the **root of a Noir project** (the directory containing `Nargo.toml`) in
 your shell. Then run `mavros compile`.
 
-This writes one file, `target/program.mavros`. Its `MAVR1CS` header holds the format version, the
-compiler's release version (the workspace `version` in `Cargo.toml`), the field tag and the artifact
-digest; the body holds the witness manifest, the R1CS, the VM bytecode with the witgen and AD entry
-points, and the ABI as JSON. Two digests identify it: the circuit digest hashes the R1CS (which
-hashes its field tag) and the manifest; the artifact digest hashes the circuit digest, the bytecode
-and the ABI, and is checked whenever the file is read. The header itself is checked, not hashed, and
-the compiler version is informational.
+This writes one file, `target/program.mavros`:
+
+| Part   | Contents                                                                      |
+| ------ | ----------------------------------------------------------------------------- |
+| Header | `MAVR1CS` magic, format version, compiler version, field tag, artifact digest |
+| Body   | Witness manifest, R1CS, VM bytecode (witgen and AD entry points), ABI as JSON |
+
+The circuit digest covers the R1CS, which hashes its field tag, and the manifest. The artifact
+digest covers the circuit digest, the bytecode and the ABI, and is checked whenever the file is
+read. The magic, format version and compiler version are not hashed.
 
 Pass `--include-debug-info` to additionally write `target/program.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;
@@ -72,22 +75,27 @@ mavros compile ./my-noir-project --verifier-output target/verifier.json
 ```
 
 `verifier.json` contains the verifier bytecode, `witness_layout`, `constraints_layout` and the
-`circuit_digest` of the `program.mavros` it was compiled from; it contains no matrix rows or prover
+`circuit_digest` of the `program.mavros` written alongside it; it contains no matrix rows or prover
 entry points. `--include-debug-info` also writes `verifier.debug.json`. Default compilation emits no
 verifier code. `--verify` compiles and runs only the verifier artifact.
 
 Rust callers compile it with `mavros_compiler::api::compile_verifier_bytecode(&mut driver, options)`
 and pass that binary to
 `run_verifier_from_binary(&binary, &r, &w, witness_layout, constraints_layout, None)`. No R1CS
-matrices are required at runtime. Compare the verifier's `circuit_digest` with the artifact's before
-trusting the pair. Verifier execution uses a dedicated forward bytecode entry point: witness writes
-read the next value from `w`, linear combinations use field arithmetic, and constraints accumulate
-three scalars weighted by `r`. It allocates no AD expression nodes or matrix output vectors. Lookup
-and table constraints are evaluated from the same layouts. The bytecode header names the field and
-the constraint layouts of the artifact it belongs to; recompile older artifacts before using the
-current VM. AD and verifier execution reject mismatched layouts. LLVM and WASM artifacts still
-expose the existing witgen and AD entry points; the forward verifier is currently available through
-the VM API and CLI.
+matrices are required at runtime.
+
+Both artifacts must come from the same circuit compilation; applications must associate the verifier
+artifact with their trusted circuit configuration. Comparing the two `circuit_digest`s catches a
+verifier from another circuit, not a forged one: nothing hashes the verifier bytecode.
+
+The verifier runs forward through its own bytecode entry point, allocating no AD nodes or matrix
+outputs: witness writes read the next value from `w`, and every constraint, lookups and tables
+included, adds to three scalars weighted by `r`.
+
+The bytecode header names its artifact's field and constraint layouts, and AD and verifier execution
+reject mismatched layouts. Recompile older artifacts before using the current VM. LLVM and WASM
+artifacts expose only the witgen and AD entry points; the forward verifier runs through the VM API
+and CLI.
 
 ### Per-Function FlameGraphs
 

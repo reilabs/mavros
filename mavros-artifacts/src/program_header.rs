@@ -1,9 +1,6 @@
-//! The header every VM program binary opens with.
-//!
-//! The compiler writes it, the VM reads it before dispatch, and [`Artifact::from_bytes`] checks
-//! the bytecode an artifact carries against its R1CS and manifest through it. It lives here,
-//! below both, because it is their shared contract and encodes this crate's [`WitnessLayout`] and
-//! [`ConstraintsLayout`].
+//! The header every VM program binary opens with. The compiler writes it, the VM reads it, and
+//! [`Artifact::from_bytes`] checks it against the artifact's R1CS and manifest. The opcode stream
+//! after it is not validated.
 //!
 //! [`Artifact::from_bytes`]: crate::Artifact::from_bytes
 
@@ -17,12 +14,15 @@ pub const ENTRY_AD: usize = 1;
 pub const ENTRY_VERIFIER: usize = 2;
 /// An absent entry in a program or serialized entry table.
 pub const NO_ENTRY_POINT: usize = usize::MAX;
+/// The word that opens every function, followed by its frame size and then its opcodes.
+pub const FUNCTION_MARKER: u64 = u64::MAX;
 
 /// The first word of every program binary: `MAVROSVM` as big-endian ASCII.
 pub const PROGRAM_MAGIC: u64 = u64::from_be_bytes(*b"MAVROSVM");
 
 /// The program binary's format version, its second word. Changing existing production opcode
-/// numbers or operands, the `BoxedLayout` encoding, or the header layout must bump this.
+/// numbers or operands, the `BoxedLayout` encoding, the function marker, or the header layout must
+/// bump this.
 /// Appending opcodes without changing existing production encodings does not require a bump.
 /// The third word names the program's field ([`FieldId::code`]).
 pub const PROGRAM_FORMAT_VERSION: u64 = 5;
@@ -85,7 +85,8 @@ impl ProgramHeader {
     ///
     /// If the binary does not open with [`PROGRAM_MAGIC`] followed by [`PROGRAM_FORMAT_VERSION`]:
     /// a binary of any other format numbers its opcodes differently, so they would select the
-    /// wrong handlers. If its field word names no supported field, or it ends inside the header.
+    /// wrong handlers. If its field word names no supported field, it ends inside the header, or
+    /// an entry point is not on a function marker with room for a frame size and an opcode.
     pub fn parse(program: &[u64]) -> Result<Self, String> {
         if program.first() != Some(&PROGRAM_MAGIC) {
             return Err("not a mavros VM program binary".to_string());
@@ -122,10 +123,27 @@ impl ProgramHeader {
         let global_frame_size = word(off)? as usize;
         let entry_blob_field_count = word(off + 1)? as usize;
         let num_entries = word(off + 2)? as usize;
-        let entry_points = words(off + 3, num_entries)?
+        let entry_points: Vec<usize> = words(off + 3, num_entries)?
             .iter()
             .map(|&offset| offset as usize)
             .collect();
+        let code_start = off + 3 + num_entries;
+        for (index, &entry) in entry_points.iter().enumerate() {
+            if entry == NO_ENTRY_POINT {
+                continue;
+            }
+            // The VM reads the frame size at `entry + 1` and starts at `entry + 2`, unchecked.
+            if !(code_start..program.len() - 2).contains(&entry) {
+                return Err(format!(
+                    "the VM program's entry point {index} at word {entry} lies outside its code"
+                ));
+            }
+            if program[entry] != FUNCTION_MARKER {
+                return Err(format!(
+                    "the VM program's entry point {index} at word {entry} is not a function marker"
+                ));
+            }
+        }
         Ok(ProgramHeader {
             field,
             constraint_layouts,
@@ -133,7 +151,7 @@ impl ProgramHeader {
             global_frame_size,
             entry_blob_field_count,
             entry_points,
-            code_start: off + 3 + num_entries,
+            code_start,
         })
     }
 }
