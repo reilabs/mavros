@@ -57,8 +57,8 @@ The functional runner runs every discovered binary package under both BN254 and 
 `STATUS.md` identifies each row's field and reports a separate success percentage for each field;
 the regression and growth checks compare only matching test/field pairs. Older reports without a
 field column are treated as BN254 baselines. Success percentages count passed or not-applicable
-pipeline stages, excluding intentionally ignored tests. Unsupported Goldilocks frontend, input
-decoding, and WASM operations remain visible as failures.
+pipeline stages, excluding intentionally ignored tests. Unsupported Goldilocks frontend and input
+decoding remain visible as failures.
 
 CI runs the two fields as separate parallel corpus jobs. Pass `--field bn254` or
 `--field goldilocks` to run the full corpus for just one field locally. The regression job waits for
@@ -166,10 +166,11 @@ This works as follows:
 
 1. The compiler lowers the witness generator SSA to LLVM IR (using
    [`inkwell`](https://github.com/TheDan64/inkwell)/LLVM 22), compiling it for the `wasm32` target.
-   `wasm32` target.
-2. The generated WASM calls a small set of external functions (`__field_mul`, `__write_witness`,
-   `__write_a/b/c`) that are implemented in the [`mavros-wasm-runtime`](../wasm-runtime/) crate.
-   This runtime handles BN254 field arithmetic and writes outputs into memory.
+2. The generated WASM calls a small set of runtime functions that are implemented in the
+   [`mavros-wasm-runtime`](../wasm-runtime/) crate and linked into the module: field arithmetic
+   (`__bn254_*` and `__goldilocks_*`), wide-integer helpers (`__int_*`) and the allocator (`malloc`,
+   `free`). It exports `__mavros_field` to ensure that it is not loaded on a host that does not
+   support its field.
 3. A `.wasm.meta.json` sidecar file is written alongside the `.wasm` with the ABI and R1CS layout
    info, so the host knows how to set up the witness generator's inputs and interpret its outputs.
 

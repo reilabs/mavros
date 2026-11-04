@@ -2312,6 +2312,7 @@ dependencies = [
  "ark-ff",
  "ark-std",
  "bincode",
+ "mavros-limb-arith",
  "num-traits",
  "serde",
  "sha2 0.10.9",

@@ -7,7 +7,7 @@ use harness::{
     BinaryOpOracle, Compiled, HarnessField, Verdict, bytecode_listing, input_block, input_block_in,
     main_program, main_program_in,
 };
-use mavros_artifacts::{Field, FieldConfig, FieldElement, InputValueOrdered};
+use mavros_artifacts::{Field, FieldConfig, FieldElement, FieldId, InputValueOrdered};
 use mavros_compiler::{
     compiler::{
         passes::shared::limbs::{widest_injective_int_bits, witness_limb_bits},
@@ -1859,8 +1859,29 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
     check_limbed_pairs_in::<Field>(limbed, bits, pairs, rhs);
 }
 
-/// `limbed` over `pairs`, all in one program over `F`, against the model, and on the WASM lane
-/// where `F` has one.
+/// Whether a limbed grid over `F` runs on the WASM lane as well.
+///
+/// Goldilocks' 16-bit witness limb makes a wide program large: past 64 bits, LLVM spends about five
+/// seconds on each twenty-pair program, and twenty 128-bit signed products exceed the 50 000 locals
+/// a wasm function holds. Past the limbing a program is field operations at any width, so
+/// `every_limbed_operation_runs_on_wasm_at_128_bits` samples those widths one pair to a program.
+fn limbed_grid_has_a_wasm_lane<F: HarnessField>(bits: usize) -> bool {
+    F::ID != FieldId::Goldilocks || bits <= 64
+}
+
+/// [`check_limbed_pairs_on`], on the lanes [`limbed_grid_has_a_wasm_lane`] gives this width.
+fn check_limbed_pairs_in<F: HarnessField>(
+    limbed: Limbed,
+    bits: usize,
+    pairs: Vec<(IntBits, IntBits)>,
+    rhs: Rhs,
+) {
+    let wasm_lane = limbed_grid_has_a_wasm_lane::<F>(bits);
+    check_limbed_pairs_on::<F>(limbed, bits, pairs, rhs, wasm_lane);
+}
+
+/// `limbed` over `pairs`, all in one program over `F`, against the model, and on the WASM lane when
+/// `wasm_lane` asks for it.
 ///
 /// Each operand is a corner constant selected by a witnessed bit: a witnessed value held as limbs.
 ///
@@ -1869,11 +1890,12 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
 /// ([`Limbed::idle_rhs`]). The pipeline must refuse on that run only. A constant right operand is
 /// not selected, so only the left goes idle, to zero or to all ones where zero is rejected (as
 /// `0 - INT_MIN` is); a pure left operand likewise leaves only the right to go idle.
-fn check_limbed_pairs_in<F: HarnessField>(
+fn check_limbed_pairs_on<F: HarnessField>(
     limbed: Limbed,
     bits: usize,
     pairs: Vec<(IntBits, IntBits)>,
     rhs: Rhs,
+    wasm_lane: bool,
 ) {
     let answers: Vec<Option<IntBits>> = pairs.iter().map(|(a, b)| limbed.model(a, b)).collect();
     let zero = IntBits::zero(bits);
@@ -1958,7 +1980,12 @@ fn check_limbed_pairs_in<F: HarnessField>(
             vec![all.expect("there is at least one corner pair")]
         },
     );
-    let compiled = Compiled::<F>::compile(ssa).unwrap_or_else(|error| {
+    let compiled = if wasm_lane {
+        Compiled::<F>::compile(ssa)
+    } else {
+        Compiled::<F>::compile_for_the_vm(ssa)
+    }
+    .unwrap_or_else(|error| {
         panic!("{limbed:?} at {bits} bits, {rhs:?} right operand, does not compile: {error}")
     });
 
@@ -1972,7 +1999,6 @@ fn check_limbed_pairs_in<F: HarnessField>(
         ]
     };
     let inputs = |selected: u128| input_block_in::<F>(&block(selected).each_ref());
-    let wasm_inputs = |selected: u128| input_block(&block(selected).each_ref());
 
     let none = u128::from(u32::MAX);
     let verdict = compiled.run(&inputs(none));
@@ -1980,9 +2006,9 @@ fn check_limbed_pairs_in<F: HarnessField>(
         verdict.is_accepted(),
         "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on some pair it accepts: {verdict:?}"
     );
-    if let Some(bn254) = compiled.as_bn254() {
-        let verdict = bn254
-            .run_wasm(&wasm_inputs(none))
+    if wasm_lane {
+        let verdict = compiled
+            .run_wasm(&inputs(none))
             .expect("the WASM lane builds");
         assert!(
             verdict.is_accepted(),
@@ -2000,9 +2026,9 @@ fn check_limbed_pairs_in<F: HarnessField>(
             "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
              pipeline answered {verdict:?}"
         );
-        if let Some(bn254) = compiled.as_bn254() {
-            let verdict = bn254
-                .run_wasm(&wasm_inputs(index as u128))
+        if wasm_lane {
+            let verdict = compiled
+                .run_wasm(&inputs(index as u128))
                 .expect("the WASM lane builds");
             assert!(
                 verdict.rejects(),
@@ -5277,15 +5303,13 @@ fn check_a_limbed_cast_to_field<F: HarnessField>() {
             "{:?}: x = {x}: {verdict:?}",
             field.id()
         );
-        if let Some(bn254) = compiled.as_bn254() {
-            let verdict = bn254
-                .run_wasm(&[
-                    InputValueOrdered::Field(Field::from(x)),
-                    InputValueOrdered::Field(Field::from(residue.clone())),
-                ])
-                .expect("the WASM lane builds");
-            assert!(verdict.is_accepted(), "x = {x} on WASM: {verdict:?}");
-        }
+        let verdict = compiled
+            .run_wasm(&[
+                input.clone(),
+                InputValueOrdered::Field(F::of_biguint(&residue)),
+            ])
+            .expect("the WASM lane builds");
+        assert!(verdict.is_accepted(), "x = {x} on WASM: {verdict:?}");
         let wrong = (&residue + 1u8) % &modulus;
         let verdict = compiled.run(&[input, InputValueOrdered::Field(F::of_biguint(&wrong))]);
         assert!(
@@ -7561,12 +7585,10 @@ fn check_a_witnessed_field_reads_back_as_a_wide_integer<F: HarnessField>(
             };
             let verdict = compiled.run(&inputs(&high_window));
             assert!(verdict.is_accepted(), "{what}: {verdict:?}");
-            if let Some(bn254) = compiled.as_bn254() {
-                let inputs = [value, &low, &high_window]
-                    .map(|element| InputValueOrdered::Field(Field::from(element.clone())));
-                let verdict = bn254.run_wasm(&inputs).expect("the WASM lane builds");
-                assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
-            }
+            let verdict = compiled
+                .run_wasm(&inputs(&high_window))
+                .expect("the WASM lane builds");
+            assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
             let wrong = &high_window ^ &one;
             assert!(
                 !compiled.run(&inputs(&wrong)).is_accepted(),

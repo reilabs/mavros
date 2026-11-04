@@ -42,15 +42,15 @@ const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
         "sum.overflowing_add(hi_lo * EPSILON)",
         GOLDILOCKS_WHY,
     ),
-    (GOLDILOCKS, "self.0.overflowing_add(rhs.0)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "a.overflowing_add(b)", GOLDILOCKS_WHY),
     (GOLDILOCKS, "sum.wrapping_add(EPSILON)", GOLDILOCKS_WHY),
-    (GOLDILOCKS, "self.0.overflowing_sub(rhs.0)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "a.overflowing_sub(b)", GOLDILOCKS_WHY),
     (
         GOLDILOCKS,
         "difference.wrapping_sub(EPSILON)",
         GOLDILOCKS_WHY,
     ),
-    (GOLDILOCKS, "MODULUS.wrapping_sub(self.0)", GOLDILOCKS_WHY),
+    (GOLDILOCKS, "MODULUS.wrapping_sub(value)", GOLDILOCKS_WHY),
     (
         "opcode-gen/src/lib.rs",
         "read_cycles().wrapping_sub(__prof_start)",
@@ -64,7 +64,7 @@ const NOT_INTEGER_SEMANTICS: &[(&str, &str, &str)] = &[
 ];
 
 /// The hand-written Goldilocks field.
-const GOLDILOCKS: &str = "mavros-artifacts/src/field/goldilocks.rs";
+const GOLDILOCKS: &str = "limb-arith/src/goldilocks.rs";
 
 /// Why its wrapping arithmetic is waived.
 const GOLDILOCKS_WHY: &str = "Goldilocks field arithmetic: host `u64` words reduced modulo the \
