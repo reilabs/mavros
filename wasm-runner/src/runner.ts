@@ -85,20 +85,20 @@ export async function run(
   view.setUint32(vmPtr + 12, bPtr, true);
   view.setUint32(vmPtr + 16, cPtr, true);
 
-  // Load the WASM runtime module (provides __field_mul)
+  // Load the WASM runtime module (provides __bn254_mul)
   const runtimeMod = await loadRuntimeModule();
   const runtimeInstance = await WebAssembly.instantiate(runtimeMod, {
     env: { memory },
   });
   const runtimeExports = runtimeInstance.exports as {
-    __field_mul: Function;
+    __bn254_mul: Function;
   };
 
-  // Import __field_mul from the runtime WASM module
+  // Import __bn254_mul from the runtime WASM module
   const imports: WebAssembly.Imports = {
     env: {
       memory,
-      __field_mul: runtimeExports.__field_mul,
+      __bn254_mul: runtimeExports.__bn254_mul,
     },
   };
 

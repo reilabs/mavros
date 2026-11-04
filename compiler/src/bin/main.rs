@@ -80,8 +80,7 @@ pub struct ProgramOptions {
     pub profile: bool,
 
     /// Target LogUp lookup-argument soundness, in bits of security. The compiler repeats the
-    /// argument at independent challenges as many times as needed (at most 16) and reports the
-    /// count. The LLVM and WASM outputs refuse a target that needs more than one repetition.
+    /// argument at independent challenges as many times as needed (<= 16) and reports the count.
     #[arg(long, value_name = "BITS", global = true, default_value_t = DEFAULT_LOGUP_SOUNDNESS_BITS)]
     pub logup_soundness: u32,
 

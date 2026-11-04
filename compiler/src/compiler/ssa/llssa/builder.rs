@@ -1,3 +1,5 @@
+use mavros_artifacts::FieldConfig;
+
 use crate::compiler::ssa::{
     FunctionId, ValueId,
     builder::{BlockEditor, BlockEmitter, FunctionBuilder, InstrBuilder, SSABuilder},
@@ -10,6 +12,9 @@ use crate::compiler::ssa::{
 // ---------------------------------------------------------------------------
 
 pub trait LLEmitter {
+    /// The field of the LLSSA being built.
+    fn field(&self) -> FieldConfig;
+
     fn fresh_value(&mut self) -> ValueId;
     fn emit_ll(&mut self, instruction: LLOp);
     fn emit_located_ll(&mut self, instruction: LocatedLLOp);
@@ -169,7 +174,6 @@ pub trait LLEmitter {
         r
     }
 
-    // FIELD-ASSUMPTION: L3-limb-op
     fn field_to_limbs(&mut self, src: ValueId) -> ValueId {
         let r = self.fresh_value();
         self.emit_ll(LLOp::FieldToLimbs { result: r, src });
@@ -337,9 +341,9 @@ pub trait LLEmitter {
     fn next_d_coeff(&mut self) -> ValueId {
         let coeffs_slot = self.ad_vm_field_ptr(LLStruct::AD_VM_COEFFS);
         let coeffs = self.ll_load(coeffs_slot, Type::Ptr);
-        let value = self.ll_load(coeffs, Type::Struct(LLStruct::field_elem()));
+        let value = self.ll_load(coeffs, Type::Struct(LLStruct::field_elem(self.field())));
         let one = self.emit_int_const(32, 1);
-        let next_coeffs = self.array_elem_ptr(coeffs, LLStruct::field_elem(), one);
+        let next_coeffs = self.array_elem_ptr(coeffs, LLStruct::field_elem(self.field()), one);
         self.ll_store(coeffs_slot, next_coeffs);
         value
     }
@@ -348,7 +352,7 @@ pub trait LLEmitter {
         let out_d_slot = self.ad_vm_field_ptr(ad_out_field(matrix));
         let out_d = self.ll_load(out_d_slot, Type::Ptr);
         let product = self.field_arith(FieldArithOp::Mul, const_value, sensitivity);
-        let old = self.ll_load(out_d, Type::Struct(LLStruct::field_elem()));
+        let old = self.ll_load(out_d, Type::Struct(LLStruct::field_elem(self.field())));
         let new_value = self.field_arith(FieldArithOp::Add, old, product);
         self.ll_store(out_d, new_value);
     }
@@ -356,8 +360,8 @@ pub trait LLEmitter {
     fn ad_write_witness(&mut self, matrix: DMatrix, witness_index: ValueId, sensitivity: ValueId) {
         let out_d_slot = self.ad_vm_field_ptr(ad_out_field(matrix));
         let out_d = self.ll_load(out_d_slot, Type::Ptr);
-        let target = self.array_elem_ptr(out_d, LLStruct::field_elem(), witness_index);
-        let old = self.ll_load(target, Type::Struct(LLStruct::field_elem()));
+        let target = self.array_elem_ptr(out_d, LLStruct::field_elem(self.field()), witness_index);
+        let old = self.ll_load(target, Type::Struct(LLStruct::field_elem(self.field())));
         let new_value = self.field_arith(FieldArithOp::Add, old, sensitivity);
         self.ll_store(target, new_value);
     }
@@ -388,7 +392,7 @@ pub trait LLEmitter {
         let cursor = self.ll_load(cursor_slot, Type::Ptr);
         self.ll_store(cursor, value);
         let one = self.emit_int_const(32, 1);
-        let next = self.array_elem_ptr(cursor, LLStruct::field_elem(), one);
+        let next = self.array_elem_ptr(cursor, LLStruct::field_elem(self.field()), one);
         self.ll_store(cursor_slot, next);
     }
 }
@@ -416,6 +420,10 @@ pub type LLSSABuilder<'a> = SSABuilder<'a, LLOp, Type, Constant>;
 // ---------------------------------------------------------------------------
 
 impl LLEmitter for LLInstrBuilder<'_> {
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
+
     fn fresh_value(&mut self) -> ValueId {
         self.ssa.fresh_value()
     }
@@ -443,6 +451,10 @@ impl LLEmitter for LLInstrBuilder<'_> {
 }
 
 impl LLEmitter for LLBlockEmitter<'_> {
+    fn field(&self) -> FieldConfig {
+        self.ssa.field()
+    }
+
     fn fresh_value(&mut self) -> ValueId {
         self.ssa.fresh_value()
     }

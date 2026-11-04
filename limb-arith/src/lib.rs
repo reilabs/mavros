@@ -1,10 +1,10 @@
 //! Wrapping arithmetic, shifts and orderings, and the spread and unspread bit rearrangements, on
-//! buffers of little-endian `u64` limbs.
+//! buffers of little-endian `u64` limbs, and the Goldilocks field's arithmetic ([`goldilocks`]).
 //!
 //! Shared by the evaluators that compute wide integers in limbs, the VM and the WASM runtime's
-//! helpers, and by the compiler, whose R1CS spread table uses [`spread_u32_to_u64`].
-//!
-//! This crate is `no_std` and does not allocate.
+//! helpers, by the compiler, whose R1CS spread table uses [`spread_u32_to_u64`], and, for the
+//! field, by `mavros_artifacts::Goldilocks` and the WASM runtime's entry points. This crate is
+//! `no_std` and does not allocate.
 
 #![no_std]
 
@@ -508,6 +508,8 @@ pub fn slt(a: &[u64], b: &[u64], bits: usize) -> bool {
         _ => ult(a, b),
     }
 }
+
+pub mod goldilocks;
 
 #[cfg(test)]
 mod tests {

@@ -4,8 +4,9 @@ use ark_ff::{AdditiveGroup, UniformRand};
 use mavros_artifacts::{Field, R1CS};
 use mavros_compiler::{
     Project, api,
-    compiler::codegen::CodeGenOptions,
+    compiler::codegen::{CodeGenOptions, llssa_to_llvm::WasmCompileOpts},
     driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
+    wasm_host, wasm_runtime,
 };
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -341,45 +342,101 @@ fn empty_circuit() {
     check("fn main() {}");
 }
 
-/// bn254 repeats the LogUp argument past `253 − ⌈log₂ D⌉` bits: witgen, AD and the verifier over
-/// every table kind at two repetitions, at a 256-bit target.
-#[test]
-fn repeated_lookup_arguments() {
-    let programs = ["cond_rangecheck", "array_lookup", "spread_and_cast"].map(|name| {
-        let read = |file: &str| {
-            std::fs::read_to_string(format!(
-                "{}/../noir_tests/{name}/{file}",
-                env!("CARGO_MANIFEST_DIR")
-            ))
-            .unwrap()
-        };
-        (read("src/main.nr"), read("Prover.toml"))
-    });
+/// A program over each table kind, with its inputs: rangecheck, array, spread and powers of two.
+fn programs_over_every_table_kind() -> [(String, String); 4] {
+    let [rangecheck, array, spread] =
+        ["cond_rangecheck", "array_lookup", "spread_and_cast"].map(|name| {
+            let read = |file: &str| {
+                std::fs::read_to_string(format!(
+                    "{}/../noir_tests/{name}/{file}",
+                    env!("CARGO_MANIFEST_DIR")
+                ))
+                .unwrap()
+            };
+            (read("src/main.nr"), read("Prover.toml"))
+        });
     let shift = (
         "fn main(x: u8, amount: u8) -> pub u8 { x << amount }".to_string(),
         "x = \"3\"\namount = \"4\"\nreturn = \"48\"\n".to_string(),
     );
-    for (source, toml) in programs.iter().chain([&shift]) {
+    [rangecheck, array, spread, shift]
+}
+
+/// bn254 repeats the LogUp argument past `253 − ⌈log₂ D⌉` bits: witgen, AD and the verifier over
+/// every table kind at two repetitions, at a 256-bit target.
+#[test]
+fn repeated_lookup_arguments() {
+    for (source, toml) in &programs_over_every_table_kind() {
         assert_eq!(check_at(source, 128, Some(toml)).1, 1);
         assert_eq!(check_at(source, 256, Some(toml)).1, 2);
     }
 }
 
-/// The WASM AD emitters bind one repetition's challenges, so the WASM path refuses a program
-/// that `repeated_lookup_arguments` runs on the VM.
-#[test]
-fn the_wasm_path_refuses_repeated_lookup_arguments() {
-    let project = common::noir_project("fn main(x: u8, amount: u8) -> pub u8 { x << amount }");
+/// Compiles `source` to WASM at a soundness target and answers its repetitions, having held the
+/// module to the VM's witness and its AD entry point to the constraint system.
+fn check_wasm_at(source: &str, logup_soundness: u32, prover_toml: &str) -> usize {
+    let project = common::noir_project(source);
+    std::fs::write(project.path().join("Prover.toml"), prover_toml).unwrap();
     let mut driver = Driver::new(Project::new(project.path().to_path_buf()).unwrap(), false);
-    driver.set_logup_soundness(256);
+    driver.set_logup_soundness(logup_soundness);
     driver.run_noir_compiler().unwrap();
     driver.make_struct_access_static().unwrap();
     driver.monomorphize().unwrap();
     driver.spill_witness().unwrap();
     let r1cs = driver.generate_r1cs::<Field>().unwrap();
-    match driver.compile_llvm_targets(false, &r1cs, None, CodeGenOptions::default()) {
-        Err(mavros_compiler::driver::Error::WasmLogupRepetitionsUnsupported(2)) => {}
-        other => panic!("expected the WASM path to refuse two repetitions, got {other:?}"),
+    let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let (inputs, _) = api::read_prover_inputs(project.path(), driver.abi()).unwrap();
+    let vm = api::run_witgen_from_binary(&mut prover, &r1cs, &inputs, None).unwrap();
+
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("program.wasm");
+    let options = WasmCompileOpts::fast(wasm_runtime::locate_or_build().unwrap());
+    driver
+        .compile_llvm_targets(
+            false,
+            &r1cs,
+            Some((path.clone(), options)),
+            CodeGenOptions::default(),
+        )
+        .unwrap();
+    let module = wasm_host::LoadedModule::load(&path).unwrap();
+
+    let wasm =
+        wasm_host::run_witgen_loaded(&module, &r1cs, &inputs, driver.entry_blob_field_count())
+            .unwrap();
+    assert_eq!(wasm.out_wit_pre_comm, vm.out_wit_pre_comm);
+    assert_eq!(wasm.out_wit_post_comm, vm.out_wit_post_comm);
+    assert!(r1cs.check_witgen_output(
+        &wasm.out_wit_pre_comm,
+        &wasm.out_wit_post_comm,
+        &wasm.out_a,
+        &wasm.out_b,
+        &wasm.out_c,
+    ));
+
+    let mut rng = StdRng::seed_from_u64(437);
+    for _ in 0..3 {
+        let coeffs: Vec<Field> = (0..r1cs.constraints.len())
+            .map(|_| Field::rand(&mut rng))
+            .collect();
+        let ad = wasm_host::run_ad_loaded(&module, &r1cs, &coeffs).unwrap();
+        assert!(api::check_ad(
+            &r1cs, &coeffs, &ad.out_da, &ad.out_db, &ad.out_dc
+        ));
+        assert_eq!(ad.live_bytes, 0);
+    }
+    r1cs.witness_layout.logup_repetitions
+}
+
+/// The WASM backend repeats the argument as the VM does. Three repetitions tell a stride multiplied
+/// by the repetition from a stride taken once, which two cannot. Sixteen is the cap: the helpers
+/// grow with the repetitions, and must still compile, link and run there.
+#[test]
+fn repeated_lookup_arguments_on_wasm() {
+    for (source, toml) in &programs_over_every_table_kind() {
+        for (soundness, repetitions) in [(128, 1), (256, 2), (512, 3), (3790, 16)] {
+            assert_eq!(check_wasm_at(source, soundness, toml), repetitions);
+        }
     }
 }
 

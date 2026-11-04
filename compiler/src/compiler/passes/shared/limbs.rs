@@ -419,14 +419,15 @@ mod tests {
     /// The LLVM lane's `Int <-> Field` packing has room the field does not carry.
     #[test]
     fn the_packing_has_room_the_field_does_not_carry() {
-        let widest = widest_injective_int_bits(FieldConfig::bn254());
-
-        assert!(crate::compiler::ssa::hlssa_to_llssa::INT_TO_FIELD_MAX_BITS > widest);
-        assert!(!combined_limbs_fit_modulus(
-            &field_modulus(FieldConfig::bn254()),
-            crate::compiler::ssa::hlssa_to_llssa::INT_TO_FIELD_MAX_BITS,
-            1
-        ));
+        for field in [FieldConfig::bn254(), FieldConfig::goldilocks()] {
+            let packing = crate::compiler::ssa::hlssa_to_llssa::int_to_field_max_bits(field);
+            assert!(packing > widest_injective_int_bits(field));
+            assert!(!combined_limbs_fit_modulus(
+                &field_modulus(field),
+                packing,
+                1
+            ));
+        }
     }
 
     #[test]
