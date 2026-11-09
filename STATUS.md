@@ -371,7 +371,7 @@
 | noir_tests/struct_through_ref_helper | ✅ | ✅ | 2 | 6 | 2240 | 4463 | 27870 | 268000 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir_tests/struct_through_ref_helper | ✅ | ✅ | 2 | 6 | 2144 | 4461 | 20716 | 260959 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir_tests/to_bits_roundtrip | ✅ | ✅ | 3816 | 3050 | 292680 | 25653 | 682195 | 934918 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir_tests/to_bits_roundtrip | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir_tests/to_bits_roundtrip | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir_tests/tuple_ref_proj | ✅ | ✅ | 6 | 8 | 5240 | 9764 | 33045 | 273436 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir_tests/tuple_ref_proj | ✅ | ✅ | 6 | 8 | 4848 | 9760 | 23819 | 264170 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir_tests/u128_witness_shifts | ✅ | ✅ | 1641 | 3018 | 86640 | 14366 | 162654 | 407423 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
@@ -731,7 +731,7 @@
 | noir/test_programs/execution_success/bounded_vec_extend_pattern | ✅ | ✅ | 125521 | 126817 | 412600 | 20308 | 793445 | 1053416 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/bounded_vec_extend_pattern | ✅ | ✅ | 129011 | 130307 | 412192 | 20308 | 455780 | 715319 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/break_and_continue | ✅ | ✅ | 0 | 1 | 312 | 505 | 24746 | 264176 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/break_and_continue | ✅ | ✅ | 0 | 1 | 272 | 505 | 19485 | 258905 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
+| noir/test_programs/execution_success/break_and_continue | ✅ | ✅ | 0 | 1 | 272 | 505 | - | - | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/brillig_acir_as_brillig | ✅ | ✅ | 51 | 97 | 9576 | 7703 | 38753 | 281834 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/brillig_acir_as_brillig | ✅ | ✅ | 149 | 195 | 8984 | 7689 | 26030 | 269085 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/brillig_array_ifelse | ✅ | ✅ | 7 | 8 | 8320 | 8054 | 34712 | 276814 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
@@ -1253,7 +1253,7 @@
 | noir/test_programs/execution_success/regression_7062 | ✅ | ✅ | 42 | 70 | 13176 | 4978 | 51571 | 293329 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/regression_7062 | ✅ | ✅ | 100 | 128 | 12424 | 4969 | 33216 | 274944 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/regression_7128 | ✅ | ✅ | 850 | 1421 | 48096 | 26272 | 97863 | 344327 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/regression_7128 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_success/regression_7128 | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/regression_7143 | ✅ | ✅ | 28 | 49 | 11640 | 4830 | 48746 | 291087 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/regression_7143 | ✅ | ✅ | 76 | 97 | 10896 | 4827 | 32165 | 274488 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/regression_7195 | ✅ | ✅ | 9 | 12 | 4208 | 5213 | 35454 | 276187 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
@@ -1521,13 +1521,13 @@
 | noir/test_programs/execution_success/submodules | ✅ | ✅ | 4 | 4 | 3576 | 3430 | 32674 | 273398 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/submodules | ✅ | ✅ | 4 | 4 | 3392 | 3428 | 22352 | 263218 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/to_be_bytes | ✅ | ✅ | 121 | 198 | 40384 | 12197 | 103889 | 347728 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/to_be_bytes | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_success/to_be_bytes | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/to_bytes_consistent | ✅ | ✅ | 111 | 159 | 19896 | 8238 | 67038 | 310066 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/to_bytes_consistent | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_success/to_bytes_consistent | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/to_bytes_integration | ✅ | ✅ | 1864 | 1684 | 171144 | 25681 | 406441 | 656115 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/to_bytes_integration | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_success/to_bytes_integration | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/to_le_bytes | ✅ | ✅ | 123 | 195 | 40520 | 15069 | 98006 | 342921 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/to_le_bytes | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_success/to_le_bytes | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/trait_as_return_type | ✅ | ✅ | 21 | 40 | 8328 | 4672 | 39288 | 280481 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/trait_as_return_type | ✅ | ✅ | 59 | 78 | 7480 | 4662 | 26077 | 267249 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/trait_associated_constant | ✅ | ✅ | 0 | 1 | 568 | 1198 | 24746 | 264354 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
@@ -1605,7 +1605,7 @@
 | noir/test_programs/execution_success/vector_remove_oob_invalid_pred | ✅ | ✅ | 58 | 101 | 16680 | 9136 | 54945 | 297905 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/vector_remove_oob_invalid_pred | ✅ | ✅ | 156 | 199 | 16064 | 9130 | 36299 | 279201 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/vectors | ✅ | ✅ | 2276 | 2994 | 399416 | 203634 | 714499 | 1018161 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/vectors | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_success/vectors | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/while_cond_clone_regression | ✅ | ✅ | 0 | 1 | 312 | 505 | 24746 | 264176 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/while_cond_clone_regression | ✅ | ✅ | 0 | 1 | 272 | 505 | 19485 | 258905 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/while_loop_break_regression_8521 | ✅ | ✅ | 36 | 61 | 12568 | 4810 | 46766 | 288994 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
@@ -1695,7 +1695,7 @@
 | noir/test_programs/execution_failure/regression_5202 | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | bn254 |
 | noir/test_programs/execution_failure/regression_5202 | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | goldilocks |
 | noir/test_programs/execution_failure/regression_7128 | ✅ | ✅ | 852 | 1423 | 48920 | 26512 | 99452 | 345956 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_failure/regression_7128 | 💥 | ➖ | - | - | - | - | - | - | ➖ | ➖ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_failure/regression_7128 | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_failure/regression_7759 | ✅ | ✅ | 105 | 199 | 16952 | 6373 | 57837 | 300776 | ✅ | ✅ | N/A | N/A | N/A | N/A | N/A | ✅ | ✅ | N/A | N/A | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_failure/regression_7759 | ❌ | ➖ | - | - | - | - | - | - | ➖ | ➖ | N/A | N/A | N/A | N/A | N/A | ➖ | ➖ | N/A | N/A | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_failure/regression_8175 | ✅ | ✅ | - | - | - | - | - | - | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | bn254 |
@@ -1766,4 +1766,4 @@
 Success rates count passed or not-applicable stages; ignored tests are excluded.
 
 - **bn254 success rate: 100.0%** (14064/14064 stages)
-- **goldilocks success rate: 84.0%** (11818/14064 stages)
+- **goldilocks success rate: 84.0%** (11811/14064 stages)
