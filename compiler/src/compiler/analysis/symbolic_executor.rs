@@ -142,7 +142,6 @@ where
     ) -> Self;
     fn not(&self, out_type: &Type, ctx: &mut Context) -> Self;
     fn of_int(v: &IntBits, ctx: &mut Context) -> Self;
-    // FIELD-ASSUMPTION: L2-seam
     fn of_field(f: Field, ctx: &mut Context) -> Self;
     fn of_blob(elem_type: Type, elements: Vec<Self>, ctx: &mut Context) -> Self;
     fn expect_blob(&self, ctx: &mut Context) -> Vec<Self>;
@@ -247,7 +246,6 @@ impl SymbolicExecutor {
         // across functions, so we build this map a single time and share it by reference with every
         // `run_fn` instead of rebuilding it (via the emitting `of_*` path) on every function entry.
         let constants = ssa.const_snapshot();
-        // FIELD-ASSUMPTION: L2-seam
         let consts = materialize_constants(&constants, context);
 
         self.run_fn(

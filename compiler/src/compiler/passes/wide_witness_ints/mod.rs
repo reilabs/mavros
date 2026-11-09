@@ -1556,7 +1556,7 @@ impl Rewriter<'_> {
                 Some(pattern.cast(width))
             }
             Some(Constant::Field(element)) => {
-                let limbs = element.into_bigint().0;
+                let limbs = element.canonical_limbs();
                 assert!(
                     IntBits::field_limbs_fit(&limbs, width),
                     "ICE: a known answer limb does not fit its width of {width} bits"

@@ -2482,7 +2482,6 @@ pub enum Constant {
     ///
     /// [`TypeExpr::Int`]: crate::compiler::ssa::hlssa::TypeExpr::Int
     Int(IntBits),
-    // FIELD-ASSUMPTION: L2-ir-const
     Field(crate::compiler::Field),
     FnPtr(FunctionId),
     Blob(Blob),
@@ -2543,12 +2542,11 @@ pub enum DMatrix {
 /// A **ceiling on the representation**, not the safety bound: every backend indexes its table cache
 /// by size (see the assert below). It is `7` because bn254 needs exactly that.
 ///
-/// FIELD-ASSUMPTION: L4-decompose. The safety bound is per field: a size-`s` table's widest row is
-/// `2^(2^s - 1)`, and a row at or past the modulus wraps identically in every evaluator, so
-/// `factor == 2^amount`, and with it `witness_bitwise::wrap_shifted_product`'s
-/// `factor <= 2^(bits-1)` premise, silently fails. `passes::shared::limbs::max_pow2_table_size`
-/// derives it, clamped to this ceiling: `7` on bn254 (widest row `2^127`), `6` on goldilocks. The
-/// same `L4-decompose` debt as `two_pow(bits)` in the shift lowering, discharged with it.
+/// The safety bound is per field: a size-`s` table's widest row is `2^(2^s - 1)`, and a row at or
+/// past the modulus wraps identically in every evaluator, so `factor == 2^amount`, and with it
+/// `witness_bitwise::wrap_shifted_product`'s `factor <= 2^(bits-1)` premise, silently fails.
+/// `passes::shared::limbs::max_pow2_table_size` derives it, clamped to this ceiling: `7` on bn254
+/// (widest row `2^127`), `6` on goldilocks.
 pub const MAX_POW2_TABLE_SIZE: usize = 7;
 
 /// A `Pow2` table is indexed into the backends' fixed-size table caches (`vm::VM::pow2_tables`, and

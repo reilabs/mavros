@@ -43,9 +43,13 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 use crate::{
     collections::HashMap,
     compiler::{
+        diagnostic::Diagnostic,
         pass_manager::{AnalysisStore, Pass},
         passes::{
-            shared::{limbs::widest_injective_int_bits, unsupported::unsupported_on_this_field},
+            shared::{
+                limbs::widest_injective_int_bits,
+                unsupported::{field_offers, unsupported_on_this_field},
+            },
             wide_witness_ints::multi_cell_int_bits,
         },
         ssa::{
@@ -57,6 +61,7 @@ use crate::{
         },
     },
 };
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 
 pub const ENTRY_ORIGIN_PREFIX: &str = "entry point: ";
@@ -177,6 +182,59 @@ impl PrepareEntryPoint {
             param_is_public: None,
             layout_sink: None,
         }
+    }
+
+    /// A diagnostic for every entry-point parameter whose integers the configured field cannot
+    /// carry. The driver asks before this pass runs, so it reports them as errors; the pass refuses
+    /// them too.
+    pub fn param_refusals(ssa: &HLSSA) -> Vec<Diagnostic> {
+        fn refusals(typ: &Type, field: FieldConfig, found: &mut BTreeSet<String>) {
+            match &typ.expr {
+                TypeExpr::Int(size) => {
+                    found.extend(PrepareEntryPoint::int_param_refusal(*size, field))
+                }
+                TypeExpr::Array(inner, _) | TypeExpr::WitnessOf(inner) => {
+                    refusals(inner, field, found);
+                }
+                TypeExpr::Tuple(element_types) => {
+                    for element_type in element_types {
+                        refusals(element_type, field, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let field = ssa.field();
+        let mut diagnostics = Vec::new();
+        for (index, typ) in ssa
+            .get_unique_entrypoint()
+            .get_param_types()
+            .iter()
+            .enumerate()
+        {
+            let mut found = BTreeSet::new();
+            refusals(typ, field, &mut found);
+            let location = SourceLocation::synthetic(entry_param_origin(index));
+            diagnostics.extend(found.into_iter().map(|refusal| {
+                Diagnostic::error(refusal, location.clone()).with_note(field_offers(field))
+            }));
+        }
+        diagnostics
+    }
+
+    /// Why an `int{size}` parameter is refused on `field`, or `None` where it crosses.
+    ///
+    /// This ABI carries each integer in one input element, so its width must fit injectively.
+    /// Wider integers can be assembled inside the program from ABI limbs.
+    fn int_param_refusal(size: usize, field: FieldConfig) -> Option<String> {
+        let widest = widest_injective_int_bits(field);
+        (size > widest).then(|| {
+            format!(
+                "an int{size} crosses the entry point as one field element, which carries \
+                 integers up to int{widest}"
+            )
+        })
     }
 
     /// The Noir ABI distinguishes unit (no public return) from an empty struct even
@@ -784,17 +842,8 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, zero)
             }
             TypeExpr::Int(size) => {
-                // This ABI carries each integer in one input element, so its width must fit
-                // injectively. Wider integers can be assembled inside the program from ABI limbs.
-                let widest = widest_injective_int_bits(e.field());
-                if *size > widest {
-                    unsupported_on_this_field(
-                        format_args!(
-                            "an int{size} crosses the entry point as one field element, which \
-                             carries integers up to int{widest}"
-                        ),
-                        e.field(),
-                    );
+                if let Some(refusal) = Self::int_param_refusal(*size, e.field()) {
+                    unsupported_on_this_field(format_args!("{refusal}"), e.field());
                 }
                 let zero = e.int_const(IntBits::zero(32));
                 let field_param = e.array_get(input_array, zero);

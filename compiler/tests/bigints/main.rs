@@ -19,6 +19,7 @@ use mavros_compiler::{
                 builder::{HLBlockEmitter, HLEmitter as _, HLSSABuilder},
             },
         },
+        util::biguint_of_limbs,
     },
     driver::Error as DriverError,
 };
@@ -4561,7 +4562,7 @@ fn pure_field_casts_agree_with_the_model() {
 /// The element of `field` whose canonical integer is `canonical`.
 fn element_of(field: FieldConfig, canonical: &BigUint) -> FieldElement {
     field
-        .from_bigint(canonical.clone().try_into().unwrap())
+        .from_canonical_limbs(&canonical.to_u64_digits())
         .expect("the model answers a canonical representative")
 }
 
@@ -4571,7 +4572,7 @@ fn element_of(field: FieldConfig, canonical: &BigUint) -> FieldElement {
 /// The integer side is chosen by a parameter and the element is multiplied by one cast from a
 /// parameter, so no constant folder answers first.
 fn pure_field_casts_program(field: FieldConfig, widths: &[usize]) -> HLSSA {
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let element = move |canonical: &BigUint| element_of(field, canonical);
     let widths = widths.to_vec();
 
@@ -4629,7 +4630,7 @@ fn pure_field_windows(field: FieldConfig) -> Vec<(usize, usize)> {
 ///
 /// Each element is multiplied by one cast from a parameter, so no constant folder answers first.
 fn pure_field_window_program(field: FieldConfig, (offset, width): (usize, usize)) -> HLSSA {
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     unconstrained_program_in(field, move |e, params| {
         let one = e.cast_to_field(params[0]);
         let mut checks = Vec::new();
@@ -5134,7 +5135,16 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an int256 shifted by an int32",
             shift,
-            shifting(256, Type::int(32)),
+            // An int256 cannot cross the entry point, so it is widened inside.
+            main_program(
+                &[Type::int(32), Type::int(32)],
+                &[Type::int(32)],
+                |e, params| {
+                    let wide = e.cast_to(CastTarget::Int(256), params[0]);
+                    let shifted = e.bin(BinaryArithOpKind::UShl, wide, params[1]);
+                    vec![e.cast_to(CastTarget::Int(32), shifted)]
+                },
+            ),
         ),
         (
             "an int64 shifted by a field",
@@ -5168,13 +5178,19 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an array of wide integers mapped to a wider integer",
             "a Map cast only adds or strips WitnessOf",
-            main_program(
-                &[Type::int(256).array_of(2)],
-                &[Type::int(320).array_of(2)],
-                |e, params| {
-                    vec![e.cast_to(CastTarget::Map(Box::new(CastTarget::Int(320))), params[0])]
-                },
-            ),
+            // An int256 cannot cross the entry point, so the array is built inside.
+            main_program(&[Type::int(32)], &[Type::int(32)], |e, params| {
+                let wide = e.cast_to(CastTarget::Int(256), params[0]);
+                let array = e.mk_seq(
+                    vec![wide, wide],
+                    SequenceTargetType::Array(2),
+                    Type::int(256),
+                );
+                let wider = e.cast_to(CastTarget::Map(Box::new(CastTarget::Int(320))), array);
+                let index = e.int_const(IntBits::zero(32));
+                let element = e.array_get(wider, index);
+                vec![e.cast_to(CastTarget::Int(32), element)]
+            }),
         ),
     ];
     for (what, reason, ssa) in cases {
@@ -5205,7 +5221,7 @@ fn a_return_past_the_field_publishes_its_residue() {
 
 fn check_a_return_past_the_field<F: HarnessField>(bits: usize) {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     for offset in [BigUint::ZERO, modulus] {
         let compiled = Compiled::<F>::compile(main_program_in(
             field,
@@ -5242,7 +5258,7 @@ fn check_a_return_past_the_field<F: HarnessField>(bits: usize) {
 #[test]
 fn a_wide_constant_cast_to_field_is_its_residue() {
     let wide = first_width_past_the_field();
-    let modulus = BigUint::from(FieldConfig::bn254().modulus());
+    let modulus = biguint_of_limbs(FieldConfig::bn254().modulus_limbs());
     for value in [BigUint::from(5u8), &modulus + 5u8] {
         let constant = IntBits::from_biguint(wide, &value);
         let ssa = main_program(&[], &[Type::field()], move |e, _| {
@@ -5275,7 +5291,7 @@ fn a_witnessed_limbed_integer_casts_to_field_as_its_residue() {
 
 fn check_a_limbed_cast_to_field<F: HarnessField>() {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let bits = 320;
     let constant =
         (BigUint::from(1u8) << 300u32) + (BigUint::from(1u8) << 200u32) + &modulus * 3u8 + 5u8;
@@ -5332,7 +5348,7 @@ fn a_bare_witnessed_field_cast_relabels_the_element() {
 
 fn check_a_bare_field_cast_relabels<F: HarnessField>() {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let compiled = Compiled::<F>::compile(main_program_in(
         field,
         &[Type::field()],
@@ -5965,16 +5981,30 @@ fn the_widest_injective_width_is_an_entry_point_parameter() {
 }
 
 /// An integer wider than one input element carries cannot cross this ABI directly. The frontend
-/// rejects such parameters; a hand-built SSA that bypasses it must also be refused.
+/// rejects such parameters; a hand-built SSA that bypasses it is refused with an error, wherever
+/// the integer sits in the parameter.
 #[test]
-#[should_panic(expected = "crosses the entry point")]
 fn a_main_parameter_wider_than_the_field_is_a_compiler_error() {
-    let ssa = main_program(
-        &[Type::int(first_width_past_the_field())],
-        &[Type::int(64)],
-        |e, params| vec![e.cast_to(CastTarget::Int(64), params[0])],
-    );
-    let _ = Compiled::new(ssa);
+    let width = first_width_past_the_field();
+    let wide = Type::int(width);
+    for param in [
+        wide.clone(),
+        wide.clone().array_of(2),
+        Type::tuple_of(vec![Type::field(), wide]),
+    ] {
+        let ssa = main_program(&[param.clone()], &[Type::field()], |e, _| {
+            vec![e.field_const(e.field().zero())]
+        });
+        let Err(error) = Compiled::new(ssa) else {
+            panic!("main({param:?}) compiled");
+        };
+        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("an int{width} crosses the entry point")),
+            "{message}"
+        );
+    }
 }
 
 /// The entry point's range check bites: a value above the declared width is refused when proving.
@@ -6315,7 +6345,7 @@ fn check_a_read_of_two_elements_one_modulus_apart<F: HarnessField>(
     field: FieldConfig,
     bits: usize,
 ) {
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let elements = [
         IntBits::from_u128(bits, 5),
         IntBits::from_biguint(bits, &(&modulus + 5u8)),
@@ -6369,7 +6399,7 @@ fn a_witnessed_field_bit_window_reads_the_canonical_integer() {
 
 fn check_witnessed_field_windows<F: HarnessField>() {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let top = field.field_bit_size() as usize;
     let one = BigUint::from(1u8);
     let mut values = vec![
@@ -7548,7 +7578,7 @@ fn check_a_witnessed_field_reads_back_as_a_wide_integer<F: HarnessField>(
     high: usize,
 ) {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let top = field.field_bit_size() as usize;
     let one = BigUint::from(1u8);
     let values = [

@@ -89,23 +89,19 @@ pub(crate) fn eval_binary(
         // A `Constant::Int` is a raw bit pattern and says nothing about how to read itself; the
         // _operation_ decides, and these two folds are the two readings of the same patterns.
         (Constant::Int(x), Constant::Int(y)) => fold_int(kind, x, y),
-        // FIELD-ASSUMPTION: L4-eval
-        (Constant::Field(x), Constant::Field(y)) => {
-            match group {
-                Add => Some(Constant::Field(*x + *y)),
-                Sub => Some(Constant::Field(*x - *y)),
-                Mul => Some(Constant::Field(*x * *y)),
-                Div => {
-                    if *y == field.zero() {
-                        None
-                    } else {
-                        // FIELD-ASSUMPTION: L4-inverse
-                        Some(Constant::Field(*x / *y))
-                    }
+        (Constant::Field(x), Constant::Field(y)) => match group {
+            Add => Some(Constant::Field(*x + *y)),
+            Sub => Some(Constant::Field(*x - *y)),
+            Mul => Some(Constant::Field(*x * *y)),
+            Div => {
+                if *y == field.zero() {
+                    None
+                } else {
+                    Some(Constant::Field(*x / *y))
                 }
-                Rem | And | Or | Xor | Shl | Shr => None,
             }
-        }
+            Rem | And | Or | Xor | Shl | Shr => None,
+        },
         // Mixed-kind pairs and non-scalar constants do not fold.
         (
             Constant::Int(_) | Constant::Field(_) | Constant::FnPtr(_) | Constant::Blob(_),
@@ -157,7 +153,13 @@ pub(crate) fn eval_cmp(kind: CmpKind, a: &Constant, b: &Constant) -> Option<Cons
         }
         (CmpKind::Eq, Constant::Field(x), Constant::Field(y)) => res(x == y),
         (CmpKind::ULt, Constant::Field(x), Constant::Field(y)) => {
-            res(x.into_bigint() < y.into_bigint())
+            // Two elements of one field have the same number of limbs, so comparing from the top
+            // gives the numeric ordering.
+            res(x
+                .canonical_limbs()
+                .iter()
+                .rev()
+                .lt(y.canonical_limbs().iter().rev()))
         }
 
         // Width-mismatched, mixed-kind, and non-scalar comparisons do not fold
@@ -185,7 +187,6 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -
         | CastTarget::Map(_)
         | CastTarget::FieldLimbs => None,
         CastTarget::Field => match v {
-            // FIELD-ASSUMPTION: L4-eval
             Constant::Int(x) => Some(Constant::Field(field_residue(field, x))),
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
@@ -202,11 +203,7 @@ fn int_cast_bits(v: &Constant, n: usize) -> Option<IntBits> {
     }
     match v {
         Constant::Int(x) => Some(x.cast(n)),
-        // FIELD-ASSUMPTION: L4-decompose
-        Constant::Field(f) => {
-            let limbs = f.into_bigint().0;
-            Some(IntBits::from_field_limbs(&limbs, n))
-        }
+        Constant::Field(f) => Some(IntBits::from_field_limbs(&f.canonical_limbs(), n)),
         Constant::FnPtr(_) | Constant::Blob(_) => None,
     }
 }
@@ -259,7 +256,6 @@ pub(crate) fn eval_bit_range(
         }
         Constant::Int(_) => None,
 
-        // FIELD-ASSUMPTION: L4-decompose
         Constant::Field(f) => {
             // Only an upper bound: the refusal above makes `width`, and so `read`, at least one.
             // The window is read at the integer type cap, the widest pattern this analysis holds;
@@ -269,8 +265,7 @@ pub(crate) fn eval_bit_range(
                 return None;
             }
 
-            let limbs = f.into_bigint().0;
-            let low = IntBits::from_field_limbs(&limbs, read);
+            let low = IntBits::from_field_limbs(&f.canonical_limbs(), read);
             let extracted = low.bit_range(offset, width);
 
             // `low` is `f` truncated and `extracted` a window of it, so it stays below the modulus;
@@ -524,7 +519,7 @@ mod tests {
             panic!("a 256-bit pattern below the modulus has a field constant, got {folded:?}");
         };
         assert_eq!(
-            IntBits::from_field_limbs(&element.into_bigint().0, 256),
+            IntBits::from_field_limbs(&element.canonical_limbs(), 256),
             wide
         );
 
@@ -576,6 +571,62 @@ mod tests {
                 }
             }
             assert!(checked > 500, "only {checked} casts on {field:?}");
+        }
+    }
+
+    /// The folds that read an element as its integer agree with the model at every corner on both
+    /// fields: a bit window, an ordering and a division.
+    #[test]
+    fn the_element_folds_read_the_canonical_integer_on_both_fields() {
+        use num_bigint::BigUint;
+
+        use crate::compiler::util::test::{FIELDS, element_of, modulus_of};
+
+        for field in FIELDS {
+            let p = modulus_of(field);
+            let bits = field.field_bit_size() as usize;
+            let elements = corners::field_cast_elements(&p);
+            for canonical in &elements {
+                let element = Constant::Field(element_of(field, canonical));
+                for (offset, width) in [
+                    (0, 1),
+                    (0, 8),
+                    (3, 10),
+                    (bits / 2 - 4, 8),
+                    (bits - 8, 8),
+                    (bits - 1, 1),
+                    (1, bits - 1),
+                    (0, bits),
+                ] {
+                    let want = (canonical >> offset) % (BigUint::from(1u8) << width);
+                    assert_eq!(
+                        eval_bit_range(&element, offset, width, field),
+                        Some(Constant::Field(element_of(field, &want))),
+                        "{field:?}: bits {offset}..+{width} of {canonical}"
+                    );
+                }
+                for other in &elements {
+                    let divisor = Constant::Field(element_of(field, other));
+                    assert_eq!(
+                        eval_cmp(CmpKind::ULt, &element, &divisor),
+                        Some(Constant::int(1, u128::from(canonical < other))),
+                        "{field:?}: {canonical} < {other}"
+                    );
+                    let quotient = eval_binary(BinaryArithOpKind::UDiv, &element, &divisor, field);
+                    if other.bits() == 0 {
+                        assert_eq!(quotient, None, "{field:?}: {canonical} / 0");
+                        continue;
+                    }
+                    let Some(Constant::Field(quotient)) = quotient else {
+                        panic!("{field:?}: {canonical} / {other} gave {quotient:?}");
+                    };
+                    assert_eq!(
+                        Constant::Field(quotient * element_of(field, other)),
+                        element,
+                        "{field:?}: {canonical} / {other}"
+                    );
+                }
+            }
         }
     }
 
