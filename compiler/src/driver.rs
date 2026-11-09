@@ -44,6 +44,7 @@ use crate::{
             assert_constant::AssertConstantValidation,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
+            decomposition_width::DecompositionWidthValidation,
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
             elide_tuples::ElideTuples,
@@ -447,6 +448,16 @@ impl Driver {
             ));
         }
 
+        let refusals = PrepareEntryPoint::param_refusals(&ssa);
+        if !refusals.is_empty() {
+            return Err(Error::LoweringRefused(
+                refusals
+                    .into_iter()
+                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                    .collect(),
+            ));
+        }
+
         let entry_blob_layout = Rc::new(RefCell::new(None));
         let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained)
             .with_layout_sink(Rc::clone(&entry_blob_layout));
@@ -674,6 +685,9 @@ impl Driver {
     pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
 
+        // Two phases, so that a witnessed decomposition the field cannot carry is reported as an
+        // error between them rather than refused by its lowering at the start of the second.
+        let refusals = Rc::new(RefCell::new(None));
         let mut pass_manager = PassManager::new(
             "witness_spilling".to_string(),
             self.draw_cfg,
@@ -719,6 +733,28 @@ impl Driver {
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.
                 Box::new(InstructionLowering::witness_narrowing_casts()),
+                Box::new(DecompositionWidthValidation::new(Rc::clone(&refusals))),
+            ],
+        );
+        pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
+        pass_manager.run(&mut ssa);
+        let refusals = refusals
+            .borrow_mut()
+            .take()
+            .expect("decomposition width validation did not record a result");
+        if !refusals.is_empty() {
+            return Err(Error::LoweringRefused(
+                refusals
+                    .into_iter()
+                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                    .collect(),
+            ));
+        }
+
+        let mut pass_manager = PassManager::new(
+            "witness_lowering".to_string(),
+            self.draw_cfg,
+            vec![
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities

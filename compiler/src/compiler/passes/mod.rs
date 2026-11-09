@@ -4,6 +4,7 @@ pub mod array_sroa;
 pub(crate) mod assert_constant;
 pub mod common_subexpression_elimination;
 pub mod dead_code_elimination;
+pub(crate) mod decomposition_width;
 pub mod deduplicate_phis;
 pub mod defunctionalize;
 pub mod elide_tuples;

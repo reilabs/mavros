@@ -242,7 +242,7 @@ impl Simplifier {
                         {
                             let inv = fb
                                 .ssa
-                                .add_const(Constant::Field((*denom).inverse().unwrap())); // FIELD-ASSUMPTION: L4-inverse
+                                .add_const(Constant::Field((*denom).inverse().unwrap()));
                             return Some(Rewrite::Replace(vec![OpCode::BinaryArithOp {
                                 // Carry the division's own sign onto the multiplication rather
                                 // than defaulting: a field divide is unsigned, but if this one

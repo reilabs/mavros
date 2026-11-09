@@ -234,7 +234,6 @@ pub trait HLEmitter {
 
     // -- Constants --
 
-    // FIELD-ASSUMPTION: L2-builder
     // Embeds into the emitter's field, reducing an integer and refusing another field's element.
     #[track_caller]
     fn field_const(&mut self, value: impl IntoFieldElement) -> ValueId {
