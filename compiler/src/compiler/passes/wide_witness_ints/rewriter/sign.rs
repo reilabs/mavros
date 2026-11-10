@@ -70,7 +70,7 @@ impl Rewriter<'_> {
         // instead.
         let product = match guard {
             Some(condition) => {
-                let zero = self.field_const(self.field.zero());
+                let zero = self.field_const(self.field().zero());
                 product
                     .into_iter()
                     .map(|limb| self.select(condition, limb, zero))
@@ -258,8 +258,8 @@ impl Rewriter<'_> {
     /// A sign as a field element that is zero or one.
     fn sign_field(&self, sign: Sign) -> ValueId {
         match sign {
-            Sign::Known(true) => self.field_const(self.field.one()),
-            Sign::Known(false) => self.field_const(self.field.zero()),
+            Sign::Known(true) => self.field_const(self.field().one()),
+            Sign::Known(false) => self.field_const(self.field().zero()),
             Sign::Bit(bit, _) => bit,
         }
     }
@@ -272,7 +272,7 @@ impl Rewriter<'_> {
             (Sign::Known(false), other) | (other, Sign::Known(false)) => other,
             (Sign::Known(true), Sign::Bit(bit, witnessed))
             | (Sign::Bit(bit, witnessed), Sign::Known(true)) => {
-                let one = self.field_const(self.field.one());
+                let one = self.field_const(self.field().one());
                 Sign::Bit(self.bin(BinaryArithOpKind::USub, one, bit), witnessed)
             }
             (Sign::Bit(a, a_witnessed), Sign::Bit(b, b_witnessed)) => {
@@ -354,19 +354,19 @@ impl Rewriter<'_> {
             t => self.sign_field(t),
         };
         let whole = self.cast(limbs[top].0, CastTarget::Field);
-        let half = self.field_const(self.field.two_pow(width - 1));
+        let half = self.field_const(self.field().two_pow(width - 1));
         let high = self.bin(BinaryArithOpKind::UMul, t, half);
         let mut sum = self.bin(BinaryArithOpKind::USub, whole, high);
         for &(limb, _) in &limbs[..top] {
             let limb = self.cast(limb, CastTarget::Field);
             sum = self.bin(BinaryArithOpKind::UAdd, sum, limb);
         }
-        let one = self.field_const(self.field.one());
+        let one = self.field_const(self.field().one());
         let sign = self.sign_field(sign);
         let positive = self.bin(BinaryArithOpKind::USub, one, sign);
         sum = self.bin(BinaryArithOpKind::UAdd, sum, positive);
         let product = self.bin(BinaryArithOpKind::UMul, t, sum);
-        let zero = self.field_const(self.field.zero());
+        let zero = self.field_const(self.field().zero());
         self.constrain_equal(product, zero, guard);
     }
 

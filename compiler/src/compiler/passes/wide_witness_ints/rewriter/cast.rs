@@ -70,7 +70,7 @@ impl Rewriter<'_> {
                     // cannot carry has no element to sum into, so the limbs recombine as integer
                     // arithmetic at the target's width, as the witness strip does.
                     None => {
-                        let combined = if *to_bits > multi_cell_int_bits(self.field) {
+                        let combined = if *to_bits > multi_cell_int_bits(self.field()) {
                             let limbs = self.pure_limbs_at(value, from_bits, *to_bits);
                             self.recombine_pure(&limbs, *to_bits)
                         } else {

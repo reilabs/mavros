@@ -2,8 +2,8 @@ use mavros_artifacts::{FieldConfig, FieldId};
 
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::Types},
-    pass_manager::{AnalysisStore, Pass},
-    passes::wide_witness_ints::WideWitnessInts,
+    pass_manager::{Analysis, AnalysisStore, Pass},
+    passes::wide_witness_ints::{WideWitnessInts, limb_config::LimbConfig},
     ssa::{
         Located, ValueId,
         hlssa::{
@@ -105,5 +105,7 @@ pub(super) fn run_pass(ssa: &mut HLSSA) {
     let mut store = AnalysisStore::new();
     store.insert_with_deps(flow, vec![]);
     store.insert_with_deps(types, vec![]);
+    let limb_config = LimbConfig::compute(ssa, &store);
+    store.insert_with_deps(limb_config, vec![]);
     WideWitnessInts::new().run(ssa, &store);
 }

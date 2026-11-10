@@ -62,7 +62,7 @@ impl Rewriter<'_> {
     /// through the carry [`Chain`] whatever form the operands are in, as the chain handles
     /// overflow. Returns whether `op` was lowered.
     pub(super) fn lower_through_chain(&mut self, op: &OpCode) -> bool {
-        let Some(Operands { bits, lhs, rhs }) = chained(op, self.types, self.field) else {
+        let Some(Operands { bits, lhs, rhs }) = chained(op, self.types, self.field()) else {
             return false;
         };
         let (guard, inner) = self.split_guard(op);
@@ -202,8 +202,8 @@ impl Rewriter<'_> {
     pub(super) fn sign_bit(&mut self, (limb, witnessed): (ValueId, bool), width: usize) -> ValueId {
         if let Some(pattern) = self.known(limb) {
             return self.field_const(match pattern.cast(width).bit(width - 1) {
-                Some(true) => self.field.one(),
-                _ => self.field.zero(),
+                Some(true) => self.field().one(),
+                _ => self.field().zero(),
             });
         }
         if !witnessed {
@@ -245,9 +245,9 @@ impl Rewriter<'_> {
         }
         let sign = self.sign_bit((limb, true), width);
         let whole = self.cast(limb, CastTarget::Field);
-        let half = self.field_const(self.field.two_pow(width - 1));
+        let half = self.field_const(self.field().two_pow(width - 1));
         let raised = self.bin(BinaryArithOpKind::UAdd, whole, half);
-        let place = self.field_const(self.field.two_pow(width));
+        let place = self.field_const(self.field().two_pow(width));
         let cleared = self.bin(BinaryArithOpKind::UMul, sign, place);
         let flipped = self.bin(BinaryArithOpKind::USub, raised, cleared);
         (self.cast(flipped, CastTarget::Int(width)), true)
@@ -294,7 +294,7 @@ impl Rewriter<'_> {
             .zip(widths)
             .map(|(limb, width)| match guard {
                 Some(condition) => {
-                    let zero = self.field_const(self.field.zero());
+                    let zero = self.field_const(self.field().zero());
                     self.select(condition, limb, zero)
                 }
                 None => match self.constant_limb(limb, *width) {
@@ -438,7 +438,7 @@ impl Rewriter<'_> {
                 limb = self.bin(fold, limb, column);
             }
 
-            let place = self.field.two_pow(*width);
+            let place = self.field().two_pow(*width);
             let next = if !top || out == CarryOut::Witnessed {
                 let hint = self.carry_hint(
                     subtract,

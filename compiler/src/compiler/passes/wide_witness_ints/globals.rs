@@ -1,6 +1,5 @@
-use super::types::limb_types;
+use super::{limb_config::LimbConfig, types::limb_types};
 use crate::compiler::ssa::hlssa::{HLSSA, OpCode, Type};
-use mavros_artifacts::FieldConfig;
 
 /// The global slots after each global holding wide integers has one slot per limb.
 ///
@@ -20,13 +19,13 @@ pub(super) struct Globals {
 
 impl Globals {
     /// Split every global in `ssa` that holds a wide integer, and record where each slot went.
-    pub(super) fn split(ssa: &mut HLSSA, field: FieldConfig) -> Self {
+    pub(super) fn split(ssa: &mut HLSSA, limb_config: LimbConfig) -> Self {
         let old_types: Vec<Type> = ssa.get_global_types().to_vec();
         let mut offsets = Vec::with_capacity(old_types.len());
         let mut new_types = Vec::new();
         for ty in &old_types {
             offsets.push(new_types.len());
-            new_types.extend(limb_types(ty, field));
+            new_types.extend(limb_types(ty, limb_config));
         }
         let moved = new_types.len() != old_types.len();
         if moved {

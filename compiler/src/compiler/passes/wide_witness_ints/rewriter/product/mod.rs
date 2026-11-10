@@ -65,7 +65,7 @@ impl Rewriter<'_> {
     /// argument. Under a guard the range and overflow checks are off where the guard is off, and
     /// the answer is zero there; the carries are written either way.
     pub(super) fn lower_product(&mut self, op: &OpCode) -> bool {
-        let Some(Operands { bits, lhs, rhs }) = multiplied(op, self.types, self.field) else {
+        let Some(Operands { bits, lhs, rhs }) = multiplied(op, self.types, self.field()) else {
             return false;
         };
         let (guard, inner) = self.split_guard(op);
@@ -127,7 +127,7 @@ impl Rewriter<'_> {
             &rhs.bounds,
             addend.map_or(&[][..], |addend| &addend.bounds),
             widths,
-            widest_injective_int_bits(self.field),
+            widest_injective_int_bits(self.field()),
             evaluate,
         )
         .unwrap_or_else(|| {
@@ -135,7 +135,7 @@ impl Rewriter<'_> {
                 format_args!(
                     "a {bits}-bit unsigned {operation} is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element"
                 ),
-                self.field,
+                self.field(),
             )
         });
 
@@ -267,11 +267,11 @@ impl Rewriter<'_> {
         if point == 0 {
             return coefficients[0];
         }
-        let base = self.field.constant(point);
-        let mut power = self.field.one();
+        let base = self.field().constant(point);
+        let mut power = self.field().one();
         let mut sum = None;
         for coefficient in coefficients {
-            let term = if power == self.field.one() {
+            let term = if power == self.field().one() {
                 *coefficient
             } else {
                 let place = self.field_const(power);
@@ -376,7 +376,7 @@ impl Rewriter<'_> {
                                         max_bits: carry_bits,
                                     },
                                 );
-                                let place = self.field_const(self.field.two_pow(width));
+                                let place = self.field_const(self.field().two_pow(width));
                                 let scaled = self.bin(BinaryArithOpKind::UMul, written, place);
                                 let low = self.bin(BinaryArithOpKind::USub, sum, scaled);
                                 if bounds_the_answer {
@@ -400,7 +400,7 @@ impl Rewriter<'_> {
             }
             let value = match column.sum {
                 Some((sum, _)) => sum,
-                None => self.field_const(self.field.zero()),
+                None => self.field_const(self.field().zero()),
             };
             answer.push(match pinned {
                 Some(target) => {
@@ -423,9 +423,9 @@ impl Rewriter<'_> {
         let difference = self.bin(BinaryArithOpKind::USub, lhs, rhs);
         let flag = match guard {
             Some(condition) => self.cast(condition, CastTarget::Field),
-            None => self.field_const(self.field.one()),
+            None => self.field_const(self.field().one()),
         };
-        let zero = self.field_const(self.field.zero());
+        let zero = self.field_const(self.field().zero());
         self.push(OpCode::Constrain {
             a: flag,
             b: difference,
@@ -452,7 +452,7 @@ impl Rewriter<'_> {
         forms: &mut FactorForms,
         guard: Option<ValueId>,
     ) {
-        let zero = self.field_const(self.field.zero());
+        let zero = self.field_const(self.field().zero());
         for (left, group) in &plan.overflow {
             let a = forms.field(self, Side::Lhs, *left, lhs);
             let mut sum = None;
@@ -534,7 +534,7 @@ impl FactorForms {
 
 /// The product the schoolbook lowers, if `op` is one: a multiplication under either reading,
 /// guarded or not, with a witnessed operand, at a width the single cell does not take.
-pub(super) fn multiplied(
+pub(in super::super) fn multiplied(
     op: &OpCode,
     types: &FunctionTypeInfo,
     field: FieldConfig,

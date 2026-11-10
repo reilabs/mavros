@@ -1,5 +1,5 @@
 use crate::compiler::{
-    passes::shared::limbs::witness_half_limb_bits,
+    passes::shared::limbs::half_limb_bits,
     ssa::{
         ValueId,
         hlssa::{BinaryArithOpKind, CastTarget, OpCode, builder::HLEmitter},
@@ -35,7 +35,7 @@ impl Rewriter<'_> {
             .get_value_type(value)
             .int_width()
             .unwrap_or_else(|| ice!("a spread of a non-integer reached the representation"));
-        let containers = limb_widths(bits, witness_half_limb_bits(self.field));
+        let containers = limb_widths(bits, half_limb_bits(self.limb_bits()));
         let results = self.limbs(result);
         assert_eq!(
             results.len(),
@@ -49,7 +49,7 @@ impl Rewriter<'_> {
         // many pieces as the read reaches half-limbs.
         let mut pieces: Vec<Option<(ValueId, usize)>> = Vec::with_capacity(containers.len());
         if self.wide_width(value).is_some() {
-            let half = witness_half_limb_bits(self.field);
+            let half = half_limb_bits(self.limb_bits());
             for (limb, width, read) in self.limbs_and_reads(value, bits, value_bits) {
                 let zero = self.known(limb).is_some_and(|pattern| pattern.is_zero());
                 match read {
@@ -217,7 +217,7 @@ impl Rewriter<'_> {
         read: usize,
         guard: Option<ValueId>,
     ) -> Vec<(ValueId, usize)> {
-        let half = witness_half_limb_bits(self.field);
+        let half = half_limb_bits(self.limb_bits());
         let containers = limb_widths(bits, half);
         let reads = limb_widths(read, half);
         if containers.len() == 1 {
@@ -238,7 +238,7 @@ impl Rewriter<'_> {
             let placed = if index == 0 {
                 written
             } else {
-                let place = self.field_const(self.field.two_pow(index * half));
+                let place = self.field_const(self.field().two_pow(index * half));
                 self.bin(BinaryArithOpKind::UMul, written, place)
             };
             if guard.is_some() {
@@ -270,12 +270,13 @@ impl Rewriter<'_> {
     /// Every piece but the last is a full half-limb, so each lands at a multiple of one; each is
     /// already bounded, so the sum is below `2^width` and needs no separate constraint.
     fn assemble_half_limbs(&mut self, result: ValueId, parts: &[(ValueId, usize)]) {
-        let half = witness_half_limb_bits(self.field);
+        let half = half_limb_bits(self.limb_bits());
         let targets = self.limbs(result);
-        let target_widths: Vec<usize> = limb_types(self.types.get_value_type(result), self.field)
-            .iter()
-            .map(|ty| ty.int_width().expect("a stream is an integer"))
-            .collect();
+        let target_widths: Vec<usize> =
+            limb_types(self.types.get_value_type(result), self.limb_config())
+                .iter()
+                .map(|ty| ty.int_width().expect("a stream is an integer"))
+                .collect();
         let groups: Vec<&[(ValueId, usize)]> = if targets.len() == 1 {
             vec![parts]
         } else {
@@ -301,7 +302,7 @@ impl Rewriter<'_> {
                 let placed = if index == 0 {
                     part_field
                 } else {
-                    let place = self.field_const(self.field.two_pow(index * half));
+                    let place = self.field_const(self.field().two_pow(index * half));
                     self.bin(BinaryArithOpKind::UMul, part_field, place)
                 };
                 sum = Some(match sum {
@@ -320,7 +321,7 @@ impl Rewriter<'_> {
     /// Hold a witnessed integer to zero, where `guard` holds.
     fn constrain_zero(&mut self, value: ValueId, guard: Option<ValueId>) {
         let value_field = self.cast(value, CastTarget::Field);
-        let zero = self.field_const(self.field.zero());
+        let zero = self.field_const(self.field().zero());
         self.constrain_equal(value_field, zero, guard);
     }
 

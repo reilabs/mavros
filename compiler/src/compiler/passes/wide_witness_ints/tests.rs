@@ -23,7 +23,7 @@ use crate::compiler::{
             ceil_log2, widest_cell_sum_bits, widest_injective_int_bits, witness_half_limb_bits,
             witness_limb_bits,
         },
-        wide_witness_ints::rewriter::division_carries,
+        wide_witness_ints::{limb_config::default_limb_config, rewriter::division_carries},
     },
     ssa::{
         BlockId, Instruction, Located, Terminator, ValueId,
@@ -75,18 +75,18 @@ fn the_top_limb_carries_the_remainder() {
 fn a_narrow_or_pure_integer_is_left_alone() {
     let field = bn254();
     let wide = multi_cell_int_bits(field) + 1;
-
-    assert_eq!(limb_types(&Type::int(wide), field).len(), 1);
+    let limb_config = default_limb_config(field);
+    assert_eq!(limb_types(&Type::int(wide), limb_config).len(), 1);
     assert_eq!(
         limb_types(
             &Type::witness_of(Type::int(multi_cell_int_bits(field))),
-            field
+            limb_config
         )
         .len(),
         1
     );
     assert_eq!(
-        limb_types(&Type::witness_of(Type::int(wide)), field).len(),
+        limb_types(&Type::witness_of(Type::int(wide)), limb_config).len(),
         wide.div_ceil(witness_limb_bits(field))
     );
 }
@@ -101,25 +101,26 @@ fn a_narrow_or_pure_integer_is_left_alone() {
 #[test]
 fn a_reference_and_a_sequence_both_expand_by_the_element() {
     let field = bn254();
+    let limb_config = default_limb_config(field);
     let wide = multi_cell_int_bits(field) + 1;
     let expected = wide.div_ceil(witness_limb_bits(field));
     assert!(expected > 1, "the width has to span limbs to be a test");
 
     assert_eq!(
-        limb_types(&Type::witness_of(Type::int(wide)).ref_of(), field).len(),
+        limb_types(&Type::witness_of(Type::int(wide)).ref_of(), limb_config).len(),
         expected
     );
     assert_eq!(
-        limb_types(&Type::witness_of(Type::int(wide)).array_of(4), field).len(),
+        limb_types(&Type::witness_of(Type::int(wide)).array_of(4), limb_config).len(),
         expected
     );
     assert_eq!(
-        limb_types(&Type::int(wide).array_of(4), field).len(),
+        limb_types(&Type::int(wide).array_of(4), limb_config).len(),
         expected,
         "a pure wide element is transposed too, or a constant sequence could not be read"
     );
     assert_eq!(
-        limb_types(&Type::slice_of(Type::int(wide)), field).len(),
+        limb_types(&Type::slice_of(Type::int(wide)), limb_config).len(),
         expected
     );
 
@@ -127,7 +128,7 @@ fn a_reference_and_a_sequence_both_expand_by_the_element() {
     assert_eq!(
         limb_types(
             &Type::witness_of(Type::int(2 * HOST_LIMB_BITS)).array_of(4),
-            field
+            limb_config
         )
         .len(),
         1

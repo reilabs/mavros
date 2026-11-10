@@ -123,7 +123,7 @@ impl Rewriter<'_> {
             } => {
                 let results = self.limbs(*result);
                 let count = results.len();
-                let elem_types = element_types(elem_type, self.field, count);
+                let elem_types = element_types(elem_type, self.limb_config(), count);
                 let per_element: Vec<Vec<ValueId>> = elems
                     .iter()
                     .map(|elem| self.operand_limbs(*elem, count))
@@ -194,7 +194,7 @@ impl Rewriter<'_> {
                     .int_width()
                     .unwrap_or_else(|| ice!("a wide blob sequence of {element_type}"));
                 let widths = limb_widths(bits, self.limb_bits());
-                let elem_types = element_types(element_type, self.field, results.len());
+                let elem_types = element_types(element_type, self.limb_config(), results.len());
                 for (index, ((result, width), element_type)) in
                     results.into_iter().zip(&widths).zip(elem_types).enumerate()
                 {
@@ -228,7 +228,7 @@ impl Rewriter<'_> {
                 elem_type,
             } => {
                 let results = self.limbs(*result);
-                let elem_types = element_types(elem_type, self.field, results.len());
+                let elem_types = element_types(elem_type, self.limb_config(), results.len());
                 let elements = self.operand_limbs(*element, results.len());
                 for ((result, element), elem_type) in
                     results.into_iter().zip(elements).zip(elem_types)
@@ -444,7 +444,7 @@ impl Rewriter<'_> {
                 result,
                 result_type,
             } => {
-                let types = limb_types(result_type, self.field);
+                let types = limb_types(result_type, self.limb_config());
                 let results = self.limbs(*result);
                 assert_eq!(
                     results.len(),
@@ -495,7 +495,7 @@ impl Rewriter<'_> {
             } => {
                 let base = self.globals.offsets[*offset as usize];
                 let results = self.limbs(*result);
-                let types = limb_types(result_type, self.field);
+                let types = limb_types(result_type, self.limb_config());
                 assert_eq!(
                     results.len(),
                     types.len(),
@@ -514,7 +514,7 @@ impl Rewriter<'_> {
             OpCode::InitGlobal { global, value } => {
                 let base = self.globals.offsets[*global];
                 let values = self.limbs(*value);
-                let slots = limb_types(&self.globals.old_types[*global], self.field).len();
+                let slots = limb_types(&self.globals.old_types[*global], self.limb_config()).len();
                 assert_eq!(
                     values.len(),
                     slots,
@@ -530,7 +530,7 @@ impl Rewriter<'_> {
             }
             OpCode::DropGlobal { global } => {
                 let base = self.globals.offsets[*global];
-                for (slot, ty) in limb_types(&self.globals.old_types[*global], self.field)
+                for (slot, ty) in limb_types(&self.globals.old_types[*global], self.limb_config())
                     .into_iter()
                     .enumerate()
                 {

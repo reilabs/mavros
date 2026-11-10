@@ -111,7 +111,7 @@ impl Rewriter<'_> {
         bits: usize,
     ) -> ValueId {
         assert!(
-            bits <= multi_cell_int_bits(self.field),
+            bits <= multi_cell_int_bits(self.field()),
             "ICE: an int{bits} recombination is summed in one field element, which cannot carry it"
         );
         let target = limb_widths(bits, self.limb_bits());

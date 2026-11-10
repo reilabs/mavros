@@ -2,8 +2,8 @@
 //! group of limbs.
 //!
 //! A `WitnessOf(Int(N))` with `N > multi_cell_int_bits` becomes `k = ceil(N/h)` little-endian
-//! values, where `h` is [`witness_limb_bits`]. Limbs `0..k-1` are `WitnessOf(Int(h))` and the top
-//! one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared width is correct.
+//! values, where `h` is configured to support the widest operation in the program, see [`limb_config.rs`].
+//! Limbs `0..k-1` are `WitnessOf(Int(h))` and the top one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared width is correct.
 //!
 //! A **pure** `Int(N)` **scalar** is untouched: it lives in the hint domain, where both backends
 //! compute at any width.
@@ -134,6 +134,7 @@
 //!    map, emitting the gadgets above where an instruction does more than move limbs.
 
 mod globals;
+mod limb_config;
 mod pass;
 mod plan;
 mod rewriter;
