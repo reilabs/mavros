@@ -33,6 +33,10 @@ This will produce the following two files inside the project's `target/` directo
 | `target/basic.json` | ABI and the program binary (`binary`) containing the witgen and AD entry points               |
 | `target/r1cs.bin`   | Versioned R1CS artifact (`MAVR1CS` header): format version, field tag, digest, manifest, R1CS |
 
+Pass `--field` to choose the prime field that the whole pipeline uses: `bn254` (the default) or
+`goldilocks`. The standard library's BN254-specific items (elliptic curves, ECDSA, Poseidon2 and the
+bignum library) are unavailable on Goldilocks, so a program that uses them fails to compile.
+
 Pass `--include-debug-info` to additionally write `target/basic.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;
 the executable bytecode in `basic.json` remains byte-for-byte unchanged. Source paths are relative
@@ -53,7 +57,8 @@ must match exactly. All entries may be arbitrary, including `w[0]`; the caller s
 randomness. Paths to vector files are relative to the current working directory.
 
 Each string must be canonical: unsigned decimal without leading zeros (except `"0"`), and strictly
-less than the field modulus. Values are rejected rather than reduced modulo the field.
+less than the modulus of the field selected with `--field`. Values are rejected rather than reduced
+modulo the field.
 
 Verifier mode requires a single binary package. For a multi-binary workspace, select a member with
 `--root` or configure `default-member` in `Nargo.toml`; otherwise the command fails before compiling

@@ -10,38 +10,77 @@ use crate::{
         declared_return_from_btreemap_for_field, ordered_params_from_btreemap_for_field,
     },
     compiler::codegen::hlssa_to_r1cs::{R1CS, SealedR1CS},
-    driver::Driver,
+    driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
     vm::{bytecode::DebugInfo, interpreter},
 };
-use mavros_artifacts::{
-    ConstraintsLayout, Field as RawField, InputValueOrdered, MavrosField, WitnessLayout,
-};
+use mavros_artifacts::{ConstraintsLayout, InputValueOrdered, MavrosField, WitnessLayout};
 use noirc_abi::input_parser::Format;
 
 type Error = Box<dyn std::error::Error>;
 
-pub fn compile_to_r1cs(root: PathBuf, draw_graphs: bool) -> Result<(Driver, SealedR1CS), Error> {
+/// How [`compile_to_r1cs_with`] compiles a package.
+#[derive(Clone, Copy, Debug)]
+pub struct R1csOptions {
+    /// Write the compiler's debug graphs.
+    pub draw_graphs: bool,
+
+    /// The LogUp lookup-argument soundness target, in bits of security.
+    pub logup_soundness: u32,
+
+    /// Record per-function constraint and witness counts ([`Driver::r1cs_profile`]).
+    pub profile: bool,
+}
+
+impl Default for R1csOptions {
+    fn default() -> Self {
+        R1csOptions {
+            draw_graphs: false,
+            logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
+            profile: false,
+        }
+    }
+}
+
+/// Compile the package at `root` to R1CS over `F`, running the frontend over the same field.
+pub fn compile_to_r1cs<F: MavrosField>(
+    root: PathBuf,
+    draw_graphs: bool,
+) -> Result<(Driver, SealedR1CS<F>), Error> {
+    compile_to_r1cs_with(
+        root,
+        R1csOptions {
+            draw_graphs,
+            ..R1csOptions::default()
+        },
+    )
+}
+
+/// Compile the package at `root` to R1CS over `F` with `options`, running the frontend over the
+/// same field.
+pub fn compile_to_r1cs_with<F: MavrosField>(
+    root: PathBuf,
+    options: R1csOptions,
+) -> Result<(Driver, SealedR1CS<F>), Error> {
     let project = Project::new(root)?;
-    let mut driver = Driver::new(project, draw_graphs);
-    driver.run_noir_compiler()?;
+    let mut driver = Driver::new(project, options.draw_graphs);
+    driver.set_logup_soundness(options.logup_soundness);
+
+    if options.profile {
+        driver.enable_r1cs_profile();
+    }
+
+    driver.run_noir_compiler(F::CONFIG)?;
     driver.make_struct_access_static()?;
     driver.monomorphize()?;
     driver.spill_witness()?;
 
-    let r1cs = driver.generate_r1cs::<RawField>()?;
+    let r1cs = driver.generate_r1cs::<F>()?;
     Ok((driver, r1cs))
 }
 
-/// The entry blob in ABI order and the optional expected return, from the package's `Prover.toml`.
-pub fn read_prover_inputs(
-    root: &Path,
-    abi: &noirc_abi::Abi,
-) -> Result<(Vec<InputValueOrdered>, Option<InputValueOrdered>), Error> {
-    read_prover_inputs_for_field::<RawField>(root, abi)
-}
-
-/// Decode inputs under the same field used by the frontend and VM.
-pub fn read_prover_inputs_for_field<F: MavrosField>(
+/// The entry blob in ABI order and the optional expected return, from the package's `Prover.toml`,
+/// decoded over `F`.
+pub fn read_prover_inputs<F: MavrosField>(
     root: &Path,
     abi: &noirc_abi::Abi,
 ) -> Result<(Vec<InputValueOrdered<F>>, Option<InputValueOrdered<F>>), Error> {
@@ -256,11 +295,18 @@ pub fn run_ad_profiled_from_binary<F: MavrosField>(
     )
 }
 
-pub fn random_ad_coeffs(r1cs: &R1CS) -> Vec<RawField> {
-    use ark_ff::UniformRand as _;
-    let mut rng = rand::thread_rng();
+/// One uniformly random AD coefficient per constraint of `r1cs`.
+pub fn random_ad_coeffs<F: MavrosField>(r1cs: &R1CS<F>) -> Vec<F> {
+    random_ad_coeffs_with(r1cs, &mut rand::thread_rng())
+}
+
+/// One AD coefficient per constraint of `r1cs`, drawn from `rng`.
+pub fn random_ad_coeffs_with<F: MavrosField, R: rand::Rng + ?Sized>(
+    r1cs: &R1CS<F>,
+    rng: &mut R,
+) -> Vec<F> {
     (0..r1cs.constraints.len())
-        .map(|_| ark_bn254::Fr::rand(&mut rng)) // FIELD-ASSUMPTION: L1-direct-ref (1 sites)
+        .map(|_| F::random(rng))
         .collect()
 }
 

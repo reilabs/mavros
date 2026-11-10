@@ -187,8 +187,7 @@ impl std::fmt::Display for Error {
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
             Error::R1csFieldMismatch { requested, program } => write!(
                 f,
-                "an R1CS over {requested:?} was requested or handed in for a program over \
-                 {program:?}"
+                "an R1CS over {requested} was requested or handed in for a program over {program}"
             ),
             Error::AssertConstantFailed(locations) => {
                 for (i, location) in locations.iter().enumerate() {
@@ -351,14 +350,9 @@ impl Driver {
         }
     }
 
-    #[tracing::instrument(skip_all)]
-    pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
-        self.run_noir_compiler_for_field(FieldConfig::bn254())
-    }
-
     /// Compile the frontend and lower its monomorphized AST using the same field.
     #[tracing::instrument(skip_all)]
-    pub fn run_noir_compiler_for_field(&mut self, field: FieldConfig) -> Result<(), Error> {
+    pub fn run_noir_compiler(&mut self, field: FieldConfig) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
             self.project().file_manager(),
             self.project().parsed_files(),
@@ -1632,7 +1626,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "a WASM module over Goldilocks cannot run over Bn254"
+            "a WASM module over goldilocks cannot run over bn254"
         );
     }
 
@@ -1649,7 +1643,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "a WASM module over Goldilocks cannot run over Bn254"
+            "a WASM module over goldilocks cannot run over bn254"
         );
     }
 

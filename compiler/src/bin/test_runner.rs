@@ -12,10 +12,7 @@ use std::{
 
 use cargo_metadata::MetadataCommand;
 
-use ark_ff::UniformRand as _;
-use mavros_artifacts::{
-    Field as RawField, FieldConfig, FieldId, Goldilocks, MavrosField, WitnessManifest,
-};
+use mavros_artifacts::{Field as Bn254, FieldId, Goldilocks, MavrosField, WitnessManifest};
 use mavros_compiler::{
     Project, abi_helpers, api,
     collections::HashMap,
@@ -30,12 +27,12 @@ use mavros_compiler::{
     vm::interpreter,
     wasm_host, wasm_runtime,
 };
-use rand::{RngCore, SeedableRng};
+use rand::SeedableRng;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Child mode: --run-single <path> [--expect-failure] [--analyze-r1cs]
+    // Child mode: --run-single <path> [--expect-failure] [--analyze-r1cs] [--field F]
     if args.len() >= 3 && args[1] == "--run-single" {
         let expect_failure = args[3..].iter().any(|a| a == "--expect-failure");
         let analyze = args[3..].iter().any(|a| a == "--analyze-r1cs");
@@ -97,14 +94,15 @@ fn main() {
         return;
     }
 
-    // Determinism check mode: --check-determinism [--runs N] [--jobs N] [test names...]
+    // Determinism check mode: --check-determinism [--runs N] [--jobs N] [--field F] [test names...]
     // Compiles each test several times in fresh processes and verifies the compiler
     // output (SSA dumps, bytecode, R1CS shape) is byte-identical across runs.
     if args.len() >= 2 && args[1] == "--check-determinism" {
         let runs = parse_runs_arg(&args);
         let jobs = parse_jobs_arg(&args);
         let tests = parse_determinism_tests(&args);
-        std::process::exit(check_determinism(&tests, runs, jobs));
+        let field = parse_field_arg(&args);
+        std::process::exit(check_determinism(&tests, runs, jobs, field));
     }
 
     // Parent mode
@@ -184,50 +182,20 @@ fn parse_jobs_arg(args: &[String]) -> usize {
     1
 }
 
-const SUPPORTED_FIELDS: &[FieldId] = &[FieldId::Bn254, FieldId::Goldilocks];
-
-fn field_name(field: FieldId) -> &'static str {
-    match field {
-        FieldId::Bn254 => "bn254",
-        FieldId::Goldilocks => "goldilocks",
-    }
-}
-
-fn field_config(field: FieldId) -> FieldConfig {
-    match field {
-        FieldId::Bn254 => FieldConfig::bn254(),
-        FieldId::Goldilocks => FieldConfig::goldilocks(),
-    }
-}
-
 fn parse_field_arg(args: &[String]) -> FieldId {
     let Some(index) = args.iter().position(|arg| arg == "--field") else {
         return FieldId::Bn254;
     };
-    match args.get(index + 1).map(String::as_str) {
-        Some("bn254") => FieldId::Bn254,
-        Some("goldilocks") => FieldId::Goldilocks,
-        _ => panic!("--field requires bn254 or goldilocks"),
-    }
+    let name = args.get(index + 1).map_or("", String::as_str);
+    name.parse()
+        .unwrap_or_else(|error| panic!("--field: {error}"))
 }
 
 fn parse_fields_arg(args: &[String]) -> Vec<FieldId> {
     if args.iter().any(|arg| arg == "--field") {
         vec![parse_field_arg(args)]
     } else {
-        SUPPORTED_FIELDS.to_vec()
-    }
-}
-
-fn random_field<F: MavrosField>(rng: &mut rand::rngs::StdRng) -> F {
-    match F::ID {
-        // Preserve the BN254 harness's seeded coefficient sequence.
-        FieldId::Bn254 => F::from_element(ark_bn254::Fr::rand(rng).into()),
-        FieldId::Goldilocks => loop {
-            if let Some(value) = F::from_canonical_limbs(&[rng.next_u64()]) {
-                break value;
-            }
-        },
+        FieldId::ALL.to_vec()
     }
 }
 
@@ -240,7 +208,7 @@ struct SingleRun<F: MavrosField> {
 
 fn run_single(root: PathBuf, expect_failure: bool, analyze: bool, field: FieldId) {
     match field {
-        FieldId::Bn254 => run_single_in::<RawField>(root, expect_failure, analyze),
+        FieldId::Bn254 => run_single_in::<Bn254>(root, expect_failure, analyze),
         FieldId::Goldilocks => run_single_in::<Goldilocks>(root, expect_failure, analyze),
     }
 }
@@ -314,7 +282,7 @@ fn run_single_vm<F: MavrosField>(
     };
     let mut driver = Driver::new(project, false);
     let compile_result = (|| -> Result<(), DriverError> {
-        driver.run_noir_compiler_for_field(field_config(F::ID))?;
+        driver.run_noir_compiler(F::CONFIG)?;
         driver.make_struct_access_static()?;
         driver.monomorphize()?;
         driver.spill_witness()?;
@@ -442,7 +410,7 @@ fn run_single_vm<F: MavrosField>(
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let inputs = api::read_prover_inputs_for_field::<F>(driver.package_root(), driver.abi())
+    let inputs = api::read_prover_inputs::<F>(driver.package_root(), driver.abi())
         .map_err(|e| e.to_string());
     let ordered_params = inputs.as_ref().map(|(params, _)| params.clone());
 
@@ -533,10 +501,8 @@ fn run_single_vm<F: MavrosField>(
         .and_then(|artifact| {
             emit("START:AD_RUN");
             let r1cs = r1cs.as_ref().unwrap();
-            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-            let ad_coeffs: Vec<F> = (0..r1cs.constraints.len())
-                .map(|_| random_field::<F>(&mut rng))
-                .collect();
+            let ad_coeffs: Vec<F> =
+                api::random_ad_coeffs_with(r1cs, &mut rand::rngs::StdRng::seed_from_u64(42));
             match interpreter::run_ad(
                 &artifact.binary,
                 &ad_coeffs,
@@ -748,10 +714,8 @@ fn run_single_wasm<F: MavrosField>(run: SingleRun<F>) {
     let ad_wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:AD_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let ad_coeffs: Vec<F> = (0..r1cs.constraints.len())
-            .map(|_| random_field::<F>(&mut rng))
-            .collect();
+        let ad_coeffs: Vec<F> =
+            api::random_ad_coeffs_with(r1cs, &mut rand::rngs::StdRng::seed_from_u64(42));
         match load(wasm_path).and_then(|loaded| wasm_host::run_ad_loaded(loaded, r1cs, &ad_coeffs))
         {
             Ok(result) => {
@@ -1103,7 +1067,7 @@ fn run_parent(
                             let mut cmd = Command::new(&exe);
                             cmd.arg("--run-single")
                                 .arg(&entry.path)
-                                .args(["--field", field_name(field)]);
+                                .args(["--field", field.name()]);
                             if entry.expectation != TestExpectation::ExecutionSuccess {
                                 cmd.arg("--expect-failure");
                             }
@@ -1132,7 +1096,7 @@ fn run_parent(
                         eprintln!(
                             "[{n}/{total}] {} [{}]{suffix}",
                             entry.display_name,
-                            field_name(field)
+                            field.name()
                         );
                         *slots[idx * fields.len() + field_idx].lock().unwrap() = Some(result);
                     }
@@ -1151,7 +1115,7 @@ fn run_parent(
     if analyze {
         for r in &results {
             if let Some(stats) = &r.analysis_stats {
-                println!("{} [{}]: {stats}", r.name, field_name(r.field));
+                println!("{} [{}]: {stats}", r.name, r.field.name());
             }
         }
     }
@@ -1356,7 +1320,7 @@ fn parse_determinism_tests(args: &[String]) -> Vec<String> {
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
-            "--runs" | "--jobs" => i += 2,
+            "--runs" | "--jobs" | "--field" => i += 2,
             name => {
                 tests.push(name.to_string());
                 i += 1;
@@ -1405,11 +1369,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 /// Compile the test at `root` in a fresh child process and fingerprint the result.
-fn determinism_run(exe: &Path, wasm_runtime_lib: &Path, root: &Path) -> RunFingerprint {
+fn determinism_run(
+    exe: &Path,
+    wasm_runtime_lib: &Path,
+    root: &Path,
+    field: FieldId,
+) -> RunFingerprint {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
     let mut child = Command::new(exe)
         .args(["--run-single", root.to_str().unwrap()])
+        .args(["--field", field.name()])
         .env(wasm_runtime::WASM_RUNTIME_LIB_ENV, wasm_runtime_lib)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1475,7 +1445,7 @@ fn fingerprint_divergences(reference: &RunFingerprint, fp: &RunFingerprint) -> V
 /// Run each test `runs` times in fresh processes (fresh process = fresh hash seeds, which is
 /// the property under test) and check all compiler output is byte-identical across runs.
 /// Returns the process exit code: 0 if everything is deterministic, 1 otherwise.
-fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
+fn check_determinism(tests: &[String], runs: usize, jobs: usize, field: FieldId) -> i32 {
     let resolved: Vec<TestEntry> = tests
         .iter()
         .map(|name| {
@@ -1539,7 +1509,7 @@ fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
                         break;
                     }
                     let (t, r, dst) = &work[idx];
-                    let fp = determinism_run(&exe, &wasm_runtime_lib, dst);
+                    let fp = determinism_run(&exe, &wasm_runtime_lib, dst, field);
                     let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
                     eprintln!("[{n}/{total}] {} run {}", resolved[*t].display_name, r + 1);
                     *slots[idx].lock().unwrap() = Some(fp);
@@ -1771,7 +1741,7 @@ fn parse_status_content(content: &str) -> StatusTable {
 /// Merge one complete report per supported field. Refuse missing fields, duplicate rows and
 /// different test inventories so CI never publishes a partial corpus as a complete result.
 fn merge_status_reports(reports: &[String]) -> Result<String, String> {
-    if reports.len() != SUPPORTED_FIELDS.len() {
+    if reports.len() != FieldId::ALL.len() {
         return Err("expected one report per supported field".into());
     }
     let mut seen_fields = Vec::new();
@@ -1789,12 +1759,12 @@ fn merge_status_reports(reports: &[String]) -> Result<String, String> {
             other => return Err(format!("unsupported report field: {other}")),
         };
         if seen_fields.contains(&field) {
-            return Err(format!("duplicate report for {}", field_name(field)));
+            return Err(format!("duplicate report for {}", field.name()));
         }
         seen_fields.push(field);
         let mut names = HashMap::default();
         for (index, row) in table.rows.iter().enumerate() {
-            if row.field != field_name(field) {
+            if row.field != field.name() {
                 return Err("each input report must contain exactly one field".into());
             }
             if names.insert(row.name.clone(), index).is_some() {
@@ -1946,8 +1916,8 @@ fn check_growth(baseline_path: &Path, current_path: &Path) -> GrowthReport {
     validate_layout(&current, current_path);
 
     let mut report = GrowthReport::default();
-    for &field in SUPPORTED_FIELDS {
-        let name = field_name(field);
+    for field in FieldId::ALL {
+        let name = field.name();
         if current.rows.iter().any(|row| row.field == name) {
             report.blocks.push(ReportBlock::Heading(name.to_string()));
             check_growth_for_field(&baseline, &current, name, &mut report);
@@ -2420,7 +2390,7 @@ fn render_markdown(results: &[TestResult]) -> String {
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
             s("AD_WASM_NOLEAK"),
-            field_name(r.field),
+            r.field.name(),
         ));
     }
 
@@ -2428,7 +2398,7 @@ fn render_markdown(results: &[TestResult]) -> String {
     md.push_str(
         "Success rates count passed or not-applicable stages; ignored tests are excluded.\n\n",
     );
-    for &field in SUPPORTED_FIELDS {
+    for field in FieldId::ALL {
         if !results.iter().any(|result| result.field == field) {
             continue;
         }
@@ -2440,7 +2410,7 @@ fn render_markdown(results: &[TestResult]) -> String {
         };
         md.push_str(&format!(
             "- **{} success rate: {percent:.1}%** ({handled}/{total} stages)\n",
-            field_name(field)
+            field.name()
         ));
     }
     md
@@ -2476,20 +2446,35 @@ mod tests {
 
     #[test]
     fn corpus_field_selection_defaults_to_every_field() {
-        assert_eq!(parse_fields_arg(&lines(&["test-runner"])), SUPPORTED_FIELDS);
-        for &field in SUPPORTED_FIELDS {
+        assert_eq!(parse_fields_arg(&lines(&["test-runner"])), FieldId::ALL);
+        for field in FieldId::ALL {
             assert_eq!(
-                parse_fields_arg(&lines(&["test-runner", "--field", field_name(field)])),
+                parse_fields_arg(&lines(&["test-runner", "--field", field.name()])),
                 vec![field]
             );
         }
     }
 
     #[test]
+    fn determinism_tests_skip_the_field_selector() {
+        let args = lines(&[
+            "test-runner",
+            "--check-determinism",
+            "--field",
+            "goldilocks",
+            "--runs",
+            "2",
+            "sha256",
+        ]);
+        assert_eq!(parse_determinism_tests(&args), ["sha256"]);
+        assert_eq!(parse_field_arg(&args), FieldId::Goldilocks);
+    }
+
+    #[test]
     fn separate_field_reports_merge_to_the_combined_report() {
         let mut results = Vec::new();
         for name in ["suite/z", "suite/a"] {
-            for &field in SUPPORTED_FIELDS {
+            for field in FieldId::ALL {
                 let mut result = parse_child_output(
                     name,
                     TestExpectation::ExecutionSuccess,
@@ -2718,7 +2703,7 @@ mod tests {
                 &result.out_c
             ));
         }
-        run::<RawField>();
+        run::<Bn254>();
         run::<Goldilocks>();
     }
 

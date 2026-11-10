@@ -33,15 +33,19 @@ impl FieldConfig {
     /// The bn254 configuration.
     #[must_use]
     pub const fn bn254() -> FieldConfig {
-        FieldConfig { id: FieldId::Bn254 }
+        FieldConfig::of(FieldId::Bn254)
     }
 
     /// The Goldilocks configuration.
     #[must_use]
     pub const fn goldilocks() -> FieldConfig {
-        FieldConfig {
-            id: FieldId::Goldilocks,
-        }
+        FieldConfig::of(FieldId::Goldilocks)
+    }
+
+    /// The configuration of the field `id` names.
+    #[must_use]
+    pub const fn of(id: FieldId) -> FieldConfig {
+        FieldConfig { id }
     }
 
     /// Which field this configures.
@@ -134,16 +138,10 @@ impl FieldConfig {
     /// Any number of limbs is accepted.
     #[must_use]
     pub fn from_canonical_limbs(&self, limbs: &[u64]) -> Option<FieldElement> {
-        let significant = limbs.len() - limbs.iter().rev().take_while(|&&limb| limb == 0).count();
-        let limbs = &limbs[..significant];
-        if limbs.len() > self.canonical_limbs() {
-            return None;
-        }
         match self.id {
-            FieldId::Bn254 => {
-                <ark_bn254::Fr as MavrosField>::from_canonical_limbs(limbs).map(FieldElement::Bn254)
-            }
-            FieldId::Goldilocks => <Goldilocks as MavrosField>::from_canonical_limbs(limbs)
+            FieldId::Bn254 => <ark_bn254::Fr as MavrosField>::try_from_canonical_limbs(limbs)
+                .map(FieldElement::Bn254),
+            FieldId::Goldilocks => <Goldilocks as MavrosField>::try_from_canonical_limbs(limbs)
                 .map(FieldElement::Goldilocks),
         }
     }

@@ -177,10 +177,8 @@ fn ordered_param<F: MavrosField>(
         (InputValue::Field(elem), _) => {
             use acvm::AcirField;
             let limbs = num_bigint::BigUint::from_bytes_be(&elem.to_be_bytes()).to_u64_digits();
-            let value = (limbs.len() <= F::CANONICAL_LIMBS)
-                .then(|| F::from_canonical_limbs(&limbs))
-                .flatten()
-                .ok_or_else(|| format!("ABI value does not fit {:?}", F::ID))?;
+            let value = F::try_from_canonical_limbs(&limbs)
+                .ok_or_else(|| format!("ABI value does not fit {}", F::ID))?;
             InputValueOrdered::Field(value)
         }
         (InputValue::Vec(vec_elements), AbiType::Array { typ, length }) => {
@@ -310,7 +308,7 @@ mod tests {
 
     #[test]
     fn prover_input_parser_receives_the_requested_field() {
-        use mavros_artifacts::{Goldilocks, field::goldilocks::MODULUS};
+        use mavros_artifacts::{Field, Goldilocks, field::goldilocks::MODULUS};
 
         let dir = tempfile::tempdir().unwrap();
         let mut abi = string_abi(&["x"], false);
@@ -320,17 +318,15 @@ mod tests {
         };
         let path = dir.path().join("Prover.toml");
         std::fs::write(&path, format!("x = '{}'\n", MODULUS - 1)).unwrap();
-        let (params, _) =
-            crate::api::read_prover_inputs_for_field::<Goldilocks>(dir.path(), &abi).unwrap();
+        let (params, _) = crate::api::read_prover_inputs::<Goldilocks>(dir.path(), &abi).unwrap();
         assert_eq!(
             params,
             vec![InputValueOrdered::Field(Goldilocks::from(MODULUS - 1))]
         );
         std::fs::write(&path, format!("x = '{MODULUS}'\n")).unwrap();
-        assert!(crate::api::read_prover_inputs(dir.path(), &abi).is_ok());
+        assert!(crate::api::read_prover_inputs::<Field>(dir.path(), &abi).is_ok());
         // This value fits u64 and BN254, but the Goldilocks parser must reject it.
-        let error =
-            crate::api::read_prover_inputs_for_field::<Goldilocks>(dir.path(), &abi).unwrap_err();
+        let error = crate::api::read_prover_inputs::<Goldilocks>(dir.path(), &abi).unwrap_err();
         assert!(error.to_string().to_lowercase().contains("goldilocks"));
     }
 
