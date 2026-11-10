@@ -1,3 +1,4 @@
+use mavros_artifacts::Field;
 use mavros_compiler::{api, compiler::codegen::CodeGenOptions};
 
 #[test]
@@ -9,7 +10,8 @@ fn immutable_reference_boundary_preserves_values_and_constraints() {
     for file in ["Nargo.toml", "Prover.toml", "src/main.nr"] {
         std::fs::copy(fixture.join(file), dir.path().join(file)).unwrap();
     }
-    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
     let mut artifact = driver
         .compile_bytecode_artifact(CodeGenOptions {
             check_constraints: true,

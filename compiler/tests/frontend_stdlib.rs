@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, FieldConfig, Goldilocks, MavrosField};
+use mavros_artifacts::{Field, FieldConfig, FieldId, Goldilocks, MavrosField};
 use mavros_compiler::{
     Project, abi_helpers, api,
     compiler::codegen::CodeGenOptions,
@@ -10,7 +10,7 @@ use mavros_compiler::{
 fn frontend(source: &str, field: FieldConfig) -> Result<(), Error> {
     let dir = common::noir_project(source);
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    driver.run_noir_compiler_for_field(field)
+    driver.run_noir_compiler(field)
 }
 
 #[test]
@@ -76,20 +76,10 @@ fn bn254_crypto_stays_available_and_is_unresolved_on_goldilocks() {
     }
 }
 
-fn check_program<F: MavrosField>(
-    source: &str,
-    field: FieldConfig,
-    inputs: &[String],
-    unconstrained: bool,
-) {
+fn check_program<F: MavrosField>(source: &str, inputs: &[String], unconstrained: bool) {
     let dir = common::noir_project(source);
-    let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    driver.run_noir_compiler_for_field(field).unwrap();
-    driver.make_struct_access_static().unwrap();
-    driver.monomorphize().unwrap();
-    driver.spill_witness().unwrap();
-    let r1cs = driver.generate_r1cs::<F>().unwrap();
-    if field == FieldConfig::goldilocks() && !unconstrained {
+    let (mut driver, r1cs) = api::compile_to_r1cs::<F>(dir.path().to_path_buf(), false).unwrap();
+    if F::ID == FieldId::Goldilocks && !unconstrained {
         assert!(r1cs.witness_layout.logup_repetitions > 1);
     }
     let mut binary = driver
@@ -100,8 +90,7 @@ fn check_program<F: MavrosField>(
         .unwrap();
     for input in inputs {
         std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
-        let (params, expected) =
-            api::read_prover_inputs_for_field::<F>(dir.path(), driver.abi()).unwrap();
+        let (params, expected) = api::read_prover_inputs::<F>(dir.path(), driver.abi()).unwrap();
         let expected = expected.expect("each vector declares its expected digest");
         let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
         assert!(api::check_witgen(&r1cs, &result));
@@ -115,7 +104,7 @@ fn check_program<F: MavrosField>(
     }
 }
 
-fn check_sha256<F: MavrosField>(field: FieldConfig, unconstrained: bool) {
+fn check_sha256<F: MavrosField>(unconstrained: bool) {
     let mode = if unconstrained { "unconstrained " } else { "" };
     let source = format!(
         "{mode}fn main(block: [u32; 16], state: [u32; 8]) -> pub [u32; 8] {{
@@ -169,22 +158,22 @@ fn check_sha256<F: MavrosField>(field: FieldConfig, unconstrained: bool) {
             "block = {block:?}\nstate = {state:?}\nreturn = {expected:?}\n"
         ));
     }
-    check_program::<F>(&source, field, &inputs, unconstrained);
+    check_program::<F>(&source, &inputs, unconstrained);
 }
 
 #[test]
 fn sha256_goldilocks_witnesses_match_known_digests() {
-    check_sha256::<Goldilocks>(FieldConfig::goldilocks(), false);
+    check_sha256::<Goldilocks>(false);
 }
 
 #[test]
 fn sha256_goldilocks_unconstrained_matches_known_digests() {
-    check_sha256::<Goldilocks>(FieldConfig::goldilocks(), true);
+    check_sha256::<Goldilocks>(true);
 }
 
 #[test]
 fn sha256_bn254_witnesses_match_known_digests() {
-    check_sha256::<Field>(FieldConfig::bn254(), false);
+    check_sha256::<Field>(false);
 }
 
 #[test]
@@ -204,11 +193,6 @@ fn blake_goldilocks_witnesses_match_reference_digests() {
             [std::hash::blake2s(input), std::hash::blake3(input)]
         }}"
         );
-        check_program::<Goldilocks>(
-            &source,
-            FieldConfig::goldilocks(),
-            &inputs,
-            !mode.is_empty(),
-        );
+        check_program::<Goldilocks>(&source, &inputs, !mode.is_empty());
     }
 }

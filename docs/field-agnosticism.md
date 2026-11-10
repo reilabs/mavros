@@ -42,9 +42,9 @@ phases**, not left undone here:
 
 - The **fourth evaluator**, `codegen/hlssa_to_r1cs.rs`, which P4 moved onto `FieldElement` (see the
   Phase 4 note).
-- The `--field` selector that will seed `SSA::field` from the `Driver` (P5). `SSA::empty` seeds
-  `FieldConfig::bn254()`, which is why P3 and P4's field generalisation leave bn254's artifacts
-  byte-identical.
+- The `--field` selector, which seeds `SSA::field` from the `Driver` in P5 (see Layer 5's **Field
+  selection**). `SSA::empty` seeds `FieldConfig::bn254()`, which is why P3 and P4's field
+  generalisation leave bn254's artifacts byte-identical.
 
 **Phase 4 Complete:** every field opcode is generated per field. `#[interpreter(fields(..))]` in
 `vm/src/bytecode.rs` names the fields (bn254 and the one-cell `Goldilocks` of
@@ -112,6 +112,8 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   field only below its modulus (`L1-noir-frontend`).
 - **LogUp:** at the default `--logup-soundness=128`, a Goldilocks program with a lookup argument
   repeats the argument three times (four for `2^20 < D ≤ 2^31`; `L4-logup-challenges`).
+- **Field selection:** `mavros --field` and the type parameter of `mavros_compiler::api`'s functions
+  pick the field (Layer 5's **Field selection**).
 
 Goldilocks is tested through hand-built SSA (`compiler/tests/bigints/goldilocks.rs`): field
 arithmetic, equality and constant folding at the field's boundary values, a witnessed 64-bit
@@ -204,7 +206,7 @@ Repetitive clusters of the same operation get one marker per file with a count.
 Completion gate (Phase 5):
 `rg -t rust 'ark_bn254|into_bigint\(|\.0\.0|FELT_LIMBS|FIELD_SIZE|\b254\b'` over
 `compiler/ vm/ mavros-artifacts/ opcode-gen/ wasm-runtime/` returns only façade-internal hits. The
-gate is open: the search returns 161 lines, 44 of them in `compiler/tests/`.
+gate is open: the search returns 132 lines, 44 of them in `compiler/tests/`.
 
 ---
 
@@ -215,11 +217,12 @@ gate is open: the search returns 161 lines, 44 of them in `compiler/tests/`.
 - [x] `compiler/src/compiler/mod.rs` — the **compiler middle-end's** alias is now
       `pub use mavros_artifacts::FieldElement as Field`. Everything from HLSSA constants through the
       passes and analyses rides it.
-- [ ] `mavros-artifacts/src/lib.rs` — `pub type Field = ark_bn254::Fr;` names bn254 for the callers
-      that name no field (the Noir path, WASM, the test runner). `LC`/`R1C`/`R1CS`/
-      `InputValueOrdered` are generic over `F: MavrosField` with `Field` as the default (P5), so the
-      alias is their bn254 instance. `vm/src/lib.rs` re-exports it. `hlssa_to_r1cs`'s `R1CGen<F>`
-      computes its `LC`s in `F` and converts a constant at the boundary with
+- [ ] `mavros-artifacts/src/lib.rs` — `pub type Field = ark_bn254::Fr;` is the bn254 instance of the
+      field-generic types, and the CLI names it only as the `--field bn254` choice. It stays open
+      while it is their default type argument: `LC`/`R1C`/`R1CS`/`InputValueOrdered` are generic
+      over `F: MavrosField` with `Field` as the default (P5), as is `vm/src/interpreter.rs`'s
+      `VerifierResult<F = crate::Field>`, and `vm/src/lib.rs` re-exports it. `hlssa_to_r1cs`'s
+      `R1CGen<F>` computes its `LC`s in `F` and converts a constant at the boundary with
       `MavrosField::from_element`; `Driver::generate_r1cs::<F>` refuses an `F` other than the
       program's field (`Error::R1csFieldMismatch`), and `r1cs_compact::analyze` takes any `R1CS<F>`.
 
@@ -270,7 +273,9 @@ stays raw by design until P5. By file (count):
       separate success rates. Unsupported Goldilocks stages are reported as failures.
 - [x] `wasm-runtime/src/lib.rs` (1) — the `field_runtime!` invocation's `ark_bn254::Fr`: bn254's
       runtime instance, which names its field.
-- [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
+- [x] `compiler/src/api.rs` — `random_ad_coeffs::<F>` draws each coefficient with
+      `MavrosField::random`: arkworks' `Fr::rand` on bn254, and rejection sampling of one `u64` on
+      Goldilocks.
 - [x] `compiler/src/abi_helpers.rs` — ordered inputs and manifest checks are generic over the VM
       field. Input parsing uses the selected modulus and rejects scalars that cannot fit it.
 
@@ -292,8 +297,8 @@ before conversion to the chosen VM field.
 - [x] `compiler/src/compiler/lowering/expression_converter.rs` — `integer_constant` takes a
       literal's magnitude into the configured field, refusing one at or above its modulus with a
       located diagnostic, and negates it for a negative literal (so `-1` is `p - 1` on Goldilocks).
-- [x] `compiler/src/driver.rs` — `run_noir_compiler_for_field` passes the selected field to both
-      Noir's frontend and Mavros' AST lowering. Existing callers default to BN254.
+- [x] `compiler/src/driver.rs` — `run_noir_compiler` passes the `FieldConfig` it is given to both
+      Noir's frontend and Mavros' AST lowering.
 - [x] Mavros' injected stdlib compiles under both fields. BN254-only curve, Poseidon2 and vendored
       bignum modules are field-gated before type checking. ECDSA and Poseidon2 calls on Goldilocks
       produce unavailable-item frontend diagnostics; their BN254 constants are never reduced into
@@ -354,10 +359,11 @@ before conversion to the chosen VM field.
       bound where the cell count is chosen.
 - [x] `mavros-artifacts/src/field/{element,config}.rs` — an element's canonical integer is
       `FieldElement::canonical_limbs()`, as many limbs as `FieldConfig::canonical_limbs()`, and
-      `FieldConfig::from_canonical_limbs` takes a slice of any length, where a non-zero limb past
-      the field's is past the modulus. `modulus_limbs()` is a slice too. No compiler signature fixes
-      a limb count, so the compiler bounds no field's width; the bit, byte and radix folds read an
-      element's limbs zero-extended, as far as the operation asks.
+      `FieldConfig::from_canonical_limbs` and `MavrosField::try_from_canonical_limbs` take a slice
+      of any length, where a non-zero limb past the field's is past the modulus. `modulus_limbs()`
+      is a slice too. No compiler signature fixes a limb count, so the compiler bounds no field's
+      width; the bit, byte and radix folds read an element's limbs zero-extended, as far as the
+      operation asks.
 - [x] `compiler/src/compiler/passes/instruction_lowering/bit_range.rs` —
       `decompose_canonical_field_bytes` reads the modulus as an integer and mints each half from its
       limbs. Its shape follows the modulus (`CanonicalBytes`: `⌈k/8⌉` bytes, split at `8·⌈bytes/2⌉`
@@ -699,12 +705,14 @@ ECDSA replacement fails with a frontend diagnostic.
       0 names none). Dispatch needs no field selection, since the opcodes name the field
       (`bn254_add_field`, …); the word lets `interpreter::run*::<F>` refuse, in every build, a
       program over another field, whose handlers would read and write the wrong element width.
-- [ ] **Field selection** — `SSA::empty` seeds `FieldConfig::bn254()` and `SSA::with_field` seeds
-      any field; HLSSA→LLSSA lowering carries it (`LLSSA::with_field(hlssa.field())`), codegen picks
-      the field's opcodes (`FieldOpCode::for_field`) and runtime symbols from it, and
-      `LLVMCodeGen::new` takes it and ICEs on an LLSSA over another field. What is left is a
-      `--field` selector in `compiler/src/api.rs` / `driver.rs` that seeds it, mirroring the
-      `set_logup_soundness` path (Phase 5).
+- [x] **Field selection** — `mavros --field bn254|goldilocks` (default bn254, global to the
+      subcommands, parsed as a `FieldId`) and the `F` of `mavros_compiler::api`'s functions
+      (`compile_to_r1cs::<F>`, `compile_to_r1cs_with::<F>`, `read_prover_inputs::<F>`,
+      `random_ad_coeffs::<F>`, `random_ad_coeffs_with::<F>`) select the field;
+      `Driver::run_noir_compiler(F::CONFIG)` seeds the frontend and the SSA with it. HLSSA→LLSSA
+      lowering carries it (`LLSSA::with_field(hlssa.field())`), codegen picks the field's opcodes
+      (`FieldOpCode::for_field`) and runtime symbols from it, and `LLVMCodeGen::new` takes it and
+      ICEs on an LLSSA over another field.
 - [x] **Per-field WASM runtime** — one archive serves every field: `field_runtime!` for bn254 and
       `wasm-runtime/src/goldilocks.rs` for Goldilocks, and codegen names each field's entry points
       through `FieldRuntimeSymbols::of` (`llssa_to_llvm.rs`), as `__bn254_*` and `__goldilocks_*`. A
