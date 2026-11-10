@@ -1,4 +1,5 @@
 use super::{
+    limb_config::LimbConfig,
     types::{limb_types, limb_widths},
     utils::multi_cell_int_bits,
 };
@@ -6,7 +7,6 @@ use crate::{
     collections::HashMap,
     compiler::{
         analysis::types::TypeInfo,
-        passes::shared::limbs::witness_limb_bits,
         ssa::{
             BlockId, FunctionId, Instruction, ValueId,
             hlssa::{CastTarget, HLSSA, OpCode, Type},
@@ -19,14 +19,15 @@ pub(super) fn plan_function(
     fid: FunctionId,
     reachable: &[BlockId],
     type_info: &TypeInfo,
+    limb_config: LimbConfig,
 ) -> HashMap<ValueId, Vec<ValueId>> {
-    let field = ssa.field();
+    let field = limb_config.field;
     let func = ssa.get_function(fid);
     let fti = type_info.get_function(fid);
     let mut value_map: HashMap<ValueId, Vec<ValueId>> = HashMap::default();
 
     let plan_value = |value: ValueId, ty: &Type, map: &mut HashMap<ValueId, Vec<ValueId>>| {
-        let count = limb_types(ty, field).len();
+        let count = limb_types(ty, limb_config).len();
         let limbs = if count == 1 {
             vec![value]
         } else {
@@ -86,7 +87,7 @@ pub(super) fn plan_function(
                         else {
                             continue;
                         };
-                        (*result, limb_widths(bits, witness_limb_bits(field)).len())
+                        (*result, limb_widths(bits, limb_config.limb_bits).len())
                     }
                     // No conversion, so the result stands for whatever the source does.
                     //

@@ -1,4 +1,6 @@
-use super::{globals::Globals, plan::plan_function, rewriter::rewrite_function};
+use super::{
+    globals::Globals, limb_config::LimbConfig, plan::plan_function, rewriter::rewrite_function,
+};
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
@@ -25,12 +27,13 @@ impl Pass for WideWitnessInts {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id(), FlowAnalysis::id()]
+        vec![TypeInfo::id(), FlowAnalysis::id(), LimbConfig::id()]
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        let field = ssa.field();
-        let globals = Globals::split(ssa, field);
+        let limb_config = *store.get::<LimbConfig>();
+        let field = limb_config.field;
+        let globals = Globals::split(ssa, limb_config);
 
         let type_info = store.get::<TypeInfo>();
         let cfg = store.get::<FlowAnalysis>();
@@ -51,7 +54,7 @@ impl Pass for WideWitnessInts {
                 ssa.get_function(fid).get_blocks().count(),
                 "ICE: an unreachable block reached the multi-cell representation"
             );
-            let value_map = plan_function(ssa, fid, &reachable, type_info);
+            let value_map = plan_function(ssa, fid, &reachable, type_info, limb_config);
             // A function with no limbs can still hold an operation whose operands each fit an
             // element but whose sum or product does not; the chain, schoolbook and division lower
             // those too.
@@ -79,7 +82,15 @@ impl Pass for WideWitnessInts {
             {
                 continue;
             }
-            rewrite_function(ssa, fid, &reachable, &value_map, type_info, field, &globals);
+            rewrite_function(
+                ssa,
+                fid,
+                &reachable,
+                &value_map,
+                type_info,
+                limb_config,
+                &globals,
+            );
         }
     }
 

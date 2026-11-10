@@ -57,7 +57,7 @@ impl Rewriter<'_> {
             bits,
             lhs: dividend,
             rhs: divisor,
-        }) = divided(op, self.types, self.field)
+        }) = divided(op, self.types, self.field())
         else {
             return false;
         };
@@ -227,8 +227,8 @@ impl Rewriter<'_> {
         self.carry_chain_over(true, &zero, &divisor, widths.to_vec(), CarryOut::One, guard);
 
         let (zero, one) = (
-            self.field_const(self.field.zero()),
-            self.field_const(self.field.one()),
+            self.field_const(self.field().zero()),
+            self.field_const(self.field().one()),
         );
         let mut quotient = vec![zero; widths.len()];
         quotient[0] = one;
@@ -286,7 +286,7 @@ impl Rewriter<'_> {
         match limb {
             Limb::Value(limb) => self.cast(*limb, CastTarget::Field),
             // A witness limb is never wider than the host word, so its pattern is one host limb.
-            Limb::Constant(pattern) => self.field_const(self.field.constant(pattern.limbs()[0])),
+            Limb::Constant(pattern) => self.field_const(self.field().constant(pattern.limbs()[0])),
         }
     }
 
@@ -305,7 +305,7 @@ impl Rewriter<'_> {
 /// The division the representation lowers, if `op` is one: a division or remainder under either
 /// reading, guarded or not, with a witnessed operand, past [`single_cell_product_fits`], where the
 /// single-cell lowering's `q·d + r` could wrap the modulus.
-pub(super) fn divided(
+pub(in super::super) fn divided(
     op: &OpCode,
     types: &FunctionTypeInfo,
     field: FieldConfig,

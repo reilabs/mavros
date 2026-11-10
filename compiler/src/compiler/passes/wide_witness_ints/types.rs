@@ -1,11 +1,9 @@
+use super::{limb_config::LimbConfig, utils::multi_cell_int_bits};
 use crate::{
     collections::HashMap,
-    compiler::{
-        passes::{shared::limbs::witness_limb_bits, wide_witness_ints::utils::multi_cell_int_bits},
-        ssa::{
-            ValueId,
-            hlssa::{Type, TypeExpr},
-        },
+    compiler::ssa::{
+        ValueId,
+        hlssa::{Type, TypeExpr},
     },
 };
 use mavros_artifacts::FieldConfig;
@@ -23,11 +21,11 @@ pub(super) fn limb_widths(bits: usize, limb_bits: usize) -> Vec<usize> {
 }
 
 /// The types a type expands into: one per limb for a witnessed wide integer, itself otherwise.
-pub(super) fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
+pub(super) fn limb_types(ty: &Type, limb_config: LimbConfig) -> Vec<Type> {
     match &ty.expr {
         TypeExpr::WitnessOf(inner) => match &inner.expr {
-            TypeExpr::Int(bits) if *bits > multi_cell_int_bits(field) => {
-                limb_widths(*bits, witness_limb_bits(field))
+            TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field) => {
+                limb_widths(*bits, limb_config.limb_bits)
                     .into_iter()
                     .map(|width| Type::witness_of(Type::int(width)))
                     .collect()
@@ -42,15 +40,15 @@ pub(super) fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
         // The alternative, one sequence of `n * k` limbs, would index it at `i * k + j`, putting
         // arithmetic between the caller's index and the tape's. Here every limb sequence is
         // indexed by the caller's index.
-        TypeExpr::Array(inner, count) => element_limb_types(inner, field)
+        TypeExpr::Array(inner, count) => element_limb_types(inner, limb_config)
             .into_iter()
             .map(|leaf| leaf.array_of(*count))
             .collect(),
-        TypeExpr::Slice(inner) => element_limb_types(inner, field)
+        TypeExpr::Slice(inner) => element_limb_types(inner, limb_config)
             .into_iter()
             .map(Type::slice_of)
             .collect(),
-        TypeExpr::Ref(inner) => limb_types(inner, field)
+        TypeExpr::Ref(inner) => limb_types(inner, limb_config)
             .into_iter()
             .map(|leaf| leaf.ref_of())
             .collect(),
@@ -63,15 +61,15 @@ pub(super) fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
 /// A sequence is stored as one sequence per limb, so a **pure** wide element splits too: kept
 /// whole, a constant wide sequence would hold each entry as one field element, capping its width at
 /// the modulus. Reassembling an element costs interpreter work, not constraints.
-fn element_limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
+fn element_limb_types(ty: &Type, limb_config: LimbConfig) -> Vec<Type> {
     match &ty.expr {
-        TypeExpr::Int(bits) if *bits > multi_cell_int_bits(field) => {
-            limb_widths(*bits, witness_limb_bits(field))
+        TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field) => {
+            limb_widths(*bits, limb_config.limb_bits)
                 .into_iter()
                 .map(Type::int)
                 .collect()
         }
-        _ => limb_types(ty, field),
+        _ => limb_types(ty, limb_config),
     }
 }
 
@@ -122,8 +120,12 @@ pub(super) fn flat_limbs(
 /// A constructor's element type and result type are computed separately. Where they disagree, a
 /// `zip` would silently build fewer limb sequences than the plan minted values for.
 #[track_caller]
-pub(super) fn element_types(elem_type: &Type, field: FieldConfig, expected: usize) -> Vec<Type> {
-    let types = element_limb_types(elem_type, field);
+pub(super) fn element_types(
+    elem_type: &Type,
+    limb_config: LimbConfig,
+    expected: usize,
+) -> Vec<Type> {
+    let types = element_limb_types(elem_type, limb_config);
     assert_eq!(
         types.len(),
         expected,
