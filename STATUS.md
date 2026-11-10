@@ -731,7 +731,7 @@
 | noir/test_programs/execution_success/bounded_vec_extend_pattern | ✅ | ✅ | 125521 | 126817 | 412600 | 20308 | 793445 | 1053416 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/bounded_vec_extend_pattern | ✅ | ✅ | 129011 | 130307 | 412192 | 20308 | 455780 | 715319 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/break_and_continue | ✅ | ✅ | 0 | 1 | 312 | 505 | 24746 | 264176 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/break_and_continue | ✅ | ✅ | 0 | 1 | 272 | 505 | - | - | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
+| noir/test_programs/execution_success/break_and_continue | ✅ | ✅ | 0 | 1 | 272 | 505 | 19485 | 258905 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/brillig_acir_as_brillig | ✅ | ✅ | 51 | 97 | 9576 | 7703 | 38753 | 281834 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/brillig_acir_as_brillig | ✅ | ✅ | 149 | 195 | 8984 | 7689 | 26030 | 269085 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/brillig_array_ifelse | ✅ | ✅ | 7 | 8 | 8320 | 8054 | 34712 | 276814 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
@@ -1766,4 +1766,4 @@
 Success rates count passed or not-applicable stages; ignored tests are excluded.
 
 - **bn254 success rate: 100.0%** (14064/14064 stages)
-- **goldilocks success rate: 84.0%** (11811/14064 stages)
+- **goldilocks success rate: 84.0%** (11818/14064 stages)
