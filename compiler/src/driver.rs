@@ -44,6 +44,7 @@ use crate::{
             assert_constant::AssertConstantValidation,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
+            decomposition_width::DecompositionWidthValidation,
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
             elide_tuples::ElideTuples,
@@ -189,8 +190,7 @@ impl std::fmt::Display for Error {
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
             Error::R1csFieldMismatch { requested, program } => write!(
                 f,
-                "an R1CS over {requested:?} was requested or handed in for a program over \
-                 {program:?}"
+                "an R1CS over {requested} was requested or handed in for a program over {program}"
             ),
             Error::AssertConstantFailed(locations) => {
                 for (i, location) in locations.iter().enumerate() {
@@ -353,14 +353,9 @@ impl Driver {
         }
     }
 
-    #[tracing::instrument(skip_all)]
-    pub fn run_noir_compiler(&mut self) -> Result<(), Error> {
-        self.run_noir_compiler_for_field(FieldConfig::bn254())
-    }
-
     /// Compile the frontend and lower its monomorphized AST using the same field.
     #[tracing::instrument(skip_all)]
-    pub fn run_noir_compiler_for_field(&mut self, field: FieldConfig) -> Result<(), Error> {
+    pub fn run_noir_compiler(&mut self, field: FieldConfig) -> Result<(), Error> {
         let (mut context, crate_id) = nargo::prepare_package(
             self.project().file_manager(),
             self.project().parsed_files(),
@@ -444,6 +439,16 @@ impl Driver {
         if !failures.is_empty() {
             return Err(Error::UnsatisfiableProgram(
                 failures
+                    .into_iter()
+                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                    .collect(),
+            ));
+        }
+
+        let refusals = PrepareEntryPoint::param_refusals(&ssa);
+        if !refusals.is_empty() {
+            return Err(Error::LoweringRefused(
+                refusals
                     .into_iter()
                     .map(|diagnostic| self.attach_compiled_source(diagnostic))
                     .collect(),
@@ -677,6 +682,9 @@ impl Driver {
     pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
 
+        // Two phases, so that a witnessed decomposition the field cannot carry is reported as an
+        // error between them rather than refused by its lowering at the start of the second.
+        let refusals = Rc::new(RefCell::new(None));
         let mut pass_manager = PassManager::new(
             "witness_spilling".to_string(),
             self.draw_cfg,
@@ -722,6 +730,28 @@ impl Driver {
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.
                 Box::new(InstructionLowering::witness_narrowing_casts()),
+                Box::new(DecompositionWidthValidation::new(Rc::clone(&refusals))),
+            ],
+        );
+        pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
+        pass_manager.run(&mut ssa);
+        let refusals = refusals
+            .borrow_mut()
+            .take()
+            .expect("decomposition width validation did not record a result");
+        if !refusals.is_empty() {
+            return Err(Error::LoweringRefused(
+                refusals
+                    .into_iter()
+                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                    .collect(),
+            ));
+        }
+
+        let mut pass_manager = PassManager::new(
+            "witness_lowering".to_string(),
+            self.draw_cfg,
+            vec![
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
@@ -1609,7 +1639,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "a WASM module over Goldilocks cannot run over Bn254"
+            "a WASM module over goldilocks cannot run over bn254"
         );
     }
 
@@ -1626,7 +1656,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "a WASM module over Goldilocks cannot run over Bn254"
+            "a WASM module over goldilocks cannot run over bn254"
         );
     }
 

@@ -184,7 +184,6 @@ impl LowerWitnessIntegerArithOps {
         });
     }
 
-    // FIELD-ASSUMPTION: L6-int-op-strategy
     // The full product is one field element (`range_fits_field_injectively`), or for u128 the
     // packing below, `lo + cross·2^h` (~2^193 at the bn254 limb), which needs more than the limb
     // width certifies and so asks `two_limb_product_packing_fits`. A product one cell cannot hold
@@ -706,7 +705,6 @@ fn narrow_rangecheck_width(range: &Interval, default_bits: usize) -> usize {
     width.max(1).min(default_bits)
 }
 
-// FIELD-ASSUMPTION: L4-modulus-query
 // Reads the real modulus, so it answers correctly on a small field. At 128 bits its FALSE case is
 // the two-limb packing in `lower_unsigned_mul`; at any other width the schoolbook in
 // `passes::wide_witness_ints` takes every product `single_cell_product_fits` refuses first. See
@@ -729,7 +727,6 @@ fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
     hi - lo < p
 }
 
-// FIELD-ASSUMPTION: L6-int-op-strategy (signed encode/decode pair)
 // The sign is packed with `field.two_pow(bits)` / `field.two_pow(bits - 1)` place values, which
 // wrap once they reach the field's size. Sums and differences past `widest_cell_sum_bits` are
 // routed elsewhere first, and assert it; products and divisions are held to
@@ -807,7 +804,6 @@ struct DivModResult {
     r_is_witness: bool,
 }
 
-// FIELD-ASSUMPTION: L6-int-representation
 // The limb width is the field's, but `lower_unsigned_mul` reads the split as exactly two limbs. It
 // is reached only where `single_cell_product_fits` holds, which at 128 bits asks
 // `two_limb_product_packing_fits`, covering the count as well as the packing; a narrower field
@@ -821,7 +817,6 @@ fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> WitnessLimbs {
     split_into_limbs(b, value, limb_bits, BITS.div_ceil(limb_bits))
 }
 
-// FIELD-ASSUMPTION: L6-int-op-strategy
 // Reconstructs `dividend = q * divisor + r` in one field element; the u128 path recurses into
 // the u128 mul fallback. Sound while `single_cell_product_fits`, which the assertion below holds it
 // to: a division that fails it is lowered by `passes::wide_witness_ints` before this pass runs.

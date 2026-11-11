@@ -57,7 +57,6 @@
             jq
             graphviz
             flamegraph
-            nodejs_26
             pkg-config
           ];
 

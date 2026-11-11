@@ -6,15 +6,18 @@
 use mavros_artifacts::{
     Field, FieldConfig, Goldilocks, InputValueOrdered, field::goldilocks::MODULUS,
 };
-use mavros_compiler::compiler::{
-    passes::shared::limbs::witness_limb_bits,
-    ssa::{
-        ValueId,
-        hlssa::{
-            BinaryArithOpKind, CmpKind, Endianness, Type,
-            builder::{HLBlockEmitter, HLEmitter as _},
+use mavros_compiler::{
+    compiler::{
+        passes::shared::limbs::witness_limb_bits,
+        ssa::{
+            ValueId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, CmpKind, Endianness, Radix, Type,
+                builder::{HLBlockEmitter, HLEmitter as _},
+            },
         },
     },
+    driver::Error as DriverError,
 };
 use mavros_int_semantics::{CmpOp, IntBits, IntOp, SignedValue, corners};
 use num_bigint::BigUint;
@@ -451,13 +454,145 @@ fn a_field_element_decomposes_into_its_64_bits() {
     }
 }
 
-/// A Goldilocks element has 64 bits, so a witnessed decomposition into 65 is refused.
+/// A witnessed field element decomposes into the 8 bytes of its integer, in either order.
 #[test]
-#[should_panic(expected = "asks for more bits than a field element has")]
-fn a_65_bit_decomposition_is_refused_on_goldilocks() {
-    compile(&[Type::field()], &[Type::int(1).array_of(65)], |e, p| {
-        vec![e.to_bits(p[0], Endianness::Little, 65)]
-    });
+fn a_field_element_decomposes_into_its_8_bytes() {
+    for endianness in [Endianness::Little, Endianness::Big] {
+        let compiled = compile(&[Type::field()], &[Type::int(8).array_of(8)], |e, p| {
+            vec![e.to_radix(p[0], Radix::Bytes, endianness, 8)]
+        });
+        for &a in &operands() {
+            let byte = |index: usize| {
+                let position = match endianness {
+                    Endianness::Little => index,
+                    Endianness::Big => 7 - index,
+                };
+                Goldilocks::from((a.value() >> (8 * position)) & 0xFF)
+            };
+            let mut block = vec![input(a)];
+            block.extend((0..8).map(|index| input(byte(index))));
+            for verdict in on_both_lanes(&compiled, &block) {
+                assert!(
+                    verdict.is_accepted(),
+                    "{a} to {endianness:?} bytes: {verdict:?}"
+                );
+            }
+
+            let mut wrong = block.clone();
+            wrong[1] = input(byte(0) + Goldilocks::ONE);
+            for verdict in on_both_lanes(&compiled, &wrong) {
+                assert!(
+                    !verdict.is_accepted(),
+                    "{a} to {endianness:?} bytes accepted a wrong first byte: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
+/// An integer decomposes into the bits and bytes of its pattern, either way round, past the 63
+/// bits one element carries injectively, so it is cut into chunks of whole bytes. Each value is
+/// at least the modulus, where its pattern and its residue's differ.
+///
+/// The 64-bit value is `2^64 - 2`; the 128-bit one adds `2^127`, past a zero gap from bit 64.
+#[test]
+fn an_integer_decomposes_into_its_pattern_past_one_element() {
+    let low = (BigUint::from(1u8) << 64u32) - 2u8;
+    let high = &low + (BigUint::from(1u8) << 127u32);
+    // (operand, bytes rather than bits, big-endian, digits, digit read, want)
+    let cases = [
+        (&low, 64usize, false, false, 64usize, 0usize, 0u64),
+        (&low, 64, false, false, 64, 1, 1),
+        (&low, 64, false, false, 64, 63, 1),
+        (&low, 64, false, true, 64, 0, 1),
+        (&low, 64, false, true, 64, 63, 0),
+        (&low, 64, true, false, 8, 0, 0xFE),
+        (&low, 64, true, false, 8, 7, 0xFF),
+        (&low, 64, true, true, 8, 0, 0xFF),
+        (&low, 64, true, true, 8, 7, 0xFE),
+        (&low, 64, false, false, 100, 99, 0),
+        (&low, 64, true, false, 12, 11, 0),
+        (&high, 128, false, false, 128, 56, 1),
+        (&high, 128, false, false, 128, 64, 0),
+        (&high, 128, false, false, 128, 127, 1),
+        (&high, 128, true, false, 16, 6, 0xFF),
+        (&high, 128, true, false, 16, 7, 0xFF),
+        (&high, 128, true, false, 16, 8, 0),
+        (&high, 128, true, false, 16, 15, 0x80),
+        (&high, 128, true, true, 16, 0, 0x80),
+    ];
+    for (value, bits, bytes, big, digits, read, want) in cases {
+        // The pattern is `2 | rest`, and the 2 comes from the parameter, so it is witnessed.
+        let rest = IntBits::from_biguint(bits, &(value - 2u8));
+        let digit_bits = if bytes { 8 } else { 1 };
+        let endianness = if big {
+            Endianness::Big
+        } else {
+            Endianness::Little
+        };
+        let compiled = compile(&[Type::field()], &[Type::int(digit_bits)], |e, p| {
+            let operand = e.cast_to(CastTarget::Int(bits), p[0]);
+            let rest = e.int_const(rest);
+            let operand = e.bin(BinaryArithOpKind::Or, operand, rest);
+            let decomposed = if bytes {
+                e.to_radix(operand, Radix::Bytes, endianness, digits)
+            } else {
+                e.to_bits(operand, endianness, digits)
+            };
+            let index = e.int_const(IntBits::from_u128(32, read as u128));
+            vec![e.array_get(decomposed, index)]
+        });
+        let what = format!(
+            "int{bits} into {digits} {endianness:?} {}, digit {read}",
+            if bytes { "bytes" } else { "bits" }
+        );
+        assert_returns(
+            &what,
+            &compiled,
+            &[input(element(2))],
+            input(element(want)),
+            input(element(want ^ 1)),
+        );
+    }
+}
+
+/// A Goldilocks element has 64 bits in 8 bytes, so a witnessed decomposition into 65 bits or 9
+/// bytes is refused, as an error that names it and what the field offers.
+#[test]
+fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
+    let bits = main_program_in(
+        FieldConfig::goldilocks(),
+        &[Type::field()],
+        &[Type::int(1).array_of(65)],
+        |e, p| vec![e.to_bits(p[0], Endianness::Little, 65)],
+    );
+    let bytes = main_program_in(
+        FieldConfig::goldilocks(),
+        &[Type::field()],
+        &[Type::int(8).array_of(9)],
+        |e, p| vec![e.to_radix(p[0], Radix::Bytes, Endianness::Little, 9)],
+    );
+    for (ssa, refusal) in [
+        (
+            bits,
+            "a witness `to_bits` of 65 bits asks for more bits than a field element has",
+        ),
+        (
+            bytes,
+            "a witness `to_radix` of 9 bytes asks for more than the 8 bytes a field element occupies",
+        ),
+    ] {
+        let Err(error) = Compiled::<Goldilocks>::compile(ssa) else {
+            panic!("compiled although {refusal}");
+        };
+        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
+        let message = error.to_string();
+        assert!(message.contains(refusal), "{message}");
+        assert!(
+            message.contains("64-bit modulus and a 16-bit witness limb"),
+            "{message}"
+        );
+    }
 }
 
 /// No witness column of an accepted run can move alone, and no two can trade a limb's place value,

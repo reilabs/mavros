@@ -1,3 +1,4 @@
+use mavros_artifacts::Field;
 use mavros_compiler::{api, compiler::codegen::r1cs_compact};
 
 mod common;
@@ -13,7 +14,8 @@ fn protected_columns_survive_compaction() {
         ),
     ] {
         let dir = common::noir_project(source);
-        let (driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+        let (driver, r1cs) =
+            api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
         let stats = r1cs_compact::analyze(&r1cs, driver.protected_r1cs_cols());
         assert_eq!(stats.removable_cols, removable, "{source}: {stats:?}");
         assert_eq!(stats.removable_rows, removable, "{source}: {stats:?}");

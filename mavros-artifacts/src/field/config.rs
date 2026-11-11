@@ -5,7 +5,7 @@
 //! through `ssa.field()` / `b.field()`, so the middle-end and R1CS generation mint and inspect
 //! every field value through this object, and no pass names a concrete prime.
 
-use ark_ff::{AdditiveGroup, BigInt, PrimeField};
+use ark_ff::{AdditiveGroup, PrimeField};
 
 use crate::field::{
     element::FieldElement,
@@ -33,15 +33,19 @@ impl FieldConfig {
     /// The bn254 configuration.
     #[must_use]
     pub const fn bn254() -> FieldConfig {
-        FieldConfig { id: FieldId::Bn254 }
+        FieldConfig::of(FieldId::Bn254)
     }
 
     /// The Goldilocks configuration.
     #[must_use]
     pub const fn goldilocks() -> FieldConfig {
-        FieldConfig {
-            id: FieldId::Goldilocks,
-        }
+        FieldConfig::of(FieldId::Goldilocks)
+    }
+
+    /// The configuration of the field `id` names.
+    #[must_use]
+    pub const fn of(id: FieldId) -> FieldConfig {
+        FieldConfig { id }
     }
 
     /// Which field this configures.
@@ -59,12 +63,12 @@ impl FieldConfig {
         }
     }
 
-    /// The field modulus, as canonical little-endian 64-bit limbs.
+    /// The field modulus, as its [`FieldConfig::canonical_limbs`] little-endian 64-bit limbs.
     #[must_use]
-    pub fn modulus(&self) -> BigInt<4> {
+    pub fn modulus_limbs(&self) -> &'static [u64] {
         match self.id {
-            FieldId::Bn254 => <ark_bn254::Fr as PrimeField>::MODULUS,
-            FieldId::Goldilocks => BigInt([goldilocks::MODULUS, 0, 0, 0]),
+            FieldId::Bn254 => &<ark_bn254::Fr as PrimeField>::MODULUS.0,
+            FieldId::Goldilocks => &[goldilocks::MODULUS],
         }
     }
 
@@ -98,14 +102,6 @@ impl FieldConfig {
         self.constant(2u64).pow([exp as u64])
     }
 
-    /// The field modulus as canonical little-endian 64-bit limbs (`modulus().0`).
-    ///
-    /// No `match` of its own: it delegates to [`FieldConfig::modulus`], which carries one.
-    #[must_use]
-    pub fn modulus_limbs(&self) -> [u64; 4] {
-        self.modulus().0
-    }
-
     /// The additive identity of the field.
     #[must_use]
     pub fn zero(&self) -> FieldElement {
@@ -136,18 +132,17 @@ impl FieldConfig {
         value.into_field_element(*self)
     }
 
-    /// The field element with the given canonical integer representation, or `None` if the integer
-    /// is not less than the modulus.
+    /// The element denoting the little-endian integer `limbs`, or `None` if it is not below the
+    /// modulus.
+    ///
+    /// Any number of limbs is accepted.
     #[must_use]
-    pub fn from_bigint(&self, bigint: BigInt<4>) -> Option<FieldElement> {
+    pub fn from_canonical_limbs(&self, limbs: &[u64]) -> Option<FieldElement> {
         match self.id {
-            FieldId::Bn254 => ark_bn254::Fr::from_bigint(bigint).map(FieldElement::Bn254),
-            // A canonical Goldilocks integer has one limb, so a non-zero upper limb is past the
-            // modulus.
-            FieldId::Goldilocks => match bigint.0 {
-                [limb, 0, 0, 0] => Goldilocks::from_canonical(limb).map(FieldElement::Goldilocks),
-                _ => None,
-            },
+            FieldId::Bn254 => <ark_bn254::Fr as MavrosField>::try_from_canonical_limbs(limbs)
+                .map(FieldElement::Bn254),
+            FieldId::Goldilocks => <Goldilocks as MavrosField>::try_from_canonical_limbs(limbs)
+                .map(FieldElement::Goldilocks),
         }
     }
 }
@@ -227,8 +222,7 @@ mod tests {
         let cfg = FieldConfig::bn254();
         assert_eq!(cfg.id(), FieldId::Bn254);
         assert_eq!(cfg.field_bit_size(), <Fr as PrimeField>::MODULUS_BIT_SIZE);
-        assert_eq!(cfg.modulus(), <Fr as PrimeField>::MODULUS);
-        assert_eq!(cfg.modulus_limbs(), cfg.modulus().0);
+        assert_eq!(cfg.modulus_limbs(), <Fr as PrimeField>::MODULUS.0);
         assert_eq!(cfg.storage_cells(), 4);
         assert_eq!(cfg.canonical_limbs(), 4);
     }
@@ -238,7 +232,7 @@ mod tests {
         let cfg = FieldConfig::goldilocks();
         assert_eq!(cfg.id(), FieldId::Goldilocks);
         assert_eq!(cfg.field_bit_size(), 64);
-        assert_eq!(cfg.modulus(), BigInt([goldilocks::MODULUS, 0, 0, 0]));
+        assert_eq!(cfg.modulus_limbs(), [goldilocks::MODULUS]);
         assert_eq!(cfg.storage_cells(), 1);
         assert_eq!(cfg.canonical_limbs(), 1);
     }
@@ -267,19 +261,32 @@ mod tests {
     }
 
     #[test]
-    fn goldilocks_from_bigint_takes_one_limb_below_the_modulus() {
+    fn goldilocks_from_canonical_limbs_takes_one_limb_below_the_modulus() {
         let cfg = FieldConfig::goldilocks();
-        let top = BigInt([goldilocks::MODULUS - 1, 0, 0, 0]);
-        assert_eq!(cfg.from_bigint(top), Some(-cfg.one()));
-        assert_eq!(cfg.from_bigint(cfg.modulus()), None);
-        // A non-zero upper limb is past the modulus, whatever the low limb holds.
-        for upper in 1..4 {
-            let mut limbs = [7, 0, 0, 0];
+        assert_eq!(
+            cfg.from_canonical_limbs(&[goldilocks::MODULUS - 1]),
+            Some(-cfg.one())
+        );
+        assert_eq!(cfg.from_canonical_limbs(cfg.modulus_limbs()), None);
+
+        // Zero limbs past the first change nothing, and a non-zero one is past the modulus.
+        assert_eq!(
+            cfg.from_canonical_limbs(&[7, 0, 0, 0, 0]),
+            Some(cfg.constant(7u64))
+        );
+
+        for upper in 1..5 {
+            let mut limbs = [7, 0, 0, 0, 0];
             limbs[upper] = 1;
-            assert_eq!(cfg.from_bigint(BigInt(limbs)), None);
+            assert_eq!(cfg.from_canonical_limbs(&limbs), None);
         }
+        assert_eq!(cfg.from_canonical_limbs(&[]), Some(cfg.zero()));
+
         let seven = cfg.constant(7u64);
-        assert_eq!(cfg.from_bigint(seven.into_bigint()), Some(seven));
+        assert_eq!(
+            cfg.from_canonical_limbs(&seven.canonical_limbs()),
+            Some(seven)
+        );
     }
 
     #[test]
@@ -360,20 +367,32 @@ mod tests {
     }
 
     #[test]
-    fn from_bigint_matches_backing() {
+    fn from_canonical_limbs_matches_backing() {
         let cfg = FieldConfig::bn254();
-        let seven = cfg.constant(7u64).into_bigint();
-        assert_eq!(cfg.from_bigint(seven), Some(cfg.constant(7u64)));
-        // At or above the modulus is rejected.
-        assert_eq!(cfg.from_bigint(cfg.modulus()), None);
-        let mut below = cfg.modulus();
-        below.0[0] -= 1;
-        assert_eq!(cfg.from_bigint(below), Some(-cfg.one()));
+        let seven = cfg.constant(7u64).canonical_limbs();
+        assert_eq!(cfg.from_canonical_limbs(&seven), Some(cfg.constant(7u64)));
+        assert_eq!(cfg.from_canonical_limbs(&[7]), Some(cfg.constant(7u64)));
+
+        // At or above the modulus is rejected, and so is a non-zero limb past the fourth.
+        assert_eq!(cfg.from_canonical_limbs(cfg.modulus_limbs()), None);
+        assert_eq!(cfg.from_canonical_limbs(&[7, 0, 0, 0, 1]), None);
+        assert_eq!(
+            cfg.from_canonical_limbs(&[7, 0, 0, 0, 0]),
+            Some(cfg.constant(7u64))
+        );
+
+        let mut below = cfg.modulus_limbs().to_vec();
+        below[0] -= 1;
+        assert_eq!(cfg.from_canonical_limbs(&below), Some(-cfg.one()));
+
         // Every element's canonical integer round-trips.
         let mut rng = ark_std::test_rng();
         for _ in 0..256 {
             let value = FieldElement::from(<Fr as ark_ff::UniformRand>::rand(&mut rng));
-            assert_eq!(cfg.from_bigint(value.into_bigint()), Some(value));
+            assert_eq!(
+                cfg.from_canonical_limbs(&value.canonical_limbs()),
+                Some(value)
+            );
         }
     }
 }

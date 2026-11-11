@@ -67,10 +67,10 @@ both reports and combines them with
 usual baseline comparisons and result posting. Merging requires both fields and matching test lists.
 
 To investigate one package and field, run
-`cargo run --bin test-runner -- --run-single <package-path> --field goldilocks` inside the devshell.
-Single-package and determinism checks default to BN254. The CLI's normal compilation commands also
-retain their BN254 default; library callers can select a frontend field with
-`Driver::run_noir_compiler_for_field`.
+`cargo run --bin test-runner -- --run-single <package-path>` inside the devshell. `--run-single` and
+`--check-determinism` default take `--field` to select a field, defaulting to `bn254` if not
+specified. Library callers name the field as the `FieldConfig` they pass to
+`Driver::run_noir_compiler`, or as the type parameter of `mavros_compiler::api`'s functions.
 
 `make unit-test` uses [cargo-nextest](https://nexte.st/), pinned by the Nix flake, to schedule tests
 across all workspace test binaries in parallel. It first builds the WASM runtime once and shares its
@@ -176,7 +176,8 @@ This works as follows:
 
 Running with `--emit-wasm` will execute the full compilation pipeline, and _additionally_ emit the
 `mavros_debug/program.wasm` and `mavros_debug/program.wasm.meta.json`. This can be combined with the
-`--emit-llvm` flag to also save the intermediate LLVM IR as an `.ll` file.
+`--emit-llvm` flag to also save the intermediate LLVM IR as an `.ll` file, and with
+`--field goldilocks` to emit a module over Goldilocks.
 
 Pass `--include-debug-info` to additionally emit `mavros_debug/program.debug.wasm`. It is a valid,
 standalone WebAssembly debug companion containing the module structure and DWARF custom sections.

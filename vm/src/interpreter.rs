@@ -435,7 +435,7 @@ pub fn run_phase1_profiled<F: mavros_artifacts::MavrosField>(
 fn check_program_field<F: mavros_artifacts::MavrosField>(header: &bytecode::ProgramHeader) {
     assert!(
         header.field == F::ID,
-        "a VM program over {:?} cannot run over {:?}",
+        "a VM program over {} cannot run over {}",
         header.field,
         F::ID
     );
@@ -1842,7 +1842,7 @@ mod tests {
     /// A program runs only over the field its header names: its field opcodes' handlers read and
     /// write that field's element width.
     #[test]
-    #[should_panic(expected = "a VM program over Bn254 cannot run over Goldilocks")]
+    #[should_panic(expected = "a VM program over bn254 cannot run over goldilocks")]
     fn a_witgen_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let _ = run::<mavros_artifacts::Goldilocks>(
@@ -1855,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a VM program over Bn254 cannot run over Goldilocks")]
+    #[should_panic(expected = "a VM program over bn254 cannot run over goldilocks")]
     fn an_ad_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let _ = run_ad::<mavros_artifacts::Goldilocks>(
@@ -1868,7 +1868,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a VM program over Bn254 cannot run over Goldilocks")]
+    #[should_panic(expected = "a VM program over bn254 cannot run over goldilocks")]
     fn a_verifier_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
         let _ = run_verifier::<mavros_artifacts::Goldilocks>(

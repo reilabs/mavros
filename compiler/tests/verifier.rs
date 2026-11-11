@@ -1,9 +1,9 @@
 mod common;
 
 use ark_ff::{AdditiveGroup, UniformRand};
-use mavros_artifacts::{Field, R1CS};
+use mavros_artifacts::{Field, FieldConfig, R1CS};
 use mavros_compiler::{
-    Project, api,
+    api,
     compiler::codegen::{CodeGenOptions, llssa_to_llvm::WasmCompileOpts},
     driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
     wasm_host, wasm_runtime,
@@ -123,7 +123,7 @@ fn assert_forward_bytecode(binary: &[u64]) {
 
 #[test]
 fn goldilocks_verifier_matches_materialized_matrices() {
-    use mavros_artifacts::{FieldConfig, Goldilocks};
+    use mavros_artifacts::Goldilocks;
     use mavros_compiler::compiler::ssa::{
         SourceLocation,
         hlssa::{
@@ -210,13 +210,14 @@ fn check_at(
     if let Some(toml) = prover_toml {
         std::fs::write(project.path().join("Prover.toml"), toml).unwrap();
     }
-    let mut driver = Driver::new(Project::new(project.path().to_path_buf()).unwrap(), false);
-    driver.set_logup_soundness(logup_soundness);
-    driver.run_noir_compiler().unwrap();
-    driver.make_struct_access_static().unwrap();
-    driver.monomorphize().unwrap();
-    driver.spill_witness().unwrap();
-    let r1cs = driver.generate_r1cs::<Field>().unwrap();
+    let (mut driver, r1cs) = api::compile_to_r1cs_with::<Field>(
+        project.path().to_path_buf(),
+        api::R1csOptions {
+            logup_soundness,
+            ..api::R1csOptions::default()
+        },
+    )
+    .unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     if prover_toml.is_some() {
         let (inputs, _) = api::read_prover_inputs(project.path(), driver.abi()).unwrap();
@@ -377,13 +378,14 @@ fn repeated_lookup_arguments() {
 fn check_wasm_at(source: &str, logup_soundness: u32, prover_toml: &str) -> usize {
     let project = common::noir_project(source);
     std::fs::write(project.path().join("Prover.toml"), prover_toml).unwrap();
-    let mut driver = Driver::new(Project::new(project.path().to_path_buf()).unwrap(), false);
-    driver.set_logup_soundness(logup_soundness);
-    driver.run_noir_compiler().unwrap();
-    driver.make_struct_access_static().unwrap();
-    driver.monomorphize().unwrap();
-    driver.spill_witness().unwrap();
-    let r1cs = driver.generate_r1cs::<Field>().unwrap();
+    let (mut driver, r1cs) = api::compile_to_r1cs_with::<Field>(
+        project.path().to_path_buf(),
+        api::R1csOptions {
+            logup_soundness,
+            ..api::R1csOptions::default()
+        },
+    )
+    .unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let (inputs, _) = api::read_prover_inputs(project.path(), driver.abi()).unwrap();
     let vm = api::run_witgen_from_binary(&mut prover, &r1cs, &inputs, None).unwrap();
@@ -444,11 +446,12 @@ fn repeated_lookup_arguments_on_wasm() {
 fn constraint_layouts_must_match_the_compiled_artifact() {
     let project =
         common::noir_project("fn main(x: u8, i: u32) { let a = [x, 2, 3]; assert(a[i] == x); }");
-    let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let other = common::noir_project("fn main(x: Field) { assert(x == 1); }");
-    let (_, other_r1cs) = api::compile_to_r1cs(other.path().to_path_buf(), false).unwrap();
+    let (_, other_r1cs) = api::compile_to_r1cs::<Field>(other.path().to_path_buf(), false).unwrap();
     let mut shifted_witness = r1cs.witness_layout;
     shifted_witness.algebraic_size -= 1;
     shifted_witness.multiplicities_size += 1;
@@ -502,7 +505,8 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
 #[test]
 fn vector_lengths_are_checked_before_execution() {
     let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
-    let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let r = vec![Field::from(1u64); r1cs.constraints.len()];
     let w = vec![Field::from(2u64); r1cs.witness_layout.size()];
@@ -539,7 +543,7 @@ fn vector_lengths_are_checked_before_execution() {
 #[test]
 fn cli_verifies_without_prover_inputs_and_prints_json() {
     let project = common::noir_project("fn main(x: Field, y: pub Field) { assert(x * x == y); }");
-    let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let r = vec![Field::from(3u64); r1cs.constraints.len()];
     let w = vec![Field::from(7u64); r1cs.witness_layout.size()];
     for (name, vector) in [("r.json", &r), ("w.json", &w)] {
@@ -612,7 +616,7 @@ fn cli_requires_one_workspace_binary_and_honors_member_selection() {
         assert!(!workspace.path().join(member).join("mavros_debug").exists());
     }
 
-    let (_, r1cs) = api::compile_to_r1cs(workspace.path().join("a"), false).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs::<Field>(workspace.path().join("a"), false).unwrap();
     for (file, len) in [
         ("r.json", r1cs.constraints.len()),
         ("w.json", r1cs.witness_layout.size()),
@@ -669,7 +673,7 @@ fn witness_slices_across_calls_and_nested_arrays() {
 fn prover_artifacts_are_rejected_by_the_verifier() {
     use mavros_vm::bytecode::{Function, OpCode, Program};
     let project = common::noir_project("fn main() {}");
-    let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let binary = Program {
         field: mavros_artifacts::FieldId::Bn254,
         constraint_layouts: None,
@@ -705,7 +709,8 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
 #[test]
 fn verifier_artifact_cannot_run_as_a_prover() {
     let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
-    let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let mut binary =
         api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let r = vec![Field::ZERO; r1cs.constraints_layout.size()];
@@ -723,7 +728,8 @@ fn verifier_artifact_cannot_run_as_a_prover() {
 fn a_verifier_binary_is_not_a_prover_artifact() {
     use mavros_artifacts::{Artifact, ArtifactError};
     let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
-    let (mut driver, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let bytes = driver.artifact(r1cs, verifier).unwrap().to_bytes().unwrap();
     let error = Artifact::<Field>::from_bytes(&bytes).err().unwrap();
@@ -796,7 +802,7 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
     let w = vec![Field::from(7u64); wl.size()];
     let result =
         mavros_vm::interpreter::run_verifier(&binary, &r, &w, wl, cl, Some(debug)).unwrap();
-    let (_, r1cs) = api::compile_to_r1cs(project.path().to_path_buf(), false).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     assert_eq!(
         [result.r_aw, result.r_bw, result.r_cw],
         reference(&r1cs, &r, &w)

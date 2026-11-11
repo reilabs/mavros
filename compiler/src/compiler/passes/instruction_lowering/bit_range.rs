@@ -14,6 +14,7 @@ use crate::compiler::{
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
+    util::biguint_of_limbs,
 };
 
 use super::{InstructionLoweringRule, LoweringContext};
@@ -218,7 +219,7 @@ impl CanonicalBytes {
         let bytes = (field.field_bit_size() as usize).div_ceil(8);
         let split = 8 * bytes.div_ceil(2);
         assert!(
-            BigUint::from(field.modulus()) > BigUint::from(1u8) << (split + 1),
+            biguint_of_limbs(field.modulus_limbs()) > BigUint::from(1u8) << (split + 1),
             "a canonical byte decomposition splits at bit {split}, which needs a modulus above \
              2^{}",
             split + 1
@@ -227,9 +228,6 @@ impl CanonicalBytes {
     }
 }
 
-// FIELD-ASSUMPTION: L3-felt-limbs
-// The modulus is read through its four-limb `BigInt`, and each half into a `u128`, so the field
-// fits 256 bits.
 /// Decomposes the witnessed field element `value` into its canonical big-endian bytes, each
 /// range-checked, and returns their witnesses.
 ///
@@ -244,13 +242,19 @@ fn decompose_canonical_field_bytes(
         bytes: count,
         split,
     } = CanonicalBytes::of(b.field());
-    let modulus = BigUint::from(b.field().modulus());
-    let half = |half: BigUint| u128::try_from(half).expect("a half of the modulus fits a u128");
-    let modulus_hi_u128 = half(&modulus >> split);
+    let field = b.field();
+    let modulus = biguint_of_limbs(field.modulus_limbs());
+    let modulus_hi_int = &modulus >> split;
+
     // `p` is odd, so subtracting one never borrows out of the low half.
-    let modulus_lo_m1_u128 = half(modulus & ((BigUint::from(1u8) << split) - 1u8)) - 1;
-    let modulus_hi = b.field_const(b.field().constant(modulus_hi_u128));
-    let modulus_lo_m1 = b.field_const(b.field().constant(modulus_lo_m1_u128));
+    let modulus_lo_m1_int = (modulus & ((BigUint::from(1u8) << split) - 1u8)) - 1u8;
+    let element = |half: &BigUint| {
+        field
+            .from_canonical_limbs(&half.to_u64_digits())
+            .expect("a half of the modulus is below it")
+    };
+    let modulus_hi = b.field_const(element(&modulus_hi_int));
+    let modulus_lo_m1 = b.field_const(element(&modulus_lo_m1_int));
     let two_to_8 = b.field_const(b.field().constant(256u128));
     let limb_place_value = b.field_const(b.field().two_pow(FIELD_LIMB_BITS));
     let two_to_split = b.field_const(b.field().two_pow(split));
@@ -312,10 +316,11 @@ fn decompose_canonical_field_bytes(
         .iter()
         .map(|&limb| b.cast_to(CastTarget::Int(FIELD_LIMB_BITS), limb))
         .collect();
+    let modulus_lo_m1_limbs = modulus_lo_m1_int.to_u64_digits();
     let mod_limbs: Vec<_> = (0..lo_limbs.len())
         .rev()
         .map(|place| {
-            let limb = (modulus_lo_m1_u128 >> (FIELD_LIMB_BITS * place)) as u64;
+            let limb = modulus_lo_m1_limbs.get(place).copied().unwrap_or(0);
             b.int_const(IntBits::from_u128(FIELD_LIMB_BITS, u128::from(limb)))
         })
         .collect();
@@ -327,6 +332,7 @@ fn decompose_canonical_field_bytes(
             equals.push(b.eq(modulus_limb, limb));
         }
     }
+
     // `exceeds_i + equals_i * (the borrow of the limbs below)`, folded up from the bottom limb.
     let last_exceeds = exceeds[exceeds.len() - 1];
     let mut borrow = None;
@@ -651,7 +657,7 @@ mod tests {
 
     fn check_only_the_canonical_bytes_decompose<F: MavrosField>(field: FieldConfig) {
         let CanonicalBytes { bytes, split } = CanonicalBytes::of(field);
-        let modulus = BigUint::from(field.modulus());
+        let modulus = biguint_of_limbs(field.modulus_limbs());
         let room = BigUint::from(1u8) << (8 * bytes);
         let two_to_split = BigUint::from(1u8) << split;
         let largest_with_a_second = (&room - &modulus - 1u8).min(&modulus - 1u8);
@@ -722,7 +728,7 @@ mod tests {
     }
 
     fn check_a_split_byte_takes_only_its_honest_high_part<F: MavrosField>(field: FieldConfig) {
-        let modulus = BigUint::from(field.modulus());
+        let modulus = biguint_of_limbs(field.modulus_limbs());
         let half: BigUint = (&modulus + 1u8) >> 1u32;
         // Each window has one end inside a byte: the low bits up to that end split it.
         for (offset, width) in [(0usize, 1usize), (0, 7), (4, 4), (1, 7), (0, 13)] {
@@ -788,7 +794,7 @@ mod tests {
 
     fn check_every_byte_is_held_to_a_byte<F: MavrosField>(field: FieldConfig) {
         let CanonicalBytes { bytes, split } = CanonicalBytes::of(field);
-        let modulus = BigUint::from(field.modulus());
+        let modulus = biguint_of_limbs(field.modulus_limbs());
         let one = BigUint::from(1u8);
         for place in 1..bytes - 1 {
             let value = &one << (8 * (place + 1));
@@ -905,7 +911,7 @@ mod tests {
 
         let element = |value: &BigUint| {
             field
-                .from_bigint(value.clone().try_into().unwrap())
+                .from_canonical_limbs(&value.to_u64_digits())
                 .expect("a canonical value")
         };
         let input = InputValueOrdered::Field(F::from_element(element(value)));

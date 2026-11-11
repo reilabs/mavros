@@ -1794,18 +1794,11 @@ impl<'a> ExpressionConverter<'a> {
                         field.field_bit_size()
                     )
                 };
+
+                // The configured field checks the magnitude against its modulus; Noir's build-time
+                // field need not be the same field.
                 let (sign, limbs) = value.to_u64_digits();
-                // FIELD-ASSUMPTION: L3-felt-limbs. FieldConfig::from_bigint takes BigInt<4>.
-                // Reject excess limbs before copying, then let the configured field check its
-                // modulus; Noir's build-time field need not be the same field.
-                let mut magnitude = [0u64; 4];
-                if limbs.len() > magnitude.len() {
-                    return Err(invalid());
-                }
-                magnitude[..limbs.len()].copy_from_slice(&limbs);
-                let element = field
-                    .from_bigint(ark_ff::BigInt::new(magnitude))
-                    .ok_or_else(invalid)?;
+                let element = field.from_canonical_limbs(&limbs).ok_or_else(invalid)?;
                 Ok(Constant::Field(if sign == noir_bigint::Sign::Minus {
                     -element
                 } else {

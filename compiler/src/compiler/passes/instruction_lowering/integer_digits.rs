@@ -76,7 +76,6 @@ impl InstructionLoweringRule for IntegerDigits {
             b.emit(op);
             return true;
         }
-        // FIELD-ASSUMPTION: L4-decompose
         // A chunk is the widest whole number of bytes the field carries injectively.
         let chunk_bits = widest / 8 * 8;
         assert!(
@@ -114,6 +113,7 @@ impl InstructionLoweringRule for IntegerDigits {
             let chunk_width = (bits - start).min(chunk_bits);
             let chunk = b.cast_to(CastTarget::Int(chunk_width), shifted);
             let image = b.cast_to_field(chunk);
+
             // The chunk is below `2^chunk_width`, so the digits past those its width needs are zero.
             let needed = chunk_width.div_ceil(digit_bits).min(chunk_digits);
             let decomposed = match radix {
@@ -152,10 +152,16 @@ mod tests {
     };
     use mavros_artifacts::FieldConfig;
 
-    /// `main(x: int(bits)) { to_bits(x, count) }` (or `to_radix` into bytes), run through the
-    /// operand-shape rules. Returns the digit width of every field decomposition left behind.
-    fn field_decompositions(bits: usize, bytes: bool, count: usize) -> Vec<usize> {
-        let mut ssa = HLSSA::with_main("main".to_string());
+    /// `main(x: int(bits)) { to_bits(x, count) }` (or `to_radix` into bytes) over `field`, run
+    /// through the operand-shape rules. Returns the digit width of every field decomposition left
+    /// behind.
+    fn field_decompositions(
+        field: FieldConfig,
+        bits: usize,
+        bytes: bool,
+        count: usize,
+    ) -> Vec<usize> {
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
         let (value, result) = (ssa.fresh_value(), ssa.fresh_value());
         let function = ssa.get_unique_entrypoint_mut();
         let entry = function.get_entry_mut();
@@ -201,8 +207,7 @@ mod tests {
     /// are unique; one more digit would also admit those of `x + p`.
     #[test]
     fn every_decomposition_left_has_one_answer() {
-        let widest = widest_injective_int_bits(FieldConfig::bn254());
-        for (bits, bytes, count) in [
+        let bn254 = [
             (64, false, 64),
             (64, false, 253),
             (64, false, 254),
@@ -213,18 +218,36 @@ mod tests {
             (300, false, 300),
             (300, true, 38),
             (64, false, 400),
+        ];
+        let goldilocks = [
+            (32, false, 63),
+            (32, false, 64),
+            (63, false, 63),
+            (64, false, 64),
+            (64, true, 8),
+            (32, true, 8),
+            (128, false, 128),
+            (128, true, 16),
+            (64, false, 100),
+        ];
+        for (field, cases) in [
+            (FieldConfig::bn254(), &bn254[..]),
+            (FieldConfig::goldilocks(), &goldilocks[..]),
         ] {
-            let widths = field_decompositions(bits, bytes, count);
-            assert!(
-                !widths.is_empty(),
-                "int{bits} into {count}: nothing decomposed"
-            );
-            for width in widths {
+            let widest = widest_injective_int_bits(field);
+            for &(bits, bytes, count) in cases {
+                let widths = field_decompositions(field, bits, bytes, count);
                 assert!(
-                    width <= widest,
-                    "int{bits} into {count} {}: a {width}-bit field decomposition",
-                    if bytes { "bytes" } else { "bits" }
+                    !widths.is_empty(),
+                    "{field:?}: int{bits} into {count}: nothing decomposed"
                 );
+                for width in widths {
+                    assert!(
+                        width <= widest,
+                        "{field:?}: int{bits} into {count} {}: a {width}-bit field decomposition",
+                        if bytes { "bytes" } else { "bits" }
+                    );
+                }
             }
         }
     }
@@ -232,7 +255,8 @@ mod tests {
     /// Where the digits fit, an integer is decomposed as its field image, in one decomposition.
     #[test]
     fn digits_that_fit_decompose_the_image_whole() {
-        assert_eq!(field_decompositions(64, false, 253), vec![253]);
-        assert_eq!(field_decompositions(64, true, 31), vec![248]);
+        let bn254 = FieldConfig::bn254();
+        assert_eq!(field_decompositions(bn254, 64, false, 253), vec![253]);
+        assert_eq!(field_decompositions(bn254, 64, true, 31), vec![248]);
     }
 }

@@ -5,14 +5,16 @@ use std::{
     process::ExitCode,
 };
 
-use clap::{Parser, Subcommand};
-use mavros_artifacts::Field as RawField;
+use clap::{
+    Parser, Subcommand,
+    builder::{PossibleValuesParser, TypedValueParser},
+};
+use mavros_artifacts::{Field as Bn254, FieldId, Goldilocks, MavrosField};
 use mavros_compiler::compiler::codegen::r1cs_compact;
 use mavros_compiler::{
-    Project, api,
-    compiler::codegen::{
-        CodeGenOptions, hlssa_to_r1cs::SealedR1CS, llssa_to_llvm::WasmCompileOpts,
-    },
+    Project,
+    api::{self, R1csOptions},
+    compiler::codegen::{CodeGenOptions, llssa_to_llvm::WasmCompileOpts},
     driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
     panic_handler, plotting,
 };
@@ -84,10 +86,40 @@ pub struct ProgramOptions {
     #[arg(long, value_name = "BITS", global = true, default_value_t = DEFAULT_LOGUP_SOUNDNESS_BITS)]
     pub logup_soundness: u32,
 
+    /// The prime field the program is compiled and executed over.
+    #[arg(long, global = true, default_value_t = FieldId::Bn254, value_parser = field_parser())]
+    pub field: FieldId,
+
     /// Run the report-only post-seal compaction analysis and log how many R1CS rows/columns a
     /// compaction pass could remove.
     #[arg(long, action = clap::ArgAction::SetTrue)]
     pub analyze_r1cs: bool,
+}
+
+/// Parses `--field`, listing every supported field's name as a possible value.
+fn field_parser() -> impl TypedValueParser<Value = FieldId> {
+    PossibleValuesParser::new(FieldId::ALL.map(FieldId::name))
+        .map(|name| name.parse().expect("every possible value names a field"))
+}
+
+/// The settings `mavros compile` applies to each package.
+#[derive(Clone, Copy, Debug)]
+pub struct CompileSettings {
+    pub r1cs: R1csOptions,
+    pub include_debug_info: bool,
+    pub absolute_paths: bool,
+    pub field: FieldId,
+}
+
+impl Default for CompileSettings {
+    fn default() -> Self {
+        CompileSettings {
+            r1cs: R1csOptions::default(),
+            include_debug_info: false,
+            absolute_paths: false,
+            field: FieldId::Bn254,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -149,10 +181,16 @@ fn main() -> ExitCode {
             path,
             output,
             verifier_output.as_ref(),
-            *draw_graphs,
-            args.include_debug_info,
-            args.absolute_paths,
-            args.logup_soundness,
+            CompileSettings {
+                r1cs: R1csOptions {
+                    draw_graphs: *draw_graphs,
+                    logup_soundness: args.logup_soundness,
+                    profile: false,
+                },
+                include_debug_info: args.include_debug_info,
+                absolute_paths: args.absolute_paths,
+                field: args.field,
+            },
         ),
         None => run(&args),
     };
@@ -161,27 +199,6 @@ fn main() -> ExitCode {
         eprintln!("Error Encountered: {err}");
         ExitCode::FAILURE
     })
-}
-
-pub fn compile_to_r1cs(
-    root: PathBuf,
-    draw_graphs: bool,
-    logup_soundness: u32,
-    profile: bool,
-) -> Result<(Driver, SealedR1CS), Error> {
-    let project = Project::new(root)?;
-    let mut driver = Driver::new(project, draw_graphs);
-    driver.set_logup_soundness(logup_soundness);
-    if profile {
-        driver.enable_r1cs_profile();
-    }
-    driver.run_noir_compiler()?;
-    driver.make_struct_access_static()?;
-    driver.monomorphize()?;
-    driver.spill_witness()?;
-
-    let r1cs = driver.generate_r1cs::<mavros_artifacts::Field>()?;
-    Ok((driver, r1cs))
 }
 
 fn debug_path_root(driver: &Driver, absolute_paths: bool) -> Option<&Path> {
@@ -197,10 +214,7 @@ pub fn run_compile(
     path: &PathBuf,
     output: &PathBuf,
     verifier_output: Option<&PathBuf>,
-    draw_graphs: bool,
-    include_debug_info: bool,
-    absolute_paths: bool,
-    logup_soundness: u32,
+    settings: CompileSettings,
 ) -> Result<ExitCode, Error> {
     let requested_root = fs::canonicalize(path)?;
     let roots = Project::binary_package_roots(&requested_root)?;
@@ -230,31 +244,42 @@ pub fn run_compile(
             }
         };
         let verifier_output = verifier_output.map(rebase);
-        run_compile_package(
-            root,
-            &rebase(output),
-            verifier_output.as_ref(),
-            draw_graphs,
-            include_debug_info,
-            absolute_paths,
-            logup_soundness,
-        )
+        run_compile_package(root, &rebase(output), verifier_output.as_ref(), settings)
     })
 }
 
+/// Compile one package over the field `settings` names.
 fn run_compile_package(
     path: &PathBuf,
     output: &PathBuf,
     verifier_output: Option<&PathBuf>,
-    draw_graphs: bool,
-    include_debug_info: bool,
-    absolute_paths: bool,
-    logup_soundness: u32,
+    settings: CompileSettings,
 ) -> Result<ExitCode, Error> {
+    let compile = match settings.field {
+        FieldId::Bn254 => compile_package::<Bn254>,
+        FieldId::Goldilocks => compile_package::<Goldilocks>,
+    };
+
+    compile(path, output, verifier_output, settings)
+}
+
+/// Compile one package over `F`, which [`run_compile_package`] picks from `settings.field`.
+fn compile_package<F: MavrosField>(
+    path: &PathBuf,
+    output: &PathBuf,
+    verifier_output: Option<&PathBuf>,
+    settings: CompileSettings,
+) -> Result<ExitCode, Error> {
+    let CompileSettings {
+        r1cs: r1cs_options,
+        include_debug_info,
+        absolute_paths,
+        field: _,
+    } = settings;
     check_compile_outputs(output, verifier_output.map(|path| path.as_path()))?;
     info!(message = %"Compiling Noir project", root = ?path, output = ?output);
 
-    let (mut driver, r1cs) = compile_to_r1cs(path.clone(), draw_graphs, logup_soundness, false)?;
+    let (mut driver, r1cs) = api::compile_to_r1cs_with::<F>(path.clone(), r1cs_options)?;
     let bytecode = api::compile_bytecode_artifact(
         &mut driver,
         CodeGenOptions {
@@ -428,18 +453,34 @@ fn run_packages(
     })
 }
 
+/// Run the package at `args.root` over the field `args.field` names.
 fn run_package(args: &ProgramOptions, runtime_lib: Option<&Path>) -> Result<ExitCode, Error> {
-    let (mut driver, r1cs) = compile_to_r1cs(
+    match args.field {
+        FieldId::Bn254 => run_package_over::<Bn254>(args, runtime_lib),
+        FieldId::Goldilocks => run_package_over::<Goldilocks>(args, runtime_lib),
+    }
+}
+
+/// Run the package at `args.root` over `F`, which [`run_package`] picks from `args.field`.
+fn run_package_over<F: MavrosField>(
+    args: &ProgramOptions,
+    runtime_lib: Option<&Path>,
+) -> Result<ExitCode, Error> {
+    let (mut driver, r1cs) = api::compile_to_r1cs_with::<F>(
         args.root.clone(),
-        args.draw_graphs,
-        args.logup_soundness,
-        args.profile,
+        R1csOptions {
+            draw_graphs: args.draw_graphs,
+            logup_soundness: args.logup_soundness,
+            profile: args.profile,
+        },
     )?;
+
+    let source_path_root = debug_path_root(&driver, args.absolute_paths).map(Path::to_path_buf);
     let codegen_options = CodeGenOptions {
         include_debug_info: args.include_debug_info || args.profile,
         ..CodeGenOptions::default()
     };
-    let source_path_root = debug_path_root(&driver, args.absolute_paths).map(Path::to_path_buf);
+
     if args.analyze_r1cs {
         let stats = r1cs_compact::analyze(&r1cs, driver.protected_r1cs_cols());
         info!(
@@ -507,8 +548,8 @@ fn run_package(args: &ProgramOptions, runtime_lib: Option<&Path>) -> Result<Exit
     let vm_debug_info = artifact.debug_info;
 
     if args.verify {
-        let r = read_verifier_vector(args.r.as_deref().expect("--verify requires --r"))?;
-        let w = read_verifier_vector(args.w.as_deref().expect("--verify requires --w"))?;
+        let r = read_verifier_vector::<F>(args.r.as_deref().expect("--verify requires --r"))?;
+        let w = read_verifier_vector::<F>(args.w.as_deref().expect("--verify requires --w"))?;
         let result = api::run_verifier_from_binary(
             &binary,
             &r,
@@ -629,7 +670,7 @@ fn run_package(args: &ProgramOptions, runtime_lib: Option<&Path>) -> Result<Exit
     )
     .unwrap();
 
-    let ad_coeffs: Vec<RawField> = api::random_ad_coeffs(&r1cs);
+    let ad_coeffs: Vec<F> = api::random_ad_coeffs(&r1cs);
 
     let ad_execution = if args.profile {
         api::run_ad_profiled_from_binary(&mut binary, &r1cs, &ad_coeffs, vm_debug_info)
@@ -755,12 +796,8 @@ fn run_package(args: &ProgramOptions, runtime_lib: Option<&Path>) -> Result<Exit
     }
 }
 
-/// Read verifier inputs without losing precision to JSON's numeric representation.
-// FIELD-ASSUMPTION: L1-serde
-// CLI decimal inputs are parsed into the current BN254 field.
-fn read_verifier_vector(path: &Path) -> Result<Vec<RawField>, Error> {
-    use ark_ff::PrimeField;
-
+/// Read verifier inputs over `F` without losing precision to JSON's numeric representation.
+fn read_verifier_vector<F: MavrosField>(path: &Path) -> Result<Vec<F>, Error> {
     let values: Vec<String> = serde_json::from_str(&fs::read_to_string(path)?).map_err(|err| {
         format!(
             "{}: expected a JSON array of decimal field strings: {err}",
@@ -783,17 +820,13 @@ fn read_verifier_vector(path: &Path) -> Result<Vec<RawField>, Error> {
             }
             let integer = num_bigint::BigUint::parse_bytes(value.as_bytes(), 10)
                 .expect("nonempty decimal digits were validated above");
-            // Unlike FromStr, from_bigint rejects representatives outside the field.
-            <RawField as PrimeField>::BigInt::try_from(integer)
-                .ok()
-                .and_then(RawField::from_bigint)
-                .ok_or_else(|| {
-                    format!(
-                        "{}: field element at index {index} must be less than the modulus",
-                        path.display()
-                    )
-                    .into()
-                })
+            F::try_from_canonical_limbs(&integer.to_u64_digits()).ok_or_else(|| {
+                format!(
+                    "{}: field element at index {index} must be less than the modulus",
+                    path.display()
+                )
+                .into()
+            })
         })
         .collect()
 }
@@ -836,10 +869,10 @@ mod tests {
                     &root.to_path_buf(),
                     &output,
                     Some(&verifier),
-                    false,
-                    include_debug_info,
-                    false,
-                    128,
+                    CompileSettings {
+                        include_debug_info,
+                        ..CompileSettings::default()
+                    },
                 )
                 .unwrap_err();
                 assert!(
@@ -933,11 +966,11 @@ mod tests {
         let path = dir.path().join("vector.json");
         fs::write(&path, r#"["0", "1", "12345678901234567890"]"#).unwrap();
         assert_eq!(
-            read_verifier_vector(&path).unwrap(),
+            read_verifier_vector::<Bn254>(&path).unwrap(),
             vec![
-                RawField::from(0u64),
-                RawField::from(1u64),
-                RawField::from(12345678901234567890u64),
+                Bn254::from(0u64),
+                Bn254::from(1u64),
+                Bn254::from(12345678901234567890u64),
             ]
         );
         for input in [
@@ -952,15 +985,15 @@ mod tests {
             "{}",
         ] {
             fs::write(&path, input).unwrap();
-            assert!(read_verifier_vector(&path).is_err(), "{input}");
+            assert!(read_verifier_vector::<Bn254>(&path).is_err(), "{input}");
         }
 
-        let modulus = num_bigint::BigUint::from(RawField::MODULUS);
+        let modulus = num_bigint::BigUint::from(Bn254::MODULUS);
         let max = &modulus - 1u8;
         fs::write(&path, serde_json::to_vec(&[max.to_string()]).unwrap()).unwrap();
         assert_eq!(
-            read_verifier_vector(&path).unwrap(),
-            vec![-RawField::from(1u64)]
+            read_verifier_vector::<Bn254>(&path).unwrap(),
+            vec![-Bn254::from(1u64)]
         );
         for integer in [
             modulus.clone(),
@@ -972,7 +1005,9 @@ mod tests {
                 serde_json::to_vec(&["1".to_string(), integer.to_string()]).unwrap(),
             )
             .unwrap();
-            let error = read_verifier_vector(&path).unwrap_err().to_string();
+            let error = read_verifier_vector::<Bn254>(&path)
+                .unwrap_err()
+                .to_string();
             assert!(error.contains("index 1"), "{error}");
             assert!(error.contains("less than the modulus"), "{error}");
         }
@@ -1034,10 +1069,10 @@ mod tests {
                 &root,
                 &root.join("shared.mavros"),
                 None,
-                false,
-                true,
-                false,
-                128
+                CompileSettings {
+                    include_debug_info: true,
+                    ..CompileSettings::default()
+                }
             )
             .is_err()
         );
@@ -1047,10 +1082,10 @@ mod tests {
                 &root,
                 &output,
                 Some(&PathBuf::from("target/verifier.json")),
-                false,
-                true,
-                false,
-                128
+                CompileSettings {
+                    include_debug_info: true,
+                    ..CompileSettings::default()
+                }
             )
             .unwrap(),
             ExitCode::SUCCESS
@@ -1087,10 +1122,10 @@ mod tests {
                     &dir.path().to_path_buf(),
                     &PathBuf::from("target/program.mavros"),
                     None,
-                    false,
-                    true,
-                    false,
-                    128,
+                    CompileSettings {
+                        include_debug_info: true,
+                        ..CompileSettings::default()
+                    }
                 )
                 .unwrap(),
                 ExitCode::SUCCESS
@@ -1123,7 +1158,7 @@ mod tests {
         .unwrap();
         let output = root.join("target/program.mavros");
         assert_eq!(
-            run_compile(&root, &output, None, false, false, false, 128).unwrap(),
+            run_compile(&root, &output, None, CompileSettings::default()).unwrap(),
             ExitCode::SUCCESS
         );
         let bytes = fs::read(&output).unwrap();
@@ -1173,7 +1208,7 @@ mod tests {
         // Compiling again yields the same bytes: the digest is a stable identity.
         let again = root.join("target/again.mavros");
         assert_eq!(
-            run_compile(&root, &again, None, false, false, false, 128).unwrap(),
+            run_compile(&root, &again, None, CompileSettings::default()).unwrap(),
             ExitCode::SUCCESS
         );
         assert_eq!(fs::read(&again).unwrap(), bytes);
@@ -1199,8 +1234,8 @@ mod tests {
         use ark_ff::UniformRand as _;
         use rand::SeedableRng as _;
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let coeffs: Vec<RawField> = (0..r1cs.constraints.len())
-            .map(|_| RawField::rand(&mut rng))
+        let coeffs: Vec<Bn254> = (0..r1cs.constraints.len())
+            .map(|_| Bn254::rand(&mut rng))
             .collect();
         let (a, b, c, _) = api::run_ad_from_binary(&mut bytecode, r1cs, &coeffs, None).unwrap();
         assert!(api::check_ad(r1cs, &coeffs, &a, &b, &c));
@@ -1218,10 +1253,7 @@ mod tests {
                 &dir.path().join("a"),
                 &output,
                 None,
-                false,
-                false,
-                false,
-                128
+                CompileSettings::default()
             )
             .unwrap(),
             ExitCode::SUCCESS
@@ -1335,6 +1367,152 @@ mod tests {
                     "expected rendered FlameGraph {filename}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn field_defaults_to_bn254_and_is_global() {
+        let default = ProgramOptions::try_parse_from(["mavros"]).unwrap();
+        assert_eq!(default.field, FieldId::Bn254);
+
+        let selected = ProgramOptions::try_parse_from(["mavros", "--field", "goldilocks"]).unwrap();
+        assert_eq!(selected.field, FieldId::Goldilocks);
+
+        let on_subcommand =
+            ProgramOptions::try_parse_from(["mavros", "compile", ".", "--field", "goldilocks"])
+                .unwrap();
+        assert_eq!(on_subcommand.field, FieldId::Goldilocks);
+
+        let before_subcommand =
+            ProgramOptions::try_parse_from(["mavros", "--field", "goldilocks", "compile", "."])
+                .unwrap();
+        assert_eq!(before_subcommand.field, FieldId::Goldilocks);
+
+        assert!(ProgramOptions::try_parse_from(["mavros", "--field", "babybear"]).is_err());
+    }
+
+    /// A package whose `main` squares `x` into `y` and reads `x` back from a witness-indexed
+    /// array. The read is a lookup, so on Goldilocks the R1CS repeats its LogUp argument.
+    fn field_fixture(prover_toml: &str) -> tempfile::TempDir {
+        let project = tempfile::tempdir().unwrap();
+        fs::create_dir(project.path().join("src")).unwrap();
+        fs::write(
+            project.path().join("Nargo.toml"),
+            "[package]\nname = \"field_selector\"\ntype = \"bin\"\nauthors = []\n\n[dependencies]\n",
+        )
+        .unwrap();
+        fs::write(
+            project.path().join("src/main.nr"),
+            "fn main(x: Field, y: pub Field, a: [Field; 3], i: u32) {\n\
+             assert_eq(x * x, y);\n\
+             assert_eq(a[i], x);\n\
+             }\n",
+        )
+        .unwrap();
+        fs::write(project.path().join("Prover.toml"), prover_toml).unwrap();
+        project
+    }
+
+    /// What `mavros --root <project> --field <field>` returns for the package.
+    fn run_over(project: &Path, field: &str) -> Result<ExitCode, Error> {
+        let root = project.to_str().unwrap();
+        let options =
+            ProgramOptions::try_parse_from(["mavros", "--root", root, "--field", field]).unwrap();
+        run_package(&options, None)
+    }
+
+    #[test]
+    fn run_executes_over_the_selected_field() {
+        use mavros_artifacts::field::goldilocks::MODULUS;
+
+        let x = MODULUS - 1;
+        // `(p - 1)^2 = 1` holds only modulo the Goldilocks prime.
+        let wraps = field_fixture(&format!(
+            "x = \"{x}\"\ny = \"1\"\na = [\"1\", \"2\", \"{x}\"]\ni = \"2\"\n"
+        ));
+        assert_eq!(
+            run_over(wraps.path(), "goldilocks").unwrap(),
+            ExitCode::SUCCESS
+        );
+        // The inputs decode and witgen runs; only the constraint check fails.
+        assert_eq!(run_over(wraps.path(), "bn254").unwrap(), ExitCode::FAILURE);
+
+        // The integer square is the bn254 answer and is not a canonical Goldilocks input.
+        let square = u128::from(x) * u128::from(x);
+        let integer = field_fixture(&format!(
+            "x = \"{x}\"\ny = \"{square}\"\na = [\"1\", \"2\", \"{x}\"]\ni = \"2\"\n"
+        ));
+        assert_eq!(
+            run_over(integer.path(), "bn254").unwrap(),
+            ExitCode::SUCCESS
+        );
+        let error = run_over(integer.path(), "goldilocks")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&square.to_string()), "{error}");
+        assert!(error.to_lowercase().contains("goldilocks"), "{error}");
+    }
+
+    #[test]
+    fn compile_writes_artifacts_that_name_the_selected_field() {
+        use mavros_artifacts::Artifact;
+        use mavros_compiler::vm::bytecode::parse_program_header;
+
+        let project = field_fixture("");
+        let root = project.path().to_path_buf();
+        let output = root.join("target/program.mavros");
+        let verifier = root.join("target/verifier.json");
+        assert_eq!(
+            run_compile(
+                &root,
+                &output,
+                Some(&verifier),
+                CompileSettings {
+                    field: FieldId::Goldilocks,
+                    ..CompileSettings::default()
+                }
+            )
+            .unwrap(),
+            ExitCode::SUCCESS
+        );
+        let bytes = fs::read(&output).unwrap();
+        let artifact = Artifact::<Goldilocks>::from_bytes(&bytes).unwrap();
+        assert_eq!(artifact.r1cs().witness_layout.logup_repetitions, 3);
+        assert!(Artifact::<Bn254>::from_bytes(&bytes).is_err());
+        assert_eq!(
+            parse_program_header(artifact.bytecode()).field,
+            FieldId::Goldilocks
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&verifier).unwrap()).unwrap();
+        let words: Vec<u64> = serde_json::from_value(json["binary"].clone()).unwrap();
+        assert_eq!(parse_program_header(&words).field, FieldId::Goldilocks);
+    }
+
+    #[test]
+    fn goldilocks_verifier_vectors_refuse_values_outside_the_field() {
+        use mavros_artifacts::field::goldilocks::MODULUS;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vector.json");
+        fs::write(&path, format!(r#"["0", "{}"]"#, MODULUS - 1)).unwrap();
+        assert_eq!(
+            read_verifier_vector::<Goldilocks>(&path).unwrap(),
+            vec![Goldilocks::from(0u64), Goldilocks::from(MODULUS - 1)]
+        );
+        // `2^64` has a second limb, which the one-limb field must refuse before decoding.
+        for integer in [
+            u128::from(MODULUS),
+            u128::from(u64::MAX),
+            1 << 64,
+            u128::MAX,
+        ] {
+            fs::write(&path, format!(r#"["1", "{integer}"]"#)).unwrap();
+            let error = read_verifier_vector::<Goldilocks>(&path)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("index 1"), "{error}");
+            assert!(error.contains("less than the modulus"), "{error}");
         }
     }
 }
