@@ -22,8 +22,8 @@ use crate::compiler::{
 use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
+use plan::{Block, ProductPlan, Step, plan_product, witnessed_partial_products};
 pub(super) use plan::{Factor, Limb, full_bounds};
-use plan::{ProductPlan, Step, plan_product, witnessed_partial_products};
 #[cfg(test)]
 pub(crate) use tests::division_carries;
 mod plan;
@@ -55,6 +55,29 @@ pub(super) struct Schoolbook<'a> {
 
     /// What the operation is called, for a refusal.
     pub(super) operation: &'static str,
+
+    pub(super) guard: Option<ValueId>,
+}
+
+#[derive(Clone, Copy)]
+struct Guards {
+    /// The range and overflow checks.
+    check: Option<ValueId>,
+    /// The equalities to a pinned target.
+    pin: Option<ValueId>,
+}
+
+impl Schoolbook<'_> {
+    fn guards(&self) -> Guards {
+        Guards {
+            check: if self.pinned.is_some() {
+                None
+            } else {
+                self.guard
+            },
+            pin: self.guard,
+        }
+    }
 }
 
 impl Rewriter<'_> {
@@ -80,36 +103,23 @@ impl Rewriter<'_> {
         let widths = limb_widths(bits, self.limb_bits());
         let lhs = self.factor(lhs, bits, &widths);
         let rhs = self.factor(rhs, bits, &widths);
-        let answer = self.schoolbook(
-            Schoolbook {
-                lhs: &lhs,
-                rhs: &rhs,
-                addend: None,
-                pinned: None,
-                widths: &widths,
-                bits,
-                operation: "multiplication",
-            },
+        let answer = self.schoolbook(Schoolbook {
+            lhs: &lhs,
+            rhs: &rhs,
+            addend: None,
+            pinned: None,
+            widths: &widths,
+            bits,
+            operation: "multiplication",
             guard,
-        );
+        });
         self.deliver(*result, answer, &widths, bits, guard);
         true
     }
 
     /// `lhs · rhs (+ addend)` at `widths`, following [`plan_product`], as the field element of each
     /// answer limb.
-    ///
-    /// A `pinned` schoolbook holds each column's final value equal to the target's limb, already
-    /// bounded, instead of range-checking it. So it states `lhs · rhs + addend == target` exactly
-    /// and returns the target's limbs.
-    ///
-    /// Under a guard the checks are off where the guard is off. A pinned schoolbook is a
-    /// division's, whose hints are zero there, so only the pins need the guard.
-    pub(super) fn schoolbook(
-        &mut self,
-        product: Schoolbook<'_>,
-        guard: Option<ValueId>,
-    ) -> Vec<ValueId> {
+    pub(super) fn schoolbook(&mut self, product: Schoolbook<'_>) -> Vec<ValueId> {
         let Schoolbook {
             lhs,
             rhs,
@@ -139,19 +149,13 @@ impl Rewriter<'_> {
             )
         });
 
-        let checks = if product.pinned.is_some() {
-            None
-        } else {
-            guard
-        };
+        let guards = product.guards();
         let mut forms = FactorForms::new(widths.len());
-        let columns = if plan.evaluated {
-            self.evaluate_product(&plan, lhs, rhs, &mut forms, checks)
-        } else {
-            Vec::new()
+        let answer = match &plan.evaluated {
+            Some(blocks) => self.evaluate_product(&plan, blocks, &product, &mut forms),
+            None => self.accumulate_columns(&plan, &product, &mut forms),
         };
-        let answer = self.accumulate_columns(&plan, &product, &columns, &mut forms, checks, guard);
-        self.check_no_overflow(&plan, lhs, rhs, &mut forms, checks);
+        self.check_no_overflow(&plan, lhs, rhs, &mut forms, guards.check);
         answer
     }
 
@@ -198,68 +202,138 @@ impl Rewriter<'_> {
         }
     }
 
-    /// The columns of an evaluated product, witnessed and pinned by the identity [`plan_product`]
-    /// states, each as its column and its hint.
-    ///
-    /// Under a guard the left limbs are scaled by it, so where it is off the product and every
-    /// column are zero: the identity holds whatever operands the branch not taken left.
     fn evaluate_product(
         &mut self,
         plan: &ProductPlan,
-        lhs: &Factor,
-        rhs: &Factor,
+        blocks: &[Block],
+        product: &Schoolbook<'_>,
         forms: &mut FactorForms,
-        guard: Option<ValueId>,
-    ) -> Vec<(ValueId, ValueId)> {
-        let count = lhs.limbs.len();
+    ) -> Vec<ValueId> {
+        let Schoolbook {
+            lhs,
+            rhs,
+            addend,
+            pinned,
+            widths,
+            ..
+        } = *product;
+        let num_limbs = widths.len();
         let hint = CastTarget::Int(plan.hint_bits);
-        let flag = guard.map(|condition| {
+        let guards = product.guards();
+        let mask = guards.check.map(|condition| {
             let field = self.cast(condition, CastTarget::Field);
             let pure = self.pure_of(condition, self.is_witness(condition));
             (field, self.cast(pure, hint.clone()))
         });
 
-        let lhs_fields: Vec<ValueId> = (0..count)
+        let lhs_fields: Vec<ValueId> = (0..num_limbs)
             .map(|index| {
                 let limb = forms.field(self, Side::Lhs, index, lhs);
-                match flag {
-                    Some((flag, _)) => self.bin(BinaryArithOpKind::UMul, flag, limb),
+                match mask {
+                    Some((mask_felt, _)) => self.bin(BinaryArithOpKind::UMul, mask_felt, limb),
                     None => limb,
                 }
             })
             .collect();
-        let rhs_fields: Vec<ValueId> = (0..count)
+        let rhs_fields: Vec<ValueId> = (0..num_limbs)
             .map(|index| forms.field(self, Side::Rhs, index, rhs))
             .collect();
+        let target = pinned.map(|target| match guards.pin {
+            Some(mut condition) => {
+                condition = self.cast(condition, CastTarget::Field);
+                target
+                    .iter()
+                    .map(|target_limb| self.bin(BinaryArithOpKind::UMul, condition, *target_limb))
+                    .collect()
+            }
+            None => target.to_vec(),
+        });
 
-        let mut columns = Vec::with_capacity(count);
-        for column in 0..count {
-            let mut hinted = None;
-            for left in 0..=column {
+        let mut answer = Vec::with_capacity(num_limbs);
+        let mut carries = Vec::new();
+        let mut carry_in: Option<ValueId> = None;
+        for (column_idx, &width) in widths.iter().enumerate() {
+            let mut running = None;
+            for left in 0..=column_idx {
                 let a = forms.pure(self, Side::Lhs, left, lhs, &hint);
-                let b = forms.pure(self, Side::Rhs, column - left, rhs, &hint);
+                let b = forms.pure(self, Side::Rhs, column_idx - left, rhs, &hint);
                 let product = self.bin(BinaryArithOpKind::UMul, a, b);
-                hinted = Some(match hinted {
+                running = Some(match running {
                     None => product,
                     Some(sum) => self.bin(BinaryArithOpKind::UAdd, sum, product),
                 });
             }
-            let mut hinted = hinted.expect("a column has at least one partial product");
-            if let Some((_, flag)) = flag {
-                hinted = self.bin(BinaryArithOpKind::UMul, flag, hinted);
+            let mut running = running.expect("a column has at least one partial product");
+            if let Some((_, flag)) = mask {
+                running = self.bin(BinaryArithOpKind::UMul, flag, running);
             }
-            let hint_field = self.cast(hinted, CastTarget::Field);
-            columns.push((self.write_witness(hint_field), hinted));
+            if let Some(addend) = addend {
+                let addend_limb = forms.pure(self, Side::Addend, column_idx, addend, &hint);
+                running = self.bin(BinaryArithOpKind::UAdd, running, addend_limb);
+            }
+            if let Some(carry) = carry_in {
+                running = self.bin(BinaryArithOpKind::UAdd, running, carry);
+            }
+
+            answer.push(match &target {
+                Some(target) => target[column_idx],
+                None => {
+                    let low = self.cast(running, CastTarget::Int(width));
+                    let low = self.cast(low, CastTarget::Field);
+                    let written = self.write_witness(low);
+                    self.push_guarded(
+                        guards.check,
+                        OpCode::Rangecheck {
+                            value: written,
+                            max_bits: width,
+                        },
+                    );
+                    written
+                }
+            });
+            if column_idx + 1 < num_limbs {
+                let carry = self.shifted_down(running, plan.hint_bits, width);
+                let carry_field = self.cast(carry, CastTarget::Field);
+                carries.push(self.write_witness(carry_field));
+                carry_in = Some(carry);
+            }
         }
 
-        let column_fields: Vec<ValueId> = columns.iter().map(|(column, _)| *column).collect();
-        for point in 0..(2 * count - 1) as u64 {
+        for block in blocks {
+            if let Some(carry_bits) = block.carry_bits {
+                self.push_guarded(
+                    guards.check,
+                    OpCode::Rangecheck {
+                        value: carries[block.last],
+                        max_bits: carry_bits,
+                    },
+                );
+            }
+        }
+
+        let radix = self.field().two_pow(self.limb_bits());
+        let remainder: Option<Vec<ValueId>> = addend.map(|addend| {
+            (0..num_limbs)
+                .map(|index| forms.field(self, Side::Addend, index, addend))
+                .collect()
+        });
+        for point in 0..(2 * num_limbs - 1) as u64 {
             let a = self.evaluate_at(&lhs_fields, point);
             let b = self.evaluate_at(&rhs_fields, point);
-            let c = self.evaluate_at(&column_fields, point);
+            let mut c = self.evaluate_at(&answer, point);
+            if let Some(remainder) = &remainder {
+                let r = self.evaluate_at(remainder, point);
+                c = self.bin(BinaryArithOpKind::USub, c, r);
+            }
+            if !carries.is_empty() {
+                let h = self.evaluate_at(&carries, point);
+                let scale = self.field_const(radix - self.field().constant(point));
+                let h = self.bin(BinaryArithOpKind::UMul, h, scale);
+                c = self.bin(BinaryArithOpKind::UAdd, c, h);
+            }
             self.push(OpCode::Constrain { a, b, c });
         }
-        columns
+        answer
     }
 
     /// `Σ coefficients[i] · point^i` as a field element, which is linear in the coefficients.
@@ -286,8 +360,7 @@ impl Rewriter<'_> {
         sum.expect("a polynomial has at least one coefficient")
     }
 
-    /// Every column of the answer, as field elements, following `plan`. `columns` are an evaluated
-    /// product's witnessed columns, which a [`Step::Column`] adds.
+    /// Every column of a summed product's answer, as field elements, following `plan`.
     ///
     /// Where `product` is pinned, a column's final value is held equal to the target's limb, which
     /// bounds it as tightly as the range check it replaces; a column that never needed reducing is
@@ -296,10 +369,7 @@ impl Rewriter<'_> {
         &mut self,
         plan: &ProductPlan,
         product: &Schoolbook<'_>,
-        columns: &[(ValueId, ValueId)],
         forms: &mut FactorForms,
-        checks: Option<ValueId>,
-        pins: Option<ValueId>,
     ) -> Vec<ValueId> {
         let Schoolbook {
             lhs,
@@ -309,6 +379,7 @@ impl Rewriter<'_> {
             widths,
             ..
         } = *product;
+        let guards = product.guards();
         let hint = CastTarget::Int(plan.hint_bits);
         let mut answer = Vec::with_capacity(widths.len());
         let mut incoming: std::collections::VecDeque<(ValueId, ValueId)> = Default::default();
@@ -332,10 +403,6 @@ impl Rewriter<'_> {
                         let hinted = self.bin(BinaryArithOpKind::UMul, a, b);
                         self.accumulate(&mut column, product, hinted);
                     }
-                    Step::Column(evaluated) => {
-                        let (value, hinted) = columns[evaluated];
-                        self.accumulate(&mut column, value, hinted);
-                    }
                     Step::Addend(limb) => {
                         let addend = addend.expect("the plan adds limbs of an addend it was given");
                         let value = forms.field(self, Side::Addend, limb, addend);
@@ -356,7 +423,7 @@ impl Rewriter<'_> {
                             None => {
                                 if bounds_the_answer {
                                     self.push_guarded(
-                                        checks,
+                                        guards.check,
                                         OpCode::Rangecheck {
                                             value: sum,
                                             max_bits: width,
@@ -370,7 +437,7 @@ impl Rewriter<'_> {
                                 let carry_field = self.cast(carry, CastTarget::Field);
                                 let written = self.write_witness(carry_field);
                                 self.push_guarded(
-                                    checks,
+                                    guards.check,
                                     OpCode::Rangecheck {
                                         value: written,
                                         max_bits: carry_bits,
@@ -381,7 +448,7 @@ impl Rewriter<'_> {
                                 let low = self.bin(BinaryArithOpKind::USub, sum, scaled);
                                 if bounds_the_answer {
                                     self.push_guarded(
-                                        checks,
+                                        guards.check,
                                         OpCode::Rangecheck {
                                             value: low,
                                             max_bits: width,
@@ -404,7 +471,7 @@ impl Rewriter<'_> {
             };
             answer.push(match pinned {
                 Some(target) => {
-                    self.constrain_equal(value, target[index], pins);
+                    self.constrain_equal(value, target[index], guards.pin);
                     target[index]
                 }
                 None => value,

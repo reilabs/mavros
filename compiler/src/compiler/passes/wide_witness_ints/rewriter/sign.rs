@@ -50,18 +50,16 @@ impl Rewriter<'_> {
         };
         let lhs_factor = self.factor_of(&lhs_magnitude, &widths);
         let rhs_factor = self.factor_of(&rhs_magnitude, &widths);
-        let product = self.schoolbook(
-            Schoolbook {
-                lhs: &lhs_factor,
-                rhs: &rhs_factor,
-                addend: None,
-                pinned: None,
-                widths: &widths,
-                bits,
-                operation: "multiplication",
-            },
+        let product = self.schoolbook(Schoolbook {
+            lhs: &lhs_factor,
+            rhs: &rhs_factor,
+            addend: None,
+            pinned: None,
+            widths: &widths,
+            bits,
+            operation: "multiplication",
             guard,
-        );
+        });
 
         // Off the guard the schoolbook's checks are off, so a top column the untaken branch
         // overflowed is past its width. The negation reads that column through a cast to a limb's

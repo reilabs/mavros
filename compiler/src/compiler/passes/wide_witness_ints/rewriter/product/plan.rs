@@ -12,8 +12,7 @@ pub(crate) struct Factor {
     /// read. A witnessed operand can still have known limbs, which are [`Limb::Constant`]s.
     pub(crate) witnessed: bool,
 
-    /// The largest value each limb can take: the largest its width holds, or a constant limb's
-    /// value.
+    /// The largest value each limb can take: the largest its width holds, or a constant limb's value.
     pub(crate) bounds: Vec<BigUint>,
 }
 
@@ -55,10 +54,6 @@ pub(crate) enum Step {
     /// Add the partial product of limb `lhs` of the left operand and limb `rhs` of the right.
     Product { lhs: usize, rhs: usize },
 
-    /// Add column `m` of the product whole: every partial product landing in it, as one witnessed
-    /// value the evaluation identity pins.
-    Column(usize),
-
     /// Add limb `index` of the addend, which lands in the column of the same index.
     Addend(usize),
 
@@ -73,11 +68,19 @@ pub(crate) enum Step {
     Reduce { carry_bits: Option<usize> },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Block {
+    pub(super) first: usize,
+    pub(super) last: usize,
+    pub(super) carry_bits: Option<usize>,
+}
+
 /// How a product's columns are accumulated and where they are reduced, decided on the operands'
 /// bounds alone.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ProductPlan {
-    /// The steps of each column of the answer, little-endian.
+    /// The steps of each column of the answer, little-endian. Empty where the product is
+    /// evaluated.
     ///
     /// A column whose bound passes its limb's width ends in a reduction, and the accumulator left
     /// afterwards is that limb.
@@ -90,9 +93,7 @@ pub(super) struct ProductPlan {
     /// where the product is evaluated, whose identity is also its overflow check.
     pub(super) overflow: Vec<(usize, Vec<usize>)>,
 
-    /// Whether the columns are witnessed whole and pinned by evaluating the product, instead of
-    /// summed from partial products.
-    pub(super) evaluated: bool,
+    pub(super) evaluated: Option<Vec<Block>>,
 
     /// The width the pure side computes its hints at, which no accumulator's bound reaches.
     pub(super) hint_bits: usize,
@@ -125,14 +126,9 @@ pub(super) struct ProductPlan {
 /// product of two witnessed limbs is a separate row, so the schoolbook pays about `k^2 / 2` rows
 /// on two full operands, while evaluating pays `2k - 1` regardless. The caller counts the rows
 /// summing would pay with [`witnessed_partial_products`] and evaluates only where both operands are
-/// witnessed and that count is larger. The columns `c_0 .. c_(k-1)` are witnessed whole and
-/// `(Σ a_i x^i)(Σ b_j x^j) = Σ c_m x^m` is constrained at `2k - 1` distinct points, which makes it
-/// a polynomial identity of degree `2k - 2`, so every coefficient agrees modulo `p`.
-///
+/// witnessed and that count is larger.
 /// Every column's integer sum is non-negative, and the plan requires each to be below
-/// `2^injective`, so a coefficient equal modulo `p` is equal as an integer: `c_m` is column `m`,
-/// and the columns past the answer being zero is the overflow check. Where a column could pass the
-/// modulus, the plan falls back to the schoolbook, which reduces as often as it needs.
+/// `2^injective`, so the columns past the answer are zero as integers.
 pub(super) fn plan_product(
     lhs: &[BigUint],
     rhs: &[BigUint],
@@ -145,13 +141,15 @@ pub(super) fn plan_product(
     let fits = |bound: &BigUint| bound.bits() <= injective as u64;
     let mut hint_bits = widths.iter().copied().max().unwrap_or(1);
 
-    let column_bound = |column: usize| -> BigUint {
-        (0..count)
-            .filter(|left| *left <= column && column - left < count)
-            .map(|left| &lhs[left] * &rhs[column - left])
-            .sum()
-    };
-    let evaluated = evaluate && (0..2 * count - 1).all(|column| fits(&column_bound(column)));
+    if evaluate {
+        let (blocks, hint_bits) = plan_blocks(lhs, rhs, addend, widths, fits);
+        return Some(ProductPlan {
+            columns: Vec::new(),
+            overflow: Vec::new(),
+            evaluated: Some(blocks),
+            hint_bits,
+        });
+    }
 
     let mut columns = Vec::with_capacity(count);
     let mut incoming: Vec<BigUint> = Vec::new();
@@ -159,27 +157,19 @@ pub(super) fn plan_product(
         let top = column + 1 == count;
         let limit = BigUint::one() << width;
 
-        let products: Vec<(Step, BigUint)> = if evaluated {
-            let bound = column_bound(column);
-            (!bound.is_zero())
-                .then_some((Step::Column(column), bound))
-                .into_iter()
-                .collect()
-        } else {
-            (0..=column)
-                .filter_map(|left| {
-                    let right = column - left;
-                    let bound = &lhs[left] * &rhs[right];
-                    (!bound.is_zero()).then_some((
-                        Step::Product {
-                            lhs: left,
-                            rhs: right,
-                        },
-                        bound,
-                    ))
-                })
-                .collect()
-        };
+        let products: Vec<(Step, BigUint)> = (0..=column)
+            .filter_map(|left| {
+                let right = column - left;
+                let bound = &lhs[left] * &rhs[right];
+                (!bound.is_zero()).then_some((
+                    Step::Product {
+                        lhs: left,
+                        rhs: right,
+                    },
+                    bound,
+                ))
+            })
+            .collect();
         let added = addend
             .get(column)
             .filter(|bound| !bound.is_zero())
@@ -227,7 +217,7 @@ pub(super) fn plan_product(
 
     let mut overflow = Vec::new();
     for (left, bound) in lhs.iter().enumerate() {
-        if evaluated || bound.is_zero() {
+        if bound.is_zero() {
             continue;
         }
         let mut group = Vec::new();
@@ -255,8 +245,126 @@ pub(super) fn plan_product(
         columns,
         overflow,
         hint_bits,
-        evaluated,
+        evaluated: None,
     })
+}
+
+fn plan_blocks(
+    lhs_limb_bounds: &[BigUint],
+    rhs_limb_bounds: &[BigUint],
+    addend_bounds: &[BigUint],
+    widths: &[usize],
+    fits: impl Fn(&BigUint) -> bool,
+) -> (Vec<Block>, usize) {
+    let num_limbs = widths.len();
+    if !(0..2 * num_limbs - 1)
+        .all(|column| fits(&column_bound(lhs_limb_bounds, rhs_limb_bounds, column)))
+    {
+        ice!("the limb config admits a {num_limbs}-limb product with a column past the field");
+    }
+
+    let (term_bounds, carry_bounds, hint_bits) =
+        calculate_bounds(lhs_limb_bounds, rhs_limb_bounds, addend_bounds, widths);
+
+    let blocks = assign_blocks(&term_bounds, &carry_bounds, widths, fits);
+    (blocks, hint_bits)
+}
+
+/// The integer bound of a column of the schoolbook.
+fn column_bound(
+    lhs_limb_bounds: &[BigUint],
+    rhs_limb_bounds: &[BigUint],
+    column_idx: usize,
+) -> BigUint {
+    (0..lhs_limb_bounds.len())
+        .filter_map(|lhs_idx| {
+            let rhs_idx = column_idx.checked_sub(lhs_idx)?;
+            let rhs_limit = rhs_limb_bounds.get(rhs_idx)?;
+            Some(&lhs_limb_bounds[lhs_idx] * rhs_limit)
+        })
+        .sum()
+}
+
+fn calculate_bounds(
+    lhs_limb_bounds: &[BigUint],
+    rhs_limb_bounds: &[BigUint],
+    addend_bounds: &[BigUint],
+    widths: &[usize],
+) -> (Vec<BigUint>, Vec<BigUint>, usize) {
+    let num_limbs = widths.len();
+    let mut term_bounds = Vec::with_capacity(num_limbs);
+    let mut carry_bounds = Vec::with_capacity(num_limbs + 1);
+    let mut hint_bits = widths.iter().copied().max().unwrap_or(1);
+
+    let mut carry = BigUint::zero();
+    for (column, &width) in widths.iter().enumerate() {
+        carry_bounds.push((BigUint::one() << carry.bits()) - 1u8);
+        let term = column_bound(lhs_limb_bounds, rhs_limb_bounds, column)
+            + addend_bounds.get(column).cloned().unwrap_or_default();
+        let running = &term + &carry;
+        hint_bits = hint_bits.max(running.bits() as usize);
+        carry = &running >> width;
+        term_bounds.push(term);
+    }
+    carry_bounds.push(BigUint::zero());
+
+    (term_bounds, carry_bounds, hint_bits)
+}
+
+fn assign_blocks(
+    term_bounds: &[BigUint],
+    carry_bounds: &[BigUint],
+    widths: &[usize],
+    fits: impl Fn(&BigUint) -> bool,
+) -> Vec<Block> {
+    let num_limbs = widths.len();
+    let mut blocks = Vec::new();
+    let mut first = 0;
+    let mut column = 0;
+    while column < num_limbs {
+        if fits(&calculate_block_bound(
+            term_bounds,
+            carry_bounds,
+            widths,
+            first,
+            column,
+        )) {
+            column += 1;
+        } else if column == first {
+            ice!("column {column} of an evaluated product does not fit the field on its own");
+        } else {
+            blocks.push(Block {
+                first,
+                last: column - 1,
+                carry_bits: Some(carry_bounds[column].bits() as usize),
+            });
+            first = column;
+        }
+    }
+    blocks.push(Block {
+        first,
+        last: num_limbs - 1,
+        carry_bits: None,
+    });
+    blocks
+}
+
+fn calculate_block_bound(
+    terms: &[BigUint],
+    carries: &[BigUint],
+    widths: &[usize],
+    first: usize,
+    last: usize,
+) -> BigUint {
+    let mut summed = BigUint::zero();
+    let mut place = BigUint::one();
+    for column in first..=last {
+        summed += &terms[column] * &place;
+        place <<= widths[column];
+    }
+    let summed = summed + &carries[first];
+    let reduced = &place * (&carries[last + 1] + 1u8) - 1u8;
+    summed.max(reduced)
 }
 
 #[cfg(test)]
