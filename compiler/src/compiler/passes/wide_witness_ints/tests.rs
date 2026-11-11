@@ -1534,17 +1534,17 @@ impl Audit {
     }
 }
 
-/// Every column a division witnesses is range-checked, and every column of `q·d + r` is held
-/// to the dividend's limb instead of being checked, however the product is formed.
+/// Every carry a division witnesses that its plan checks is range-checked, and the answer of
+/// `q·d + r` is the dividend's limbs instead of being checked, however the product is formed.
 ///
 /// Checks, in order: the quotient's and the remainder's limbs at their widths; the schoolbook's
-/// carries at the widths its plan gives; and the borrows of `r < d`, each a bit. Only an
-/// evaluated product's columns go unchecked, as its evaluations pin them. The rest is the
-/// chain's answer, one check per limb. The constraints are the product's (evaluations or
-/// overflow terms) plus one equality per dividend limb.
+/// carries at the widths its plan gives and the borrows of `r < d`, each a bit.
+/// The rest is the chain's answer, one check per limb.
+/// The constraints are the product's: evaluated, the dividend is the `C(X)` of the identity and
+/// costs no row of its own; summed, the overflow terms plus one equality per dividend limb.
 ///
 /// Structural for the reason [`every_carry_and_every_limb_of_a_product_is_bounded`] gives, and
-/// because a pinned column has no check to perturb: the equality is its bound.
+/// because a pinned column has no check to perturb: the equality, or the identity, is its bound.
 #[test]
 fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
     for field in fields() {
@@ -1566,14 +1566,7 @@ fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
                     let mut expected: Vec<Option<usize>> = Vec::new();
                     expected.extend(widths.iter().map(|width| Some(*width)));
                     expected.extend(widths.iter().map(|width| Some(*width)));
-                    if evaluated {
-                        expected.extend(std::iter::repeat_n(None, k));
-                    }
-                    expected.extend(
-                        division_carries(field, &widths, evaluated)
-                            .into_iter()
-                            .map(Some),
-                    );
+                    expected.extend(division_carries(field, &widths, evaluated));
                     expected.extend(std::iter::repeat_n(Some(1), k - 1));
                     assert_eq!(audit.written_checks(), expected, "{what}");
 
@@ -1586,8 +1579,8 @@ fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
                         .collect();
                     assert_eq!(rest, widths, "{what}: the chain's limbs, and nothing else");
 
-                    let product = if evaluated { 2 * k - 1 } else { k - 1 };
-                    assert_eq!(audit.constraints(), product + k, "{what}");
+                    let product = if evaluated { 2 * k - 1 } else { k - 1 + k };
+                    assert_eq!(audit.constraints(), product, "{what}");
                 }
             }
         }
@@ -1686,7 +1679,7 @@ fn a_guarded_division_is_checked_only_under_its_guard() {
             .partition(|(_, _, guard)| guard.is_none());
         assert!(
             unguarded.len() > 2 * k,
-            "{id:?}: the quotient's and the remainder's limbs, and the schoolbook's columns and carries"
+            "{id:?}: the quotient's and the remainder's limbs, and the schoolbook's boundary carries"
         );
         assert_eq!(
             guarded.len(),
@@ -1713,15 +1706,16 @@ fn a_guarded_division_is_checked_only_under_its_guard() {
             })
             .collect();
         let flagged = audit
-        .ops
-        .iter()
-        .filter(|op| {
-            matches!(op, OpCode::Constrain { a, b, .. } if flag.contains(a) || flag.contains(b))
-        })
-        .count();
+            .ops
+            .iter()
+            .filter(|op| {
+                matches!(op, OpCode::BinaryArithOp { kind: BinaryArithOpKind::UMul, lhs, .. }
+                if flag.contains(lhs))
+            })
+            .count();
         assert_eq!(
             flagged, k,
-            "{id:?}: each equality, and nothing else, holds only where the guard does"
+            "{id:?}: each dividend limb, and nothing else, is scaled by the guard"
         );
 
         let selected = audit

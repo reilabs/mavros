@@ -59,22 +59,20 @@
 //! [`single_cell_product_fits`]: from the width where the single-cell division's `q·d + r`, which
 //! reaches past the product, passes the modulus, except for the double lane's two-limb product. A
 //! signed one runs here past [`single_cell_signed_product_fits`], with no such exception, as the
-//! product of the operands' magnitudes (see the sign, below). Each answer column sums its partial
-//! products and incoming carries, and is reduced into its limb, range-checked at the limb width,
-//! plus a witnessed carry range-checked at the width its bound needs. The top column carries
-//! nothing out, so it is range-checked at the top limb's width, and every partial product landing
-//! past it is held to zero, one constraint per left limb. [`plan_product`] decides where the
-//! reductions fall and why each identity holds as integers rather than modulo `p`.
+//! product of the operands' magnitudes (see the sign, below).
+//! TODO: Write new protocol description.
 //!
 //! # The Division
 //!
 //! An unsigned division or remainder runs here wherever its single-cell lowering's `q·d + r` could
 //! pass the modulus, which is where the product does. The quotient and remainder are witnessed as
 //! limbs from a pure-side division and pinned by two checks: `q·d + r == n`, the schoolbook with
-//! `r` as one more term in each column and every column **held to the dividend's limb** rather than
-//! range-checked; and `r < d`, the carry chain with its top borrow forced out, which also refuses a
-//! zero divisor. Together they admit exactly the Euclidean pair. An operand's known limbs bound
-//! both answers, and a limb they cannot reach is a known zero rather than a column. A signed
+//! `r` as one more term in each column and the **dividend's limbs as the answer**, each column
+//! held to its limb where the product is summed and the dividend standing as the `C(X)` of the
+//! identity where it is evaluated; and `r < d`, the carry chain with its top borrow forced out,
+//! which also refuses a zero divisor. Together they admit exactly the Euclidean pair. An
+//! operand's known limbs bound both answers, and a limb they cannot reach is a known zero rather
+//! than a column. A signed
 //! division is the unsigned one on the operands' magnitudes, past
 //! [`single_cell_signed_product_fits`].
 //!

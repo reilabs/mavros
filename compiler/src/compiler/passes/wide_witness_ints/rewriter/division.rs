@@ -179,18 +179,16 @@ impl Rewriter<'_> {
         let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
 
         let target: Vec<ValueId> = n.limbs.iter().map(|limb| self.limb_field(limb)).collect();
-        self.schoolbook(
-            Schoolbook {
-                lhs: &q,
-                rhs: d,
-                addend: Some(&r),
-                pinned: Some(&target),
-                widths,
-                bits,
-                operation: "division",
-            },
+        self.schoolbook(Schoolbook {
+            lhs: &q,
+            rhs: d,
+            addend: Some(&r),
+            pinned: Some(&target),
+            widths,
+            bits,
+            operation: "division",
             guard,
-        );
+        });
 
         // `r < d` reads only the limbs either side can reach, as above them both are zero.
         let reached = (0..widths.len())
