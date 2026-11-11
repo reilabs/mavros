@@ -154,24 +154,28 @@ argument as the VM does, and a one-repetition module holds exactly the instructi
 argument.
 
 **Cast semantics:** an HLSSA cast across the field boundary is total on every field, but for the
-bare witnessed narrowing below. `Int(n) → Field` reduces the integer modulo `p`, and
-`Field → Int(n)` truncates or zero-extends the element's canonical value (`docs/int-semantics.md`,
-"Field Casts"). Mavros refuses no cast into `Field`; Noir's elaborator refuses a non-injective
-`uN as Field` in Noir source. The SCCP folder and the specializer through it, the cost interpreter,
-the value ranges, R1CS generation, the VM, LLVM and the WASM runtime are checked against the
-`mavros-int-semantics` model on both fields. On a witness:
+unchecked narrowing below. `Int(n) → Field` reduces the integer modulo `p`, and `Field → Int(n)`
+truncates or zero-extends the element's canonical value (`docs/int-semantics.md`, "Field Casts").
+Mavros refuses no cast into `Field`; Noir's elaborator refuses a non-injective `uN as Field` in Noir
+source. The SCCP folder and the specializer through it, the cost interpreter, the value ranges, R1CS
+generation, the VM, LLVM and the WASM runtime are checked against the `mavros-int-semantics` model
+on both fields. On a witness:
 
 - a wide integer's single residue is its limb sum, and the injective image a lookup needs is a
   separate cast target, `FieldLimbs`, of one element per limb;
 - a witnessed `Field`'s bit window (`x as uN`) decomposes the element into its canonical bytes,
   `B = ⌈k/8⌉` of them for a `k`-bit modulus, and compares them against `p − 1` in two halves split
   at `8·⌈B/2⌉` bits (128 on bn254, 32 on Goldilocks);
-- a bare witnessed narrowing `Field → Int(n)`, with no window in front, relabels the element, so its
-  emitter owes the bound (`L1-noir-frontend`).
+- a witnessed narrowing `Field → Int(n)` truncates as a pure one does: `LowerWitnessNarrowingCast`
+  puts a window in front of any source it cannot bound. `IntUnchecked(n)` is the relabel, for an
+  emitter that bounds the element itself: the entry point's parameters, `WideWitnessInts`' limbs,
+  and the standard library's crate-private `unsafe_cast`. The lowerings after that rule's phase cast
+  elements they have already pinned with a bare `Int`, which is a relabel there.
 
-bn254's constraints, witnesses and bytecode are byte-identical, except where a witnessed `Field`'s
-bit window starts or ends inside a byte: the split of that byte checks its low part too, one more
-8-bit lookup, since the two gap checks alone let the prover push it negative.
+bn254's constraints and witnesses are byte-identical, except where a witnessed `Field`'s bit window
+starts or ends inside a byte: the split of that byte checks its low part too, one more 8-bit lookup,
+since the two gap checks alone let the prover push it negative. Its bytecode is identical or
+smaller: a pure `x as uN` is a single truncating cast, with no bit window.
 
 The rest of Phase 5 is open:
 
@@ -305,12 +309,12 @@ before conversion to the chosen VM field.
       the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and retains
       the packed spread implementation on BN254. BLAKE's small-field additions likewise use integer
       carries, avoiding native-field bit decomposition. AES is shared.
-- [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is a relabel, on
-      every field: `LowerWitnessNarrowingCast` windows an `Int` source only. The constraints carry
-      the whole element while the witness generator truncates it, so an honest witness of a value at
-      or above `2^n` is unsatisfiable, and a dishonest one is bound only by what the program checks.
-      The frontend puts `bit_range(v, 0, n)` before Noir's `x as uN`; `unsafe_cast` emits the bare
-      cast and leaves the bound to its caller.
+- [x] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` present when `LowerWitnessNarrowingCast` runs
+      truncates on every field: the rule windows a witnessed `Field` source as it does an `Int` one,
+      and Noir's `x as uN` reaches it as that bare cast. An emitter that bounds the element itself
+      emits `CastTarget::IntUnchecked`, which the rule rewrites into a plain `Int` with no window.
+      `unsafe_cast` emits one and leaves the bound to its caller, so it is `pub(crate)` in the
+      standard library.
 
 ---
 

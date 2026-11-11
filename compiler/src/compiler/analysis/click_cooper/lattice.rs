@@ -191,7 +191,7 @@ pub(crate) fn eval_cast(target: &CastTarget, v: &Constant, field: FieldConfig) -
             Constant::Field(_) => Some(v.clone()),
             Constant::FnPtr(_) | Constant::Blob(_) => None,
         },
-        CastTarget::Int(n) => int_cast_bits(v, *n).map(Constant::Int),
+        CastTarget::Int(n) | CastTarget::IntUnchecked(n) => int_cast_bits(v, *n).map(Constant::Int),
     }
 }
 

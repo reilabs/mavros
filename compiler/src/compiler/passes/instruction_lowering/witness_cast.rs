@@ -1,4 +1,5 @@
-//! Lowers a narrowing `Cast` of a witnessed integer into the bit window that truncates it.
+//! Lowers a narrowing `Cast` of a witnessed integer or field element into the bit window that
+//! truncates it.
 
 use crate::compiler::ssa::{
     ValueId,
@@ -16,7 +17,15 @@ use super::{InstructionLoweringRule, LoweringContext};
 /// `hlssa_to_r1cs::Value::cast` passes a linear combination through). So a narrowing cast discards
 /// nothing, yet its result is declared at a width that excludes bits still in the element. The
 /// honest value would then fail a range check it should pass, leaving a circuit no witness
-/// satisfies, so a bit window truncates it first.
+/// satisfies, so a bit window truncates it first. A witnessed `Field` source is narrowed the same
+/// way.
+///
+/// A [`CastTarget::IntUnchecked`] gets no window: its emitter bounds the value itself. This rule
+/// rewrites every one into a plain `Int`, witnessed or not, so none reaches a later pass.
+///
+/// A witnessed narrowing `Int` truncates only up to this phase. Past it, `Int` is a relabel again:
+/// the lowerings after it cast field elements they have already pinned, such as a comparison's
+/// boolean, with a bare `Int`, and running this rule after them would window those.
 ///
 /// The window goes **in front of** the cast rather than replacing it, because a `BitRange` takes
 /// its result type from its _source_: the low 32 bits of an `int200` are an `int200` below `2^32`.
@@ -53,13 +62,25 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
         let OpCode::Cast {
             result,
             value,
-            target: CastTarget::Int(to_bits),
+            target,
         } = instruction
         else {
             return false;
         };
+        let to_bits = match target {
+            CastTarget::Int(to_bits) => to_bits,
+            CastTarget::IntUnchecked(to_bits) => {
+                b.emit(OpCode::Cast {
+                    result: *result,
+                    value: *value,
+                    target: CastTarget::Int(*to_bits),
+                });
+                return true;
+            }
+            _ => return false,
+        };
 
-        let Some(from_bits) = witnessed_int_width(context, *value) else {
+        let Some(from_bits) = witnessed_width(context, *value, b.field().field_bit_size()) else {
             return false;
         };
         if from_bits <= *to_bits {
@@ -96,10 +117,8 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
     }
 }
 
-// FIELD-ASSUMPTION: L1-noir-frontend
-// A witnessed `Field` source is left alone: the frontend puts `bit_range(v, 0, n)` before Noir's
-// `x as uN`, and `unsafe_cast`'s caller bounds the bare cast it emits.
-/// The declared width of `value` where it is a witnessed integer, and [`None`] otherwise.
+/// The declared width of `value` where it is a witnessed integer, the field's width where it is a
+/// witnessed `Field`, and [`None`] otherwise.
 ///
 /// Only the witness domain is rewritten: a pure value is computed rather than constrained, and
 /// both backends truncate a narrowing cast at every width.
@@ -107,13 +126,18 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
 /// Looked up in the snapshot with `try_`, which makes this rule **idempotent**: a value this rule
 /// created has no entry there, so the rule declines it rather than wrapping it in a second window.
 /// The driver does not re-offer emitted instructions, but this keeps the rule correct if it did.
-fn witnessed_int_width(context: &LoweringContext<'_>, value: ValueId) -> Option<usize> {
+fn witnessed_width(
+    context: &LoweringContext<'_>,
+    value: ValueId,
+    field_bits: u32,
+) -> Option<usize> {
     let ty = context.types().try_get_value_type(value)?;
     if !ty.is_witness_of() {
         return None;
     }
     match ty.strip_witness().expr {
         TypeExpr::Int(bits) => Some(bits),
+        TypeExpr::Field => Some(usize::try_from(field_bits).expect("a field width fits a usize")),
         _ => None,
     }
 }
