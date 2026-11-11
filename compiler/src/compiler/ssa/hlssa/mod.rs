@@ -2235,6 +2235,14 @@ pub enum CastTarget {
     /// An integer of `bits` raw two's-complement bits.
     Int(usize),
 
+    /// [`CastTarget::Int`], from an emitter that bounds the value below `2^bits`.
+    ///
+    /// It differs only on a witnessed narrowing of a value one field element carries: it gets no
+    /// bit window, so it relabels the element. A pure one truncates, and a wide one is lowered as a
+    /// checked one. `LowerWitnessNarrowingCast` rewrites every one into `Int`, so none reaches a
+    /// backend.
+    IntUnchecked(usize),
+
     WitnessOf,
 
     /// Strips one `WitnessOf` wrapper.
@@ -2341,7 +2349,7 @@ impl CastTarget {
                     Type::field()
                 }
             }
-            CastTarget::Int(size) => {
+            CastTarget::Int(size) | CastTarget::IntUnchecked(size) => {
                 if value_type.is_witness_of() {
                     Type::witness_of(Type::int(*size))
                 } else {
@@ -2376,6 +2384,7 @@ impl CastTarget {
             CastTarget::Field
             | CastTarget::FieldLimbs
             | CastTarget::Int(_)
+            | CastTarget::IntUnchecked(_)
             | CastTarget::Nop
             | CastTarget::ArrayToSlice => false,
         }
@@ -2391,6 +2400,7 @@ impl CastTarget {
             CastTarget::Field
             | CastTarget::FieldLimbs
             | CastTarget::Int(_)
+            | CastTarget::IntUnchecked(_)
             | CastTarget::WitnessOf
             | CastTarget::Nop
             | CastTarget::ArrayToSlice => false,
@@ -2403,6 +2413,7 @@ impl Display for CastTarget {
         match self {
             CastTarget::Field => write!(f, "Field"),
             CastTarget::Int(size) => write!(f, "int{}", size),
+            CastTarget::IntUnchecked(size) => write!(f, "unchecked_int{}", size),
             CastTarget::WitnessOf => write!(f, "WitnessOf"),
             CastTarget::ValueOf => write!(f, "ValueOf"),
             CastTarget::Nop => write!(f, "Nop"),

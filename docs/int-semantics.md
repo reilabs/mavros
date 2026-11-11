@@ -51,9 +51,6 @@ widths. In particular, the following all hold.
 - **Casts** keep the low bits when narrowing and sign-extend a signed source when widening.
   `uN as Field` is the unsigned value; `iN as Field` is a type error in Noir.
 - **A `Field` to integer cast keeps the low bits of the element's canonical value**, matching Noir.
-  Note that `mavros_stdlib`'s `unsafe_cast` is a separate, Mavros-only conversion that does not
-  truncate a witness: it carries the element through unchanged and leaves the program to bound it
-  with a later required range check or lookup.
 - **A rejection is a runtime failure**, not a compile error: an unsatisfiable constraint or a
   witness-generation trap. A failing operation is never removed as dead code, and unconstrained code
   follows the same rules.
@@ -107,17 +104,21 @@ understanding:
 ### Field Casts
 
 An HLSSA `Cast` across the field boundary is defined internally to Mavros to be total, but for the
-bare witnessed narrowing below. Noir's elaborator refuses a non-injective `uN as Field`, and
-`unsafe_cast` only casts out of a `Field`, so no Noir source can write such a cast: only hand-built
-HLSSA reaches one.
+unchecked narrowing below. Noir's elaborator refuses a non-injective `uN as Field`, so no Noir
+source can write a cast into the field that reduces: only hand-built HLSSA reaches one.
 
 - **`Int(n) → Field`** reduces the integer's unsigned reading modulo `p`.
 - **`Field → Int(n)`** truncates or zero-extends the element's canonical value. On a witnessed
-  element, a cast to fewer bits than the field's is a relabel that carries the element through
-  unchanged, so whatever emits it owes the bound. Noir's `x as uN` puts a bit window in front of it,
-  which decomposes the element into its canonical bytes against the configured modulus, and
-  `unsafe_cast` leaves it to the program. A cast at least as wide as the field reads the canonical
-  value through `WideWitnessInts`' limbs.
+  element, a cast to fewer bits than the field's goes behind a bit window, which decomposes the
+  element into its canonical bytes against the configured modulus. `LowerWitnessNarrowingCast` adds
+  it wherever the value range does not already bound the source, which is how Noir's `x as uN` is
+  handled. A cast at least as wide as the field reads the canonical value through `WideWitnessInts`'
+  limbs.
+- **`IntUnchecked(n)`** is `Field → Int(n)` from an emitter that bounds the element itself, so it
+  gets no window: on a witness it is a relabel that carries the element through unchanged, and an
+  element at or above `2^n` leaves the constraints unsatisfiable, or bound only by what the program
+  checks. The entry point's parameters, `WideWitnessInts`' limbs and the internal `unsafe_cast` emit
+  it, and `LowerWitnessNarrowingCast` rewrites every one into `Int`.
 - **`FieldLimbs`** is the injective image of an integer, one element per limb for a value too wide
   for one element, which a lookup keyed on an integer needs. The witness array lowering emits it,
   and `WideWitnessInts` lowers each one away.

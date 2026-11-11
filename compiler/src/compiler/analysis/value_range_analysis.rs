@@ -2218,7 +2218,7 @@ fn cast_range(target: &CastTarget, in_r: ValueRange, field: FieldConfig) -> Valu
         // One element per limb, under one `Field` type, so no single range holds it.
         CastTarget::FieldLimbs => ValueRange::full(Width::Field(field)),
 
-        CastTarget::Int(n) => in_r.reinterpret_to(Width::Bits(*n)),
+        CastTarget::Int(n) | CastTarget::IntUnchecked(n) => in_r.reinterpret_to(Width::Bits(*n)),
 
         // ValueOf strips the WitnessOf wrapper: payload unchanged.
         CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,

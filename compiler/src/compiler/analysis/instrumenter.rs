@@ -569,7 +569,9 @@ impl Value {
                     .collect(),
             ),
             (Value::UnknownSlice, CastTarget::Map(_)) => Value::UnknownSlice,
-            (Value::Unknown(_), CastTarget::Int(s)) => Value::Unknown(ScalarKind::Int(*s)),
+            (Value::Unknown(_), CastTarget::Int(s) | CastTarget::IntUnchecked(s)) => {
+                Value::Unknown(ScalarKind::Int(*s))
+            }
             (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
             (Value::Unknown(kind), CastTarget::Nop | CastTarget::ArrayToSlice) => {
                 Value::Unknown(*kind)
@@ -577,15 +579,17 @@ impl Value {
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, instrumenter)))
             }
-            (Value::Int(_), CastTarget::Int(0)) => {
+            (Value::Int(_), CastTarget::Int(0) | CastTarget::IntUnchecked(0)) => {
                 ice!("a cast to int0 describes a value with no bits")
             }
-            (Value::Int(v), CastTarget::Int(s2)) => Value::Int(v.cast(*s2)),
+            (Value::Int(v), CastTarget::Int(s2) | CastTarget::IntUnchecked(s2)) => {
+                Value::Int(v.cast(*s2))
+            }
             (Value::Int(v), CastTarget::Field) => {
                 Value::Field(field_residue(instrumenter.field(), v))
             }
             (Value::Field(f), CastTarget::Field) => Value::Field(*f),
-            (Value::Field(f), CastTarget::Int(s)) => {
+            (Value::Field(f), CastTarget::Int(s) | CastTarget::IntUnchecked(s)) => {
                 Value::Int(IntBits::from_field_limbs(&f.canonical_limbs(), *s))
             }
             (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),

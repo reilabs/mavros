@@ -196,3 +196,46 @@ fn blake_goldilocks_witnesses_match_reference_digests() {
         check_program::<Goldilocks>(&source, &inputs, !mode.is_empty());
     }
 }
+
+/// `unsafe_cast` leaves its bound to the caller, so only the standard library may call it.
+#[test]
+fn unsafe_cast_is_internal_to_the_standard_library() {
+    common::assert_frontend_refused(
+        "use std::mavros::unsafe_cast;\n\nfn main(x: Field) -> pub u8 {\n    unsafe_cast(x)\n}",
+        "unsafe_cast is private and not visible from the current module",
+    );
+}
+
+/// Noir's `x as uN` and `x as iN` on a `Field` keep the low bits, witnessed or pure, on both fields.
+/// The frontend puts no bit window in front of the cast: the witnessed one gets
+/// `LowerWitnessNarrowingCast`'s, and both backends truncate the pure one. The low byte has its top
+/// bit set, so `x as i8` reads negative and sign-extends.
+#[test]
+fn field_narrowing_casts_truncate_on_both_fields() {
+    // 2^40 + 456, which both fields carry: the low byte is 200, or -56 as an `i8`.
+    let inputs = ["x = 1099511628232\nreturn = [200, 456, 4294967240]\n".to_owned()];
+    for mode in ["", "unconstrained "] {
+        let source = format!(
+            "{mode}fn main(x: Field) -> pub [u32; 3] {{ \
+             [(x as u8) as u32, x as u32, (x as i8) as u32] }}"
+        );
+        check_program::<Field>(&source, &inputs, !mode.is_empty());
+        check_program::<Goldilocks>(&source, &inputs, !mode.is_empty());
+    }
+}
+
+/// A bn254 `Field` above `2^128` cast to `u128` keeps its low 128 bits, witnessed or pure. Bit 130
+/// is set, so an untruncated value would shift down to 9.
+#[test]
+fn field_to_u128_truncates_above_the_host_word() {
+    // 2^130 + 2^127 + 2^32 + 200.
+    let inputs =
+        ["x = \"1531270651144223085585185733447251919048\"\nreturn = [1, 200]\n".to_owned()];
+    for mode in ["", "unconstrained "] {
+        let source = format!(
+            "{mode}fn main(x: Field) -> pub [u32; 2] {{ \
+             let w = x as u128; [(w >> 127) as u32, w as u32] }}"
+        );
+        check_program::<Field>(&source, &inputs, !mode.is_empty());
+    }
+}
