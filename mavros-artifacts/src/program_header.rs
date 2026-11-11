@@ -1,8 +1,8 @@
-//! The header every VM program binary opens with. The compiler writes it, the VM reads it, and
-//! [`Artifact::from_bytes`] checks it against the artifact's R1CS and manifest. The opcode stream
+//! The header every VM program binary opens with. The compiler writes it, the VM reads it, and an
+//! [`Artifact`] checks it against its R1CS and manifest when it is built or read. The opcode stream
 //! after it is not validated.
 //!
-//! [`Artifact::from_bytes`]: crate::Artifact::from_bytes
+//! [`Artifact`]: crate::Artifact
 
 use crate::{ConstraintsLayout, FieldId, WitnessLayout};
 
@@ -12,8 +12,10 @@ pub const ENTRY_WITGEN: usize = 0;
 pub const ENTRY_AD: usize = 1;
 /// Index of the direct forward verifier entry point.
 pub const ENTRY_VERIFIER: usize = 2;
-/// An absent entry in a program or serialized entry table.
+/// An absent entry in a program's entry table.
 pub const NO_ENTRY_POINT: usize = usize::MAX;
+/// The word [`NO_ENTRY_POINT`] is serialized as, the same on every target.
+pub const NO_ENTRY_POINT_WORD: u64 = u64::MAX;
 /// The word that opens every function, followed by its frame size and then its opcodes.
 pub const FUNCTION_MARKER: u64 = u64::MAX;
 
@@ -97,9 +99,11 @@ impl ProgramHeader {
                 "unsupported VM program format version {version:?}; expected {PROGRAM_FORMAT_VERSION}"
             ));
         }
-        let words = |start: usize, len: usize| {
-            start
-                .checked_add(len)
+        // A length too wide for `usize` runs past the end of any program this target can hold.
+        let words = |start: usize, len: u64| {
+            usize::try_from(len)
+                .ok()
+                .and_then(|len| start.checked_add(len))
                 .and_then(|end| program.get(start..end))
                 .ok_or_else(|| "the VM program ends inside its header".to_string())
         };
@@ -117,32 +121,35 @@ impl ProgramHeader {
             }
             tag => return Err(format!("invalid constraint layout tag {tag}")),
         };
-        let pool_len = word(off)? as usize;
-        let constant_pool = words(off + 1, pool_len)?.to_vec();
-        let off = off + 1 + pool_len;
-        let global_frame_size = word(off)? as usize;
-        let entry_blob_field_count = word(off + 1)? as usize;
-        let num_entries = word(off + 2)? as usize;
-        let entry_points: Vec<usize> = words(off + 3, num_entries)?
-            .iter()
-            .map(|&offset| offset as usize)
-            .collect();
-        let code_start = off + 3 + num_entries;
-        for (index, &entry) in entry_points.iter().enumerate() {
-            if entry == NO_ENTRY_POINT {
+        let constant_pool = words(off + 1, word(off)?)?.to_vec();
+        let off = off + 1 + constant_pool.len();
+        let global_frame_size = to_usize(word(off)?, "global frame size")?;
+        let entry_blob_field_count = to_usize(word(off + 1)?, "entry blob field count")?;
+        let entry_words = words(off + 3, word(off + 2)?)?;
+        let code_start = off + 3 + entry_words.len();
+        let mut entry_points = Vec::with_capacity(entry_words.len());
+        for (index, &entry_word) in entry_words.iter().enumerate() {
+            if entry_word == NO_ENTRY_POINT_WORD {
+                entry_points.push(NO_ENTRY_POINT);
                 continue;
             }
-            // The VM reads the frame size at `entry + 1` and starts at `entry + 2`, unchecked.
-            if !(code_start..program.len() - 2).contains(&entry) {
-                return Err(format!(
-                    "the VM program's entry point {index} at word {entry} lies outside its code"
-                ));
-            }
+            // The VM reads the frame size at `entry + 1` and starts at `entry + 2`, unchecked. A
+            // word too wide for `usize` is past the end of any program this target can hold.
+            let entry = usize::try_from(entry_word)
+                .ok()
+                .filter(|entry| (code_start..program.len() - 2).contains(entry))
+                .ok_or_else(|| {
+                    format!(
+                        "the VM program's entry point {index} at word {entry_word} lies outside \
+                         its code"
+                    )
+                })?;
             if program[entry] != FUNCTION_MARKER {
                 return Err(format!(
                     "the VM program's entry point {index} at word {entry} is not a function marker"
                 ));
             }
+            entry_points.push(entry);
         }
         Ok(ProgramHeader {
             field,
@@ -154,4 +161,10 @@ impl ProgramHeader {
             code_start,
         })
     }
+}
+
+/// A header word as a size, refused when it is too wide for this target's `usize`.
+fn to_usize(word: u64, what: &str) -> Result<usize, String> {
+    usize::try_from(word)
+        .map_err(|_| format!("the VM program's {what} {word} does not fit this target's usize"))
 }

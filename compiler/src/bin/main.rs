@@ -318,7 +318,7 @@ fn compile_package<F: MavrosField>(
                 "binary": verifier.binary,
                 "witness_layout": artifact.r1cs().witness_layout,
                 "constraints_layout": artifact.r1cs().constraints_layout,
-                "circuit_digest": mavros_artifacts::hex(&artifact.circuit_digest()),
+                "circuit_digest": artifact.circuit_digest_hex(),
             }))?,
         )?;
         write_vm_debug_info(output, verifier.debug_info, &driver, absolute_paths)?;

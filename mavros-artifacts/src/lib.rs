@@ -12,7 +12,7 @@ pub use field::{FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement
 pub use manifest::{
     ARTIFACT_DIGEST_DOMAIN, ARTIFACT_FORMAT_VERSION, ARTIFACT_MAGIC, Artifact, ArtifactError,
     ArtifactParts, ArtifactPreamble, CIRCUIT_DIGEST_DOMAIN, ManifestParam, ParamVisibility,
-    ReturnSlot, WitnessManifest, hex,
+    ReturnSlot, WitnessManifest,
 };
 
 // FIELD-ASSUMPTION: L1-alias

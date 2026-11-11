@@ -3748,7 +3748,7 @@ impl Display for Function {
 
 pub use mavros_artifacts::program_header::{
     ConstraintLayouts, ENTRY_AD, ENTRY_VERIFIER, ENTRY_WITGEN, FUNCTION_MARKER, NO_ENTRY_POINT,
-    PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC, ProgramHeader,
+    NO_ENTRY_POINT_WORD, PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC, ProgramHeader,
 };
 
 pub struct Program {
@@ -3892,7 +3892,7 @@ impl Program {
 
         for (slot, fn_idx) in self.entry_points.iter().enumerate() {
             binary[entry_table_start + slot] = if *fn_idx == NO_ENTRY_POINT {
-                NO_ENTRY_POINT as u64
+                NO_ENTRY_POINT_WORD
             } else {
                 function_markers[*fn_idx] as u64
             };

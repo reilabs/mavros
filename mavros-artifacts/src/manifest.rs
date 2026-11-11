@@ -217,7 +217,7 @@ fn body_options() -> impl bincode::Options {
 }
 
 /// Lowercase hex, the form digests are printed and recorded in.
-pub fn hex(bytes: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -309,7 +309,20 @@ pub struct ArtifactParts<F: MavrosField = Field> {
 }
 
 impl<F: MavrosField> Artifact<F> {
+    /// Packs the parts into an artifact, after checking them against each other.
     pub fn new(
+        compiler: String,
+        manifest: WitnessManifest,
+        r1cs: SealedR1CS<F>,
+        bytecode: Vec<u64>,
+        abi: Vec<u8>,
+    ) -> Result<Self, ArtifactError> {
+        Self::check(&manifest, &r1cs, &bytecode)?;
+        Ok(Self::assemble(compiler, manifest, r1cs, bytecode, abi))
+    }
+
+    /// Hashes the parts into an artifact without checking them against each other.
+    fn assemble(
         compiler: String,
         manifest: WitnessManifest,
         r1cs: SealedR1CS<F>,
@@ -338,6 +351,19 @@ impl<F: MavrosField> Artifact<F> {
         }
     }
 
+    /// Checks the manifest and LogUp layout against the R1CS, and the bytecode's header against
+    /// both.
+    fn check(
+        manifest: &WitnessManifest,
+        r1cs: &R1CS<F>,
+        bytecode: &[u64],
+    ) -> Result<(), ArtifactError> {
+        manifest.validate(r1cs).map_err(ArtifactError::Invalid)?;
+        LogupStrides::try_new(&r1cs.witness_layout, &r1cs.constraints_layout)
+            .map_err(ArtifactError::Invalid)?;
+        check_bytecode::<F>(bytecode, r1cs, manifest).map_err(ArtifactError::Bytecode)
+    }
+
     pub fn field(&self) -> FieldId {
         self.r1cs.field()
     }
@@ -354,6 +380,11 @@ impl<F: MavrosField> Artifact<F> {
     /// manifest. A change to only the bytecode or the ABI does not move it.
     pub fn circuit_digest(&self) -> [u8; 32] {
         self.circuit_digest
+    }
+
+    /// [`Self::circuit_digest`] in lowercase hex, the form consumers record it in.
+    pub fn circuit_digest_hex(&self) -> String {
+        hex(&self.circuit_digest)
     }
 
     pub fn manifest(&self) -> &WitnessManifest {
@@ -441,7 +472,7 @@ impl<F: MavrosField> Artifact<F> {
             .try_into()
             .expect("32 bytes");
         let body: Body<F> = body_options().deserialize(&bytes[body_offset..])?;
-        let artifact = Self::new(
+        let artifact = Self::assemble(
             compiler,
             body.manifest,
             SealedR1CS::new(body.r1cs),
@@ -454,19 +485,7 @@ impl<F: MavrosField> Artifact<F> {
                 actual: hex(&artifact.digest),
             });
         }
-
-        artifact
-            .manifest
-            .validate(&artifact.r1cs)
-            .map_err(ArtifactError::Invalid)?;
-
-        LogupStrides::try_new(
-            &artifact.r1cs.witness_layout,
-            &artifact.r1cs.constraints_layout,
-        )
-        .map_err(ArtifactError::Invalid)?;
-        check_bytecode::<F>(&artifact.bytecode, &artifact.r1cs, &artifact.manifest)
-            .map_err(ArtifactError::Bytecode)?;
+        Self::check(&artifact.manifest, &artifact.r1cs, &artifact.bytecode)?;
         Ok(artifact)
     }
 }
@@ -515,7 +534,8 @@ mod tests {
     use crate::{
         ConstraintsLayout, Field, Goldilocks, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout,
         program_header::{
-            ConstraintLayouts, FUNCTION_MARKER, PROGRAM_FORMAT_VERSION, PROGRAM_MAGIC,
+            ConstraintLayouts, FUNCTION_MARKER, NO_ENTRY_POINT_WORD, PROGRAM_FORMAT_VERSION,
+            PROGRAM_MAGIC,
         },
     };
 
@@ -595,8 +615,9 @@ mod tests {
         b"{}".to_vec()
     }
 
+    /// Unchecked, so a test can write the artifact [`Artifact::new`] refuses and read it back.
     fn build(manifest: WitnessManifest, r1cs: R1CS, bytecode: Vec<u64>, abi: Vec<u8>) -> Artifact {
-        Artifact::new(
+        Artifact::assemble(
             "test".into(),
             manifest,
             SealedR1CS::new(r1cs),
@@ -618,8 +639,23 @@ mod tests {
         Artifact::from_bytes(bytes)
     }
 
+    /// Reads back the unchecked artifact's bytes, after asserting that [`Artifact::new`] accepts
+    /// or refuses the same parts the same way.
     fn round_trip(manifest: WitnessManifest, r1cs: R1CS) -> Result<Artifact, ArtifactError> {
-        read(&bytes_of(manifest, r1cs))
+        let built = Artifact::new(
+            "test".into(),
+            manifest.clone(),
+            SealedR1CS::new(r1cs.clone()),
+            bytecode(&manifest, &r1cs),
+            abi(),
+        );
+        let decoded = read(&bytes_of(manifest, r1cs));
+        let outcome = |result: &Result<Artifact, ArtifactError>| match result {
+            Ok(artifact) => Ok(artifact.digest()),
+            Err(error) => Err(error.to_string()),
+        };
+        assert_eq!(outcome(&built), outcome(&decoded));
+        decoded
     }
 
     fn digest_range(bytes: &[u8]) -> Range<usize> {
@@ -950,12 +986,12 @@ mod tests {
             ),
             (
                 "no witgen entry",
-                |b| b[17] = NO_ENTRY_POINT as u64,
+                |b| b[17] = NO_ENTRY_POINT_WORD,
                 "no witgen entry point",
             ),
             (
                 "no AD entry",
-                |b| b[18] = NO_ENTRY_POINT as u64,
+                |b| b[18] = NO_ENTRY_POINT_WORD,
                 "no AD entry point",
             ),
             (
@@ -972,10 +1008,22 @@ mod tests {
         for (case, mutate, expected) in cases {
             let mut words = bytecode(&manifest(), &r1cs());
             mutate(&mut words);
+            let built = Artifact::new(
+                "test".into(),
+                manifest(),
+                SealedR1CS::new(r1cs()),
+                words.clone(),
+                abi(),
+            );
             let bytes = build(manifest(), r1cs(), words, abi()).to_bytes().unwrap();
-            match read(&bytes) {
-                Err(ArtifactError::Bytecode(message)) if message.contains(expected) => {}
-                other => panic!("{case}: expected {expected:?}, got {:?}", other.err()),
+            for (path, result) in [("new", built), ("from_bytes", read(&bytes))] {
+                match result {
+                    Err(ArtifactError::Bytecode(message)) if message.contains(expected) => {}
+                    other => panic!(
+                        "{case} ({path}): expected {expected:?}, got {:?}",
+                        other.err()
+                    ),
+                }
             }
         }
     }
@@ -990,7 +1038,7 @@ mod tests {
         let pinned = artifact(manifest(), r1cs());
         // The digest the r1cs.bin artifact carried for this circuit.
         assert_eq!(
-            hex(&pinned.circuit_digest()),
+            pinned.circuit_digest_hex(),
             "2192560a2e938f3ae252363dad5eedb0f1c5de48c88201be9d5f51bd2c19229e"
         );
         assert_eq!(
@@ -1005,7 +1053,8 @@ mod tests {
             SealedR1CS::new(r1cs()),
             bytecode(&manifest(), &r1cs()),
             abi(),
-        );
+        )
+        .unwrap();
         assert_eq!(other.circuit_digest(), pinned.circuit_digest());
         assert_eq!(other.digest(), pinned.digest());
         assert_eq!(

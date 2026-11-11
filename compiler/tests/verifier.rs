@@ -726,14 +726,17 @@ fn verifier_artifact_cannot_run_as_a_prover() {
 
 #[test]
 fn a_verifier_binary_is_not_a_prover_artifact() {
-    use mavros_artifacts::{Artifact, ArtifactError};
+    use mavros_artifacts::ArtifactError;
+    use mavros_compiler::driver::Error;
     let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
     let (mut driver, r1cs) =
         api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
-    let bytes = driver.artifact(r1cs, verifier).unwrap().to_bytes().unwrap();
-    let error = Artifact::<Field>::from_bytes(&bytes).err().unwrap();
-    assert!(matches!(error, ArtifactError::Bytecode(_)), "{error}");
+    let error = driver.artifact(r1cs, verifier).err().unwrap();
+    assert!(
+        matches!(error, Error::Artifact(ArtifactError::Bytecode(_))),
+        "{error}"
+    );
     assert!(
         error.to_string().contains("not a prover artifact"),
         "{error}"
@@ -778,10 +781,7 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
     assert!(artifact.get("constraints").is_none());
     let program: mavros_artifacts::Artifact =
         mavros_artifacts::Artifact::from_bytes(&original_program).unwrap();
-    assert_eq!(
-        artifact["circuit_digest"],
-        mavros_artifacts::hex(&program.circuit_digest())
-    );
+    assert_eq!(artifact["circuit_digest"], program.circuit_digest_hex());
     let binary: Vec<u64> = serde_json::from_value(artifact["binary"].clone()).unwrap();
     let wl: mavros_vm::WitnessLayout =
         serde_json::from_value(artifact["witness_layout"].clone()).unwrap();
