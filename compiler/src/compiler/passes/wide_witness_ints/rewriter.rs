@@ -258,7 +258,7 @@ impl Rewriter<'_> {
         {
             let pattern = match target {
                 CastTarget::WitnessOf | CastTarget::ValueOf | CastTarget::Nop => Some(pattern),
-                CastTarget::Int(bits) => Some(pattern.cast(*bits)),
+                CastTarget::Int(bits) | CastTarget::IntUnchecked(bits) => Some(pattern.cast(*bits)),
                 _ => None,
             };
             if let Some(pattern) = pattern {
@@ -286,6 +286,12 @@ impl Rewriter<'_> {
             target,
         });
         result
+    }
+
+    /// A field element read as an integer of `width` with no bit window in front of it, which the
+    /// caller bounds where the element is witnessed.
+    pub(super) fn relabel(&mut self, value: ValueId, width: usize) -> ValueId {
+        self.cast(value, CastTarget::IntUnchecked(width))
     }
 
     /// `value >> offset` on the pure side.
@@ -411,7 +417,7 @@ impl Rewriter<'_> {
         let narrowed = self.cast(hint, CastTarget::Int(width));
         let hint_field = self.cast(narrowed, CastTarget::Field);
         let written = self.write_witness(hint_field);
-        let limb = self.cast(written, CastTarget::Int(width));
+        let limb = self.relabel(written, width);
         let limb_field = self.cast(limb, CastTarget::Field);
         self.push(OpCode::Rangecheck {
             value: limb_field,

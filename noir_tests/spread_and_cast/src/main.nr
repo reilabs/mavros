@@ -1,15 +1,15 @@
-use std::mavros::{unsafe_cast, spread, unspread};
+use std::mavros::{spread, unspread};
 
 fn main(x: u32, y: u32, a: u32, b: u32, cast_x: Field, cast_big: Field) {
-    // --- unsafe_cast ---
+    // --- narrowing casts from Field ---
 
-    let x_u8: u8 = unsafe_cast(cast_x);
+    let x_u8 = cast_x as u8;
     assert_eq(x_u8, 200);
-    let x_u16: u16 = unsafe_cast(cast_x);
+    let x_u16 = cast_x as u16;
     assert_eq(x_u16, 200);
-    let big_u32: u32 = unsafe_cast(cast_big);
+    let big_u32 = cast_big as u32;
     assert_eq(big_u32, 1000);
-    let big_u64: u64 = unsafe_cast(cast_big);
+    let big_u64 = cast_big as u64;
     assert_eq(big_u64, 1000);
 
     // --- spread<5> / unspread<5> ---

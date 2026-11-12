@@ -44,6 +44,7 @@ use crate::{
                 builder::HLSSABuilder,
             },
         },
+        util::biguint_of_limbs,
     },
     forgery::{self, replace_hints},
 };
@@ -757,7 +758,7 @@ fn check_the_limbs_of_v_plus_p_are_refused<F: MavrosField>(field: FieldConfig) {
         accepts(&five),
         "{id:?}: the canonical limbs of 5 are refused"
     );
-    let lifted = &five + BigUint::from(field.modulus());
+    let lifted = &five + biguint_of_limbs(field.modulus_limbs());
     assert!(
         lifted.bits() as usize <= bits,
         "{id:?}: p + 5 fits the limbs"
@@ -784,7 +785,7 @@ fn a_witness_indexed_read_takes_only_its_element_limb_for_limb() {
 
 fn check_a_read_takes_only_its_element<F: MavrosField>(field: FieldConfig, bits: usize) {
     let id = field.id();
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let c = BigUint::from(5u8);
     let lifted = &c + &modulus;
     let all_ones = (BigUint::from(1u8) << bits) - 1u8;

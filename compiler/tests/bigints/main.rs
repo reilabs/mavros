@@ -7,7 +7,7 @@ use harness::{
     BinaryOpOracle, Compiled, HarnessField, Verdict, bytecode_listing, input_block, input_block_in,
     main_program, main_program_in,
 };
-use mavros_artifacts::{Field, FieldConfig, FieldElement, InputValueOrdered};
+use mavros_artifacts::{Field, FieldConfig, FieldElement, FieldId, InputValueOrdered};
 use mavros_compiler::{
     compiler::{
         passes::shared::limbs::{widest_injective_int_bits, witness_limb_bits},
@@ -19,6 +19,7 @@ use mavros_compiler::{
                 builder::{HLBlockEmitter, HLEmitter as _, HLSSABuilder},
             },
         },
+        util::biguint_of_limbs,
     },
     driver::Error as DriverError,
 };
@@ -1859,8 +1860,29 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
     check_limbed_pairs_in::<Field>(limbed, bits, pairs, rhs);
 }
 
-/// `limbed` over `pairs`, all in one program over `F`, against the model, and on the WASM lane
-/// where `F` has one.
+/// Whether a limbed grid over `F` runs on the WASM lane as well.
+///
+/// Goldilocks' 16-bit witness limb makes a wide program large: past 64 bits, LLVM spends about five
+/// seconds on each twenty-pair program, and twenty 128-bit signed products exceed the 50 000 locals
+/// a wasm function holds. Past the limbing a program is field operations at any width, so
+/// `every_limbed_operation_runs_on_wasm_at_128_bits` samples those widths one pair to a program.
+fn limbed_grid_has_a_wasm_lane<F: HarnessField>(bits: usize) -> bool {
+    F::ID != FieldId::Goldilocks || bits <= 64
+}
+
+/// [`check_limbed_pairs_on`], on the lanes [`limbed_grid_has_a_wasm_lane`] gives this width.
+fn check_limbed_pairs_in<F: HarnessField>(
+    limbed: Limbed,
+    bits: usize,
+    pairs: Vec<(IntBits, IntBits)>,
+    rhs: Rhs,
+) {
+    let wasm_lane = limbed_grid_has_a_wasm_lane::<F>(bits);
+    check_limbed_pairs_on::<F>(limbed, bits, pairs, rhs, wasm_lane);
+}
+
+/// `limbed` over `pairs`, all in one program over `F`, against the model, and on the WASM lane when
+/// `wasm_lane` asks for it.
 ///
 /// Each operand is a corner constant selected by a witnessed bit: a witnessed value held as limbs.
 ///
@@ -1869,11 +1891,12 @@ fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)
 /// ([`Limbed::idle_rhs`]). The pipeline must refuse on that run only. A constant right operand is
 /// not selected, so only the left goes idle, to zero or to all ones where zero is rejected (as
 /// `0 - INT_MIN` is); a pure left operand likewise leaves only the right to go idle.
-fn check_limbed_pairs_in<F: HarnessField>(
+fn check_limbed_pairs_on<F: HarnessField>(
     limbed: Limbed,
     bits: usize,
     pairs: Vec<(IntBits, IntBits)>,
     rhs: Rhs,
+    wasm_lane: bool,
 ) {
     let answers: Vec<Option<IntBits>> = pairs.iter().map(|(a, b)| limbed.model(a, b)).collect();
     let zero = IntBits::zero(bits);
@@ -1958,7 +1981,12 @@ fn check_limbed_pairs_in<F: HarnessField>(
             vec![all.expect("there is at least one corner pair")]
         },
     );
-    let compiled = Compiled::<F>::compile(ssa).unwrap_or_else(|error| {
+    let compiled = if wasm_lane {
+        Compiled::<F>::compile(ssa)
+    } else {
+        Compiled::<F>::compile_for_the_vm(ssa)
+    }
+    .unwrap_or_else(|error| {
         panic!("{limbed:?} at {bits} bits, {rhs:?} right operand, does not compile: {error}")
     });
 
@@ -1972,7 +2000,6 @@ fn check_limbed_pairs_in<F: HarnessField>(
         ]
     };
     let inputs = |selected: u128| input_block_in::<F>(&block(selected).each_ref());
-    let wasm_inputs = |selected: u128| input_block(&block(selected).each_ref());
 
     let none = u128::from(u32::MAX);
     let verdict = compiled.run(&inputs(none));
@@ -1980,9 +2007,9 @@ fn check_limbed_pairs_in<F: HarnessField>(
         verdict.is_accepted(),
         "{limbed:?} at {bits} bits, {rhs:?} right operand, disagrees with the model on some pair it accepts: {verdict:?}"
     );
-    if let Some(bn254) = compiled.as_bn254() {
-        let verdict = bn254
-            .run_wasm(&wasm_inputs(none))
+    if wasm_lane {
+        let verdict = compiled
+            .run_wasm(&inputs(none))
             .expect("the WASM lane builds");
         assert!(
             verdict.is_accepted(),
@@ -2000,9 +2027,9 @@ fn check_limbed_pairs_in<F: HarnessField>(
             "{limbed:?}({lhs:?}, {rhs:?}) at {bits} bits is rejected by the model, but the \
              pipeline answered {verdict:?}"
         );
-        if let Some(bn254) = compiled.as_bn254() {
-            let verdict = bn254
-                .run_wasm(&wasm_inputs(index as u128))
+        if wasm_lane {
+            let verdict = compiled
+                .run_wasm(&inputs(index as u128))
                 .expect("the WASM lane builds");
             assert!(
                 verdict.rejects(),
@@ -4535,7 +4562,7 @@ fn pure_field_casts_agree_with_the_model() {
 /// The element of `field` whose canonical integer is `canonical`.
 fn element_of(field: FieldConfig, canonical: &BigUint) -> FieldElement {
     field
-        .from_bigint(canonical.clone().try_into().unwrap())
+        .from_canonical_limbs(&canonical.to_u64_digits())
         .expect("the model answers a canonical representative")
 }
 
@@ -4545,7 +4572,7 @@ fn element_of(field: FieldConfig, canonical: &BigUint) -> FieldElement {
 /// The integer side is chosen by a parameter and the element is multiplied by one cast from a
 /// parameter, so no constant folder answers first.
 fn pure_field_casts_program(field: FieldConfig, widths: &[usize]) -> HLSSA {
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let element = move |canonical: &BigUint| element_of(field, canonical);
     let widths = widths.to_vec();
 
@@ -4603,7 +4630,7 @@ fn pure_field_windows(field: FieldConfig) -> Vec<(usize, usize)> {
 ///
 /// Each element is multiplied by one cast from a parameter, so no constant folder answers first.
 fn pure_field_window_program(field: FieldConfig, (offset, width): (usize, usize)) -> HLSSA {
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     unconstrained_program_in(field, move |e, params| {
         let one = e.cast_to_field(params[0]);
         let mut checks = Vec::new();
@@ -5108,7 +5135,16 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an int256 shifted by an int32",
             shift,
-            shifting(256, Type::int(32)),
+            // An int256 cannot cross the entry point, so it is widened inside.
+            main_program(
+                &[Type::int(32), Type::int(32)],
+                &[Type::int(32)],
+                |e, params| {
+                    let wide = e.cast_to(CastTarget::Int(256), params[0]);
+                    let shifted = e.bin(BinaryArithOpKind::UShl, wide, params[1]);
+                    vec![e.cast_to(CastTarget::Int(32), shifted)]
+                },
+            ),
         ),
         (
             "an int64 shifted by a field",
@@ -5142,13 +5178,19 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an array of wide integers mapped to a wider integer",
             "a Map cast only adds or strips WitnessOf",
-            main_program(
-                &[Type::int(256).array_of(2)],
-                &[Type::int(320).array_of(2)],
-                |e, params| {
-                    vec![e.cast_to(CastTarget::Map(Box::new(CastTarget::Int(320))), params[0])]
-                },
-            ),
+            // An int256 cannot cross the entry point, so the array is built inside.
+            main_program(&[Type::int(32)], &[Type::int(32)], |e, params| {
+                let wide = e.cast_to(CastTarget::Int(256), params[0]);
+                let array = e.mk_seq(
+                    vec![wide, wide],
+                    SequenceTargetType::Array(2),
+                    Type::int(256),
+                );
+                let wider = e.cast_to(CastTarget::Map(Box::new(CastTarget::Int(320))), array);
+                let index = e.int_const(IntBits::zero(32));
+                let element = e.array_get(wider, index);
+                vec![e.cast_to(CastTarget::Int(32), element)]
+            }),
         ),
     ];
     for (what, reason, ssa) in cases {
@@ -5179,7 +5221,7 @@ fn a_return_past_the_field_publishes_its_residue() {
 
 fn check_a_return_past_the_field<F: HarnessField>(bits: usize) {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     for offset in [BigUint::ZERO, modulus] {
         let compiled = Compiled::<F>::compile(main_program_in(
             field,
@@ -5216,7 +5258,7 @@ fn check_a_return_past_the_field<F: HarnessField>(bits: usize) {
 #[test]
 fn a_wide_constant_cast_to_field_is_its_residue() {
     let wide = first_width_past_the_field();
-    let modulus = BigUint::from(FieldConfig::bn254().modulus());
+    let modulus = biguint_of_limbs(FieldConfig::bn254().modulus_limbs());
     for value in [BigUint::from(5u8), &modulus + 5u8] {
         let constant = IntBits::from_biguint(wide, &value);
         let ssa = main_program(&[], &[Type::field()], move |e, _| {
@@ -5249,7 +5291,7 @@ fn a_witnessed_limbed_integer_casts_to_field_as_its_residue() {
 
 fn check_a_limbed_cast_to_field<F: HarnessField>() {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let bits = 320;
     let constant =
         (BigUint::from(1u8) << 300u32) + (BigUint::from(1u8) << 200u32) + &modulus * 3u8 + 5u8;
@@ -5277,15 +5319,13 @@ fn check_a_limbed_cast_to_field<F: HarnessField>() {
             "{:?}: x = {x}: {verdict:?}",
             field.id()
         );
-        if let Some(bn254) = compiled.as_bn254() {
-            let verdict = bn254
-                .run_wasm(&[
-                    InputValueOrdered::Field(Field::from(x)),
-                    InputValueOrdered::Field(Field::from(residue.clone())),
-                ])
-                .expect("the WASM lane builds");
-            assert!(verdict.is_accepted(), "x = {x} on WASM: {verdict:?}");
-        }
+        let verdict = compiled
+            .run_wasm(&[
+                input.clone(),
+                InputValueOrdered::Field(F::of_biguint(&residue)),
+            ])
+            .expect("the WASM lane builds");
+        assert!(verdict.is_accepted(), "x = {x} on WASM: {verdict:?}");
         let wrong = (&residue + 1u8) % &modulus;
         let verdict = compiled.run(&[input, InputValueOrdered::Field(F::of_biguint(&wrong))]);
         assert!(
@@ -5296,26 +5336,97 @@ fn check_a_limbed_cast_to_field<F: HarnessField>() {
     }
 }
 
-/// A bare cast of a witnessed field element to a narrower integer, with no bit window in front of
-/// it, relabels the element on both fields: an element inside the width reads back as itself.
-/// Past it, the witness generator truncates while the constraints carry the whole element, so the
-/// honest witness does not satisfy them. Whatever emits the cast owes the bound.
-#[test]
-fn a_bare_witnessed_field_cast_relabels_the_element() {
-    check_a_bare_field_cast_relabels::<Field>();
-    check_a_bare_field_cast_relabels::<mavros_artifacts::Goldilocks>();
+/// `main(x: Field) -> intN { x as intN }` over `F`, written as a bare cast to `target`, whose
+/// width is `N`.
+fn program_casting_a_field_down<F: HarnessField>(target: CastTarget) -> HLSSA {
+    let (CastTarget::Int(bits) | CastTarget::IntUnchecked(bits)) = target else {
+        panic!("{target} is not an integer cast");
+    };
+    main_program_in(
+        F::CONFIG,
+        &[Type::field()],
+        &[Type::int(bits)],
+        move |e, params| vec![e.cast_to(target, params[0])],
+    )
 }
 
-fn check_a_bare_field_cast_relabels<F: HarnessField>() {
+/// A bare cast of a witnessed field element to a narrower integer **truncates** on both fields, as
+/// one of a witnessed integer does, at every width below the field's. Nothing else bounds a `Field`
+/// below the target, so `LowerWitnessNarrowingCast` puts the bit window in front of it.
+///
+/// The widths straddle the host word, past which the value ranges stop tracking, and end one below
+/// the field's, where the window's canonical decomposition is at its widest.
+#[test]
+fn a_bare_witnessed_field_cast_truncates_the_element() {
+    check_a_bare_field_cast_truncates::<Field>();
+    check_a_bare_field_cast_truncates::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_a_bare_field_cast_truncates<F: HarnessField>() {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
-    let compiled = Compiled::<F>::compile(main_program_in(
-        field,
-        &[Type::field()],
-        &[Type::int(8)],
-        |e, params| vec![e.cast_to(CastTarget::Int(8), params[0])],
-    ))
-    .unwrap_or_else(|error| panic!("{:?}: the cast does not compile: {error}", field.id()));
+    let modulus = biguint_of_limbs(field.modulus_limbs());
+    let field_bits = field.field_bit_size() as usize;
+    let element = |value: &BigUint| InputValueOrdered::Field(F::of_biguint(value));
+    for bits in [1, 8, 32, 63, 64, 128, 129, 200, field_bits - 1] {
+        if bits >= field_bits {
+            continue;
+        }
+        let compiled =
+            Compiled::<F>::compile(program_casting_a_field_down::<F>(CastTarget::Int(bits)))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{:?}: the int{bits} cast does not compile: {error}",
+                        field.id()
+                    )
+                });
+        let place = BigUint::from(1u8) << bits;
+        let values = [
+            BigUint::from(0u8),
+            &place - 1u8,
+            place.clone(),
+            &place + (&place >> 1u8) + 5u8,
+            &modulus - 1u8,
+        ];
+        for value in values.into_iter().filter(|value| value < &modulus) {
+            let truncated = &value % &place;
+            let verdict = compiled.run(&[element(&value), element(&truncated)]);
+            assert!(
+                verdict.is_accepted(),
+                "{:?}: {value} as int{bits}: {verdict:?}",
+                field.id()
+            );
+            let wrong = (&truncated + 1u8) % &place;
+            let verdict = compiled.run(&[element(&value), element(&wrong)]);
+            assert!(
+                matches!(verdict, Verdict::ReturnMismatch { .. }),
+                "{:?}: {value} as int{bits} accepted {wrong}: {verdict:?}",
+                field.id()
+            );
+        }
+    }
+}
+
+/// An **unchecked** cast of a witnessed field element relabels it: an element inside the width
+/// reads back as itself, at fewer columns than the checked cast, as no window is put in front of
+/// it. Past the width, the witness generator truncates while the constraints carry the whole
+/// element, so the honest witness does not satisfy them. Whatever emits the cast owes the bound.
+#[test]
+fn an_unchecked_witnessed_field_cast_relabels_the_element() {
+    check_an_unchecked_field_cast_relabels::<Field>();
+    check_an_unchecked_field_cast_relabels::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_an_unchecked_field_cast_relabels<F: HarnessField>() {
+    let field = F::CONFIG;
+    let modulus = biguint_of_limbs(field.modulus_limbs());
+    let compile = |target| {
+        Compiled::<F>::compile(program_casting_a_field_down::<F>(target))
+            .unwrap_or_else(|error| panic!("{:?}: the cast does not compile: {error}", field.id()))
+    };
+    let (checked, compiled) = (
+        compile(CastTarget::Int(8)),
+        compile(CastTarget::IntUnchecked(8)),
+    );
     let element = |value: &BigUint| InputValueOrdered::Field(F::of_biguint(value));
     for value in [0u16, 44, 255] {
         let value = BigUint::from(value);
@@ -5326,6 +5437,22 @@ fn check_a_bare_field_cast_relabels<F: HarnessField>() {
             field.id()
         );
     }
+
+    let columns = |compiled: &Compiled<F>| {
+        let zero = element(&BigUint::from(0u8));
+        let verdict = compiled.run(&[zero.clone(), zero]);
+        verdict
+            .witness()
+            .unwrap_or_else(|| panic!("{:?}: 0 as int8 ran: {verdict:?}", field.id()))
+            .len()
+    };
+    let (windowed, relabelled) = (columns(&checked), columns(&compiled));
+    assert!(
+        relabelled < windowed,
+        "{:?}: the unchecked cast paid for a window: {relabelled} columns against {windowed}",
+        field.id()
+    );
+
     for value in [BigUint::from(256u16), BigUint::from(300u16), &modulus - 1u8] {
         let truncated = &value & BigUint::from(0xffu8);
         let verdict = compiled.run(&[element(&value), element(&truncated)]);
@@ -5941,16 +6068,30 @@ fn the_widest_injective_width_is_an_entry_point_parameter() {
 }
 
 /// An integer wider than one input element carries cannot cross this ABI directly. The frontend
-/// rejects such parameters; a hand-built SSA that bypasses it must also be refused.
+/// rejects such parameters; a hand-built SSA that bypasses it is refused with an error, wherever
+/// the integer sits in the parameter.
 #[test]
-#[should_panic(expected = "crosses the entry point")]
 fn a_main_parameter_wider_than_the_field_is_a_compiler_error() {
-    let ssa = main_program(
-        &[Type::int(first_width_past_the_field())],
-        &[Type::int(64)],
-        |e, params| vec![e.cast_to(CastTarget::Int(64), params[0])],
-    );
-    let _ = Compiled::new(ssa);
+    let width = first_width_past_the_field();
+    let wide = Type::int(width);
+    for param in [
+        wide.clone(),
+        wide.clone().array_of(2),
+        Type::tuple_of(vec![Type::field(), wide]),
+    ] {
+        let ssa = main_program(&[param.clone()], &[Type::field()], |e, _| {
+            vec![e.field_const(e.field().zero())]
+        });
+        let Err(error) = Compiled::new(ssa) else {
+            panic!("main({param:?}) compiled");
+        };
+        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("an int{width} crosses the entry point")),
+            "{message}"
+        );
+    }
 }
 
 /// The entry point's range check bites: a value above the declared width is refused when proving.
@@ -6291,7 +6432,7 @@ fn check_a_read_of_two_elements_one_modulus_apart<F: HarnessField>(
     field: FieldConfig,
     bits: usize,
 ) {
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let elements = [
         IntBits::from_u128(bits, 5),
         IntBits::from_biguint(bits, &(&modulus + 5u8)),
@@ -6345,7 +6486,7 @@ fn a_witnessed_field_bit_window_reads_the_canonical_integer() {
 
 fn check_witnessed_field_windows<F: HarnessField>() {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let top = field.field_bit_size() as usize;
     let one = BigUint::from(1u8);
     let mut values = vec![
@@ -7524,7 +7665,7 @@ fn check_a_witnessed_field_reads_back_as_a_wide_integer<F: HarnessField>(
     high: usize,
 ) {
     let field = F::CONFIG;
-    let modulus = BigUint::from(field.modulus());
+    let modulus = biguint_of_limbs(field.modulus_limbs());
     let top = field.field_bit_size() as usize;
     let one = BigUint::from(1u8);
     let values = [
@@ -7561,12 +7702,10 @@ fn check_a_witnessed_field_reads_back_as_a_wide_integer<F: HarnessField>(
             };
             let verdict = compiled.run(&inputs(&high_window));
             assert!(verdict.is_accepted(), "{what}: {verdict:?}");
-            if let Some(bn254) = compiled.as_bn254() {
-                let inputs = [value, &low, &high_window]
-                    .map(|element| InputValueOrdered::Field(Field::from(element.clone())));
-                let verdict = bn254.run_wasm(&inputs).expect("the WASM lane builds");
-                assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
-            }
+            let verdict = compiled
+                .run_wasm(&inputs(&high_window))
+                .expect("the WASM lane builds");
+            assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
             let wrong = &high_window ^ &one;
             assert!(
                 !compiled.run(&inputs(&wrong)).is_accepted(),

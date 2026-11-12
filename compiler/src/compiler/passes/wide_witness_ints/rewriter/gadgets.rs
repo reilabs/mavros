@@ -127,7 +127,7 @@ impl Rewriter<'_> {
         }
 
         let sum = sum.expect("an integer has at least one limb");
-        self.cast(sum, CastTarget::Int(bits))
+        self.relabel(sum, bits)
     }
 
     /// Pure limbs shifted into place and or-ed together, as one pure value of `bits`.

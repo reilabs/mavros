@@ -6,15 +6,15 @@
 
 use std::path::Path;
 
-use mavros_artifacts::{Field as RawField, MavrosField};
+use mavros_artifacts::{FieldId, MavrosField};
 use mavros_wasm_layout::{
     AD_COEFFS_BASE_PTR_OFFSET, AD_COEFFS_PTR_OFFSET, AD_CURRENT_CNST_TABLES_OFF_OFFSET,
     AD_CURRENT_LOOKUP_WIT_OFF_OFFSET, AD_CURRENT_WIT_MULTIPLICITIES_OFF_OFFSET,
     AD_CURRENT_WIT_OFF_OFFSET, AD_CURRENT_WIT_TABLES_OFF_OFFSET, AD_OUT_DA_PTR_OFFSET,
-    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, TABLE_INFO_INV_CNST_OFF_OFFSET,
-    TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_KIND_OFFSET, TABLE_INFO_LENGTH_OFFSET,
-    TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_SLOT_SIZE, WITGEN_A_BASE_PTR_OFFSET,
-    WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
+    AD_OUT_DB_PTR_OFFSET, AD_OUT_DC_PTR_OFFSET, AD_VM_STRUCT_SIZE, FIELD_TAG_EXPORT,
+    TABLE_INFO_INV_CNST_OFF_OFFSET, TABLE_INFO_INV_WIT_OFF_OFFSET, TABLE_INFO_KIND_OFFSET,
+    TABLE_INFO_LENGTH_OFFSET, TABLE_INFO_MULTS_BASE_PTR_OFFSET, TABLE_INFO_SLOT_SIZE,
+    WITGEN_A_BASE_PTR_OFFSET, WITGEN_A_PTR_OFFSET, WITGEN_B_PTR_OFFSET, WITGEN_C_PTR_OFFSET,
     WITGEN_CURRENT_CNST_TABLES_OFF_OFFSET, WITGEN_CURRENT_WIT_TABLES_OFF_OFFSET,
     WITGEN_INPUTS_PTR_OFFSET, WITGEN_LOOKUPS_A_PTR_OFFSET, WITGEN_LOOKUPS_B_PTR_OFFSET,
     WITGEN_LOOKUPS_C_PTR_OFFSET, WITGEN_MULTS_CURSOR_PTR_OFFSET, WITGEN_TABLES_CAP_OFFSET,
@@ -24,7 +24,7 @@ use mavros_wasm_layout::{
 use wasmtime::{Config, Engine, Linker, Memory, Store, WasmBacktraceDetails};
 
 use crate::{
-    compiler::{codegen::hlssa_to_r1cs::R1CS, ssa::llssa::LLStruct},
+    compiler::codegen::hlssa_to_r1cs::R1CS,
     vm::{
         TableKind,
         interpreter::{self, Phase2Table},
@@ -41,16 +41,47 @@ pub fn wasm_engine() -> wasmtime::Result<Engine> {
 }
 
 /// The bytes an element of `F` occupies in linear memory: its storage cells, as the VM holds them.
-/// The WASM runtime computes on elements of `LLStruct::FIELD_LIMBS` cells, so `F` must have that
-/// many.
 fn field_size<F: MavrosField>() -> usize {
-    assert_eq!(
-        F::STORAGE_CELLS,
-        LLStruct::FIELD_LIMBS,
-        "the WASM runtime holds an element in {} cells",
-        LLStruct::FIELD_LIMBS
-    );
     F::STORAGE_CELLS * size_of::<u64>()
+}
+
+/// A module the host refuses without running because it is not over the host's field: the host's
+/// buffers stride by its own field's elements.
+///
+/// A caller that scores a failed run as a rejection tells this apart from a trap, as it says the
+/// module never ran.
+#[derive(Debug)]
+pub struct ModuleFieldMismatch(String);
+
+impl std::fmt::Display for ModuleFieldMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ModuleFieldMismatch {}
+
+/// Refuses `instance` with a [`ModuleFieldMismatch`] unless it is a module over `F`.
+fn check_module_field<F: MavrosField>(
+    store: &mut Store<()>,
+    instance: &wasmtime::Instance,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tag = instance
+        .get_typed_func::<(), i32>(&mut *store, FIELD_TAG_EXPORT)
+        .map_err(|error| {
+            ModuleFieldMismatch(format!("a WASM module without a field tag: {error}"))
+        })?
+        .call(&mut *store, ())?;
+    let module = FieldId::from_code(tag as u64);
+    if module != Some(F::ID) {
+        return Err(ModuleFieldMismatch(format!(
+            "a WASM module over {} cannot run over {}",
+            module.map_or_else(|| format!("field code {tag}"), |id| id.to_string()),
+            F::ID
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// The `env::memory` type the module imports. Its minimum covers the module's stack and data.
@@ -153,18 +184,19 @@ impl LoadedModule {
 /// Run a compiled module's witgen entry point and read its outputs back out of linear memory.
 ///
 /// `entry_blob_field_count` is the number of flattened input fields the module's entry reads, as
-/// the program header of the same compilation records it.
+/// the program header of the same compilation records it. A module over a field other than `F` is
+/// an error.
 ///
 /// # Panics
 ///
 /// If `params` flatten to any other number of fields: the module reads its inputs at fixed
 /// offsets, so a short blob reads the table region that follows it, and a long one is ignored.
-pub fn run_witgen(
+pub fn run_witgen<F: MavrosField>(
     wasm_path: &Path,
-    r1cs: &R1CS,
-    params: &[interpreter::InputValueOrdered],
+    r1cs: &R1CS<F>,
+    params: &[interpreter::InputValueOrdered<F>],
     entry_blob_field_count: usize,
-) -> Result<WasmResult<RawField>, Box<dyn std::error::Error>> {
+) -> Result<WasmResult<F>, Box<dyn std::error::Error>> {
     run_witgen_loaded(
         &LoadedModule::load(wasm_path)?,
         r1cs,
@@ -174,12 +206,12 @@ pub fn run_witgen(
 }
 
 /// [`run_witgen`] on a module that is already compiled.
-pub fn run_witgen_loaded(
+pub fn run_witgen_loaded<F: MavrosField>(
     loaded: &LoadedModule,
-    r1cs: &R1CS,
-    params: &[interpreter::InputValueOrdered],
+    r1cs: &R1CS<F>,
+    params: &[interpreter::InputValueOrdered<F>],
     entry_blob_field_count: usize,
-) -> Result<WasmResult<RawField>, Box<dyn std::error::Error>> {
+) -> Result<WasmResult<F>, Box<dyn std::error::Error>> {
     run_witgen_on(
         loaded,
         r1cs,
@@ -188,11 +220,10 @@ pub fn run_witgen_loaded(
     )
 }
 
-/// [`run_witgen_loaded`] over `F`, with the entry blob's elements already flattened. Its one caller
-/// passes bn254, the field the WASM runtime computes over.
+/// [`run_witgen_loaded`] with the entry blob's elements already flattened.
 fn run_witgen_on<F: MavrosField>(
     loaded: &LoadedModule,
-    r1cs: &R1CS,
+    r1cs: &R1CS<F>,
     input_fields: &[F],
     entry_blob_field_count: usize,
 ) -> Result<WasmResult<F>, Box<dyn std::error::Error>> {
@@ -223,6 +254,7 @@ fn run_witgen_on<F: MavrosField>(
     let mut linker = Linker::new(engine);
     linker.define(&store, "env", "memory", memory)?;
     let instance = linker.instantiate(&mut store, module)?;
+    check_module_field::<F>(&mut store, &instance)?;
 
     // Read __data_end from the WASM module to find where the module's static data ends. Our VM
     // struct and buffers must be placed AFTER this to avoid colliding with the module's data
@@ -386,7 +418,7 @@ fn run_witgen_on<F: MavrosField>(
 }
 
 fn witgen_phase2<F: MavrosField>(
-    r1cs: &R1CS,
+    r1cs: &R1CS<F>,
     mut out_wit_pre_comm: Vec<F>,
     out_wit_post_comm: Vec<F>,
     out_a: Vec<F>,
@@ -462,29 +494,20 @@ fn write_fields_to_memory<F: MavrosField>(
     }
 }
 
-/// Run a compiled module's AD entry point against `ad_coeffs`.
-pub fn run_ad(
+/// Run a compiled module's AD entry point against `ad_coeffs`. A module over a field other than
+/// `F` is an error.
+pub fn run_ad<F: MavrosField>(
     wasm_path: &Path,
-    r1cs: &R1CS,
-    coeffs: &[RawField],
-) -> Result<AdWasmResult<RawField>, Box<dyn std::error::Error>> {
+    r1cs: &R1CS<F>,
+    coeffs: &[F],
+) -> Result<AdWasmResult<F>, Box<dyn std::error::Error>> {
     run_ad_loaded(&LoadedModule::load(wasm_path)?, r1cs, coeffs)
 }
 
 /// [`run_ad`] on a module that is already compiled.
-pub fn run_ad_loaded(
+pub fn run_ad_loaded<F: MavrosField>(
     loaded: &LoadedModule,
-    r1cs: &R1CS,
-    coeffs: &[RawField],
-) -> Result<AdWasmResult<RawField>, Box<dyn std::error::Error>> {
-    run_ad_on(loaded, r1cs, coeffs)
-}
-
-/// [`run_ad_loaded`] over `F`. Its one caller passes bn254, the field the WASM runtime computes
-/// over.
-fn run_ad_on<F: MavrosField>(
-    loaded: &LoadedModule,
-    r1cs: &R1CS,
+    r1cs: &R1CS<F>,
     coeffs: &[F],
 ) -> Result<AdWasmResult<F>, Box<dyn std::error::Error>> {
     let witness_count = r1cs.witness_layout.size();
@@ -510,6 +533,7 @@ fn run_ad_on<F: MavrosField>(
     let mut linker = Linker::new(engine);
     linker.define(&store, "env", "memory", memory)?;
     let instance = linker.instantiate(&mut store, module)?;
+    check_module_field::<F>(&mut store, &instance)?;
 
     let data_end_global = instance
         .get_global(&mut store, "__data_end")
@@ -615,7 +639,7 @@ fn run_ad_on<F: MavrosField>(
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{ConstraintsLayout, WitnessLayout};
+    use mavros_artifacts::{ConstraintsLayout, Field, WitnessLayout};
 
     use super::*;
 
@@ -646,14 +670,14 @@ mod tests {
     #[should_panic(expected = "the AD run reads one coefficient per constraint")]
     fn an_ad_run_needs_one_coefficient_per_constraint() {
         let (loaded, r1cs) = empty_module_and_system();
-        let _ = run_ad_loaded(&loaded, &r1cs, &[RawField::from(1u64)]);
+        let _ = run_ad_loaded(&loaded, &r1cs, &[Field::from(1u64)]);
     }
 
     #[test]
     #[should_panic(expected = "1 flattened input fields supplied but the entry has 2")]
     fn a_witgen_run_needs_the_entry_blob_field_count() {
         let (loaded, r1cs) = empty_module_and_system();
-        let inputs = [interpreter::InputValueOrdered::Field(RawField::from(1u64))];
+        let inputs = [interpreter::InputValueOrdered::Field(Field::from(1u64))];
         let _ = run_witgen_loaded(&loaded, &r1cs, &inputs, 2);
     }
 }

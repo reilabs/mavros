@@ -85,7 +85,7 @@ impl Rewriter<'_> {
                 self.push(OpCode::Cast {
                     result: *result,
                     value: chain.carry_out.expect("an ordering witnesses its borrow"),
-                    target: CastTarget::Int(1),
+                    target: CastTarget::IntUnchecked(1),
                 });
             }
             OpCode::AssertCmp { kind, .. } => {
@@ -172,7 +172,7 @@ impl Rewriter<'_> {
         let carry = chain
             .carry_out
             .expect("a signed sum or difference witnesses its top carry");
-        let answer_top = self.cast(chain.answer[top], CastTarget::Int(chain.widths[top]));
+        let answer_top = self.relabel(chain.answer[top], chain.widths[top]);
         let answer_sign = self.sign_bit((answer_top, true), chain.widths[top]);
 
         let (left, right) = if subtract {
@@ -250,7 +250,7 @@ impl Rewriter<'_> {
         let place = self.field_const(self.field().two_pow(width));
         let cleared = self.bin(BinaryArithOpKind::UMul, sign, place);
         let flipped = self.bin(BinaryArithOpKind::USub, raised, cleared);
-        (self.cast(flipped, CastTarget::Int(width)), true)
+        (self.relabel(flipped, width), true)
     }
 
     /// A checked sum or difference, whose carry out of the top limb is its overflow.
@@ -313,14 +313,14 @@ impl Rewriter<'_> {
                 self.push(OpCode::Cast {
                     result,
                     value: limb,
-                    target: CastTarget::Int(*width),
+                    target: CastTarget::IntUnchecked(*width),
                 });
             }
         } else {
             let limbs: Vec<ValueId> = kept
                 .into_iter()
                 .zip(widths)
-                .map(|(limb, width)| self.cast(limb, CastTarget::Int(*width)))
+                .map(|(limb, width)| self.relabel(limb, *width))
                 .collect();
             let whole = self.recombine(&limbs, widths, bits);
             self.push(OpCode::Cast {
@@ -342,7 +342,7 @@ impl Rewriter<'_> {
                 Some(pattern.cast(width))
             }
             Some(Constant::Field(element)) => {
-                let limbs = element.into_bigint().0;
+                let limbs = element.canonical_limbs();
                 assert!(
                     IntBits::field_limbs_fit(&limbs, width),
                     "ICE: a known answer limb does not fit its width of {width} bits"

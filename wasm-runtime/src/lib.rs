@@ -1,10 +1,10 @@
 //! Runtime Library for Mavros WASM
 //!
 //! Provides field arithmetic and heap allocation called by LLVM-generated WASM. Field elements are
-//! 4 x i64 limbs in Montgomery form.
+//! Montgomery-form storage cells: 4 x i64 on bn254, one on Goldilocks (see [`goldilocks`]).
 //!
-//! ABI (matching LLVM's wasm32 lowering of [4 x i64]):
-//!   __field_mul(result_ptr, a0, a1, a2, a3, b0, b1, b2, b3)
+//! bn254's ABI (matching LLVM's wasm32 lowering of [4 x i64]):
+//!   __bn254_mul(result_ptr, a0, a1, a2, a3, b0, b1, b2, b3)
 //!
 //! VM struct access (forward-pass writes, AD accumulators, AD witness/coeff counters) is emitted
 //! inline in the generated LLVM module as GEP/load/store against the vm_ptr — see
@@ -83,8 +83,8 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
 // the symbol names `FieldRuntimeSymbols` (`compiler/src/compiler/codegen/llssa_to_llvm.rs`) gives
 // that field, passed positionally in the matcher's order, which is the order it defines them in. An
 // operand is the type's Montgomery storage, four limbs by value; a field result comes back through
-// `result_ptr`. The helpers expand at the call site beside the entry points, so a second field's
-// instance needs a separate module.
+// `result_ptr`. The helpers expand at the call site beside the entry points. A one-cell field has a
+// different ABI, so [`goldilocks`] defines its entry points without this macro.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 macro_rules! field_runtime {
@@ -211,7 +211,6 @@ macro_rules! field_runtime {
         }
 
         /// `a / b`, and zero when `b` is zero.
-        // FIELD-ASSUMPTION: L4-inverse
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $div(
             result_ptr: *mut u64,
@@ -225,6 +224,7 @@ macro_rules! field_runtime {
             b3: i64,
         ) {
             use ark_ff::AdditiveGroup;
+
             let a = limbs_to_fr(a0, a1, a2, a3);
             let b = limbs_to_fr(b0, b1, b2, b3);
             let result = if b == <$field>::ZERO {
@@ -255,16 +255,16 @@ macro_rules! field_runtime {
     };
 }
 
-// FIELD-ASSUMPTION: L1-direct-ref (1 sites)
+// bn254's instance.
 field_runtime! {
     ark_bn254::Fr,
-    __field_mul,
-    __field_from_limbs,
-    __field_to_limbs,
-    __field_sub,
-    __field_add,
-    __field_div,
-    __field_lt,
+    __bn254_mul,
+    __bn254_from_limbs,
+    __bn254_to_limbs,
+    __bn254_sub,
+    __bn254_add,
+    __bn254_div,
+    __bn254_lt,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -622,6 +622,8 @@ pub unsafe extern "C" fn __int_slt(a: *const u64, b: *const u64, limbs: u32, bit
     }
 }
 
+mod goldilocks;
+
 /// The runtime helpers' conformance to the normative model in `mavros-int-semantics`.
 ///
 /// Only the LLVM backend calls these helpers, so they conform under its `llvm` tag and its
@@ -973,11 +975,11 @@ mod int_semantics_conformance {
                 limbs[..pattern.limb_count()].copy_from_slice(pattern.limbs());
                 let [l0, l1, l2, l3] = limbs.map(|limb| limb as i64);
                 let mut out = [0u64; 4];
-                unsafe { super::__field_from_limbs(out.as_mut_ptr(), l0, l1, l2, l3) };
+                unsafe { super::__bn254_from_limbs(out.as_mut_ptr(), l0, l1, l2, l3) };
                 assert_eq!(
                     out,
                     storage(&mavros_int_semantics::int_to_field(&pattern, &modulus)),
-                    "__field_from_limbs of {pattern:?}"
+                    "__bn254_from_limbs of {pattern:?}"
                 );
                 checked += 1;
             }
@@ -985,11 +987,11 @@ mod int_semantics_conformance {
         for canonical in corners::field_cast_elements(&modulus) {
             let [l0, l1, l2, l3] = storage(&canonical).map(|limb| limb as i64);
             let mut out = [0u64; 4];
-            unsafe { super::__field_to_limbs(out.as_mut_ptr(), l0, l1, l2, l3) };
+            unsafe { super::__bn254_to_limbs(out.as_mut_ptr(), l0, l1, l2, l3) };
             assert_eq!(
                 IntBits::from_limbs(packing, &out),
                 mavros_int_semantics::field_to_int(&canonical, &modulus, packing),
-                "__field_to_limbs of {canonical}"
+                "__bn254_to_limbs of {canonical}"
             );
             checked += 1;
         }
@@ -1172,11 +1174,11 @@ mod field_entry_points {
     fn arithmetic_matches_the_field() {
         for a in samples() {
             for b in samples() {
-                assert_eq!(binary(super::__field_add, a, b), a + b);
-                assert_eq!(binary(super::__field_sub, a, b), a - b);
-                assert_eq!(binary(super::__field_mul, a, b), a * b);
+                assert_eq!(binary(super::__bn254_add, a, b), a + b);
+                assert_eq!(binary(super::__bn254_sub, a, b), a - b);
+                assert_eq!(binary(super::__bn254_mul, a, b), a * b);
                 let quotient = if b == Fr::ZERO { Fr::ZERO } else { a / b };
-                assert_eq!(binary(super::__field_div, a, b), quotient);
+                assert_eq!(binary(super::__bn254_div, a, b), quotient);
             }
         }
     }
@@ -1189,7 +1191,7 @@ mod field_entry_points {
         for a in samples() {
             for b in samples() {
                 let ([a0, a1, a2, a3], [b0, b1, b2, b3]) = (storage(a), storage(b));
-                let lt = unsafe { super::__field_lt(a0, a1, a2, a3, b0, b1, b2, b3) };
+                let lt = unsafe { super::__bn254_lt(a0, a1, a2, a3, b0, b1, b2, b3) };
                 let canonical = a.into_bigint() < b.into_bigint();
                 assert_eq!(lt, canonical, "{a} < {b}");
                 storage_disagrees |= canonical != (a.0 < b.0);
@@ -1202,8 +1204,8 @@ mod field_entry_points {
     fn limbs_are_the_canonical_integer() {
         for x in samples() {
             let canonical = x.into_bigint().0;
-            assert_eq!(unary(super::__field_to_limbs, x.0.0), canonical);
-            assert_eq!(unary(super::__field_from_limbs, canonical), x.0.0);
+            assert_eq!(unary(super::__bn254_to_limbs, x.0.0), canonical);
+            assert_eq!(unary(super::__bn254_from_limbs, canonical), x.0.0);
         }
     }
 }

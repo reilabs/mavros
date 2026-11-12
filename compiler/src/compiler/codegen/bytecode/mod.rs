@@ -1139,6 +1139,7 @@ impl CodeGen {
                         hlssa::CastTarget::Map(_)
                             | hlssa::CastTarget::ValueOf
                             | hlssa::CastTarget::FieldLimbs
+                            | hlssa::CastTarget::IntUnchecked(_)
                     ) {
                         ice!(
                             "{} cast should have been lowered before bytecode codegen",

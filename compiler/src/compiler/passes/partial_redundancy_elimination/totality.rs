@@ -164,6 +164,7 @@ impl<'a> TotalityOracle<'a> {
                 | CastTarget::Field
                 | CastTarget::FieldLimbs
                 | CastTarget::Int(_)
+                | CastTarget::IntUnchecked(_)
                 | CastTarget::WitnessOf
                 | CastTarget::ValueOf
                 | CastTarget::ArrayToSlice => true,

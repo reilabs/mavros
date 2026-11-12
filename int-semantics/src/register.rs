@@ -238,6 +238,7 @@ pub const EVALUATORS: &[Evaluator] = &[
             "compiler/src/compiler/codegen/llssa_to_llvm.rs",
             "compiler/src/compiler/ssa/hlssa_to_llssa.rs",
             "wasm-runtime/src/lib.rs",
+            "wasm-runtime/src/goldilocks.rs",
             "limb-arith/src/lib.rs",
         ],
         conformance: &[
@@ -288,6 +289,10 @@ pub const EVALUATORS: &[Evaluator] = &[
             Conformance {
                 path: "wasm-runtime/src/lib.rs",
                 test: "the_helper_field_conversions_agree_with_the_model",
+            },
+            Conformance {
+                path: "wasm-runtime/src/goldilocks.rs",
+                test: "the_goldilocks_field_conversions_agree_with_the_model",
             },
             Conformance {
                 path: "compiler/tests/bigints/main.rs",

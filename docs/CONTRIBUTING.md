@@ -57,8 +57,8 @@ The functional runner runs every discovered binary package under both BN254 and 
 `STATUS.md` identifies each row's field and reports a separate success percentage for each field;
 the regression and growth checks compare only matching test/field pairs. Older reports without a
 field column are treated as BN254 baselines. Success percentages count passed or not-applicable
-pipeline stages, excluding intentionally ignored tests. Unsupported Goldilocks frontend, input
-decoding, and WASM operations remain visible as failures.
+pipeline stages, excluding intentionally ignored tests. Unsupported Goldilocks frontend and input
+decoding remain visible as failures.
 
 CI runs the two fields as separate parallel corpus jobs. Pass `--field bn254` or
 `--field goldilocks` to run the full corpus for just one field locally. The regression job waits for
@@ -67,10 +67,10 @@ both reports and combines them with
 usual baseline comparisons and result posting. Merging requires both fields and matching test lists.
 
 To investigate one package and field, run
-`cargo run --bin test-runner -- --run-single <package-path> --field goldilocks` inside the devshell.
-Single-package and determinism checks default to BN254. The CLI's normal compilation commands also
-retain their BN254 default; library callers can select a frontend field with
-`Driver::run_noir_compiler_for_field`.
+`cargo run --bin test-runner -- --run-single <package-path>` inside the devshell. `--run-single` and
+`--check-determinism` default take `--field` to select a field, defaulting to `bn254` if not
+specified. Library callers name the field as the `FieldConfig` they pass to
+`Driver::run_noir_compiler`, or as the type parameter of `mavros_compiler::api`'s functions.
 
 `make unit-test` uses [cargo-nextest](https://nexte.st/), pinned by the Nix flake, to schedule tests
 across all workspace test binaries in parallel. It first builds the WASM runtime once and shares its
@@ -166,16 +166,18 @@ This works as follows:
 
 1. The compiler lowers the witness generator SSA to LLVM IR (using
    [`inkwell`](https://github.com/TheDan64/inkwell)/LLVM 22), compiling it for the `wasm32` target.
-   `wasm32` target.
-2. The generated WASM calls a small set of external functions (`__field_mul`, `__write_witness`,
-   `__write_a/b/c`) that are implemented in the [`mavros-wasm-runtime`](../wasm-runtime/) crate.
-   This runtime handles BN254 field arithmetic and writes outputs into memory.
+2. The generated WASM calls a small set of runtime functions that are implemented in the
+   [`mavros-wasm-runtime`](../wasm-runtime/) crate and linked into the module: field arithmetic
+   (`__bn254_*` and `__goldilocks_*`), wide-integer helpers (`__int_*`) and the allocator (`malloc`,
+   `free`). It exports `__mavros_field` to ensure that it is not loaded on a host that does not
+   support its field.
 3. A `.wasm.meta.json` sidecar file is written alongside the `.wasm` with the ABI and R1CS layout
    info, so the host knows how to set up the witness generator's inputs and interpret its outputs.
 
 Running with `--emit-wasm` will execute the full compilation pipeline, and _additionally_ emit the
 `mavros_debug/program.wasm` and `mavros_debug/program.wasm.meta.json`. This can be combined with the
-`--emit-llvm` flag to also save the intermediate LLVM IR as an `.ll` file.
+`--emit-llvm` flag to also save the intermediate LLVM IR as an `.ll` file, and with
+`--field goldilocks` to emit a module over Goldilocks.
 
 Pass `--include-debug-info` to additionally emit `mavros_debug/program.debug.wasm`. It is a valid,
 standalone WebAssembly debug companion containing the module structure and DWARF custom sections.

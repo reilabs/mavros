@@ -1,5 +1,10 @@
+/// `x` read as a `T`, which must be an integer, a `bool` or a `Field`.
+///
+/// On a witness this is a pure reinterpretation: it imposes no constraints, so the caller must
+/// bound `x` below `2^bits` itself, or the circuit carries the whole element under a narrower
+/// type. On a pure value it truncates, as `x as T` does.
 #[foreign(unsafe_cast)]
-pub fn unsafe_cast<T>(x: Field) -> T {}
+pub(crate) fn unsafe_cast<T>(x: Field) -> T {}
 
 #[foreign(spread_inner)]
 fn spread_inner(value: u32, bits: u32) -> u64 {}

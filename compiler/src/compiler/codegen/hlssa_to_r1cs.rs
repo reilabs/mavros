@@ -1,6 +1,5 @@
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 
-use ark_ff::BigInteger;
 use num_bigint::BigUint;
 use tracing::{instrument, warn};
 
@@ -22,7 +21,7 @@ use crate::compiler::{
             Type, TypeExpr,
         },
     },
-    util::{field_constant, field_residue, host_word},
+    util::{biguint_of_limbs, field_constant, field_residue, host_word, limb_bit},
 };
 
 pub use mavros_artifacts::{
@@ -64,7 +63,6 @@ pub struct ArrayData<F: MavrosField = RawField> {
 
 /// What R1CS generation knows of one SSA value as it executes the program symbolically.
 #[derive(Clone, Debug)]
-// FIELD-ASSUMPTION: L4-eval
 pub enum Value<F: MavrosField = RawField> {
     /// A Field element value known at compile time.
     Const(Field),
@@ -131,8 +129,7 @@ impl<F: MavrosField> Value<F> {
     /// The magnitude of a constant, read as an integer.
     fn magnitude(&self) -> BigUint {
         match self {
-            // FIELD-ASSUMPTION: L4-decompose
-            Value::Const(c) => c.into_bigint().into(),
+            Value::Const(c) => biguint_of_limbs(&c.canonical_limbs()),
             Value::Wide(pattern) => pattern.into(),
             r => ice!("expected an integer constant, got {r:?}"),
         }
@@ -154,7 +151,6 @@ impl<F: MavrosField> Value<F> {
         }
     }
 
-    // FIELD-ASSUMPTION: L4-eval
     pub fn add(&self, other: &Value<F>) -> Value<F> {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs + rhs),
@@ -205,13 +201,11 @@ impl<F: MavrosField> Value<F> {
         self.add(&other.neg())
     }
 
-    // FIELD-ASSUMPTION: L4-eval
     pub fn div(&self, other: &Value<F>) -> Value<F> {
         let Value::Const(rhs) = other else { ice!("expected constant") };
         // `LowerPureGuards` asserts every field division is defined, so `R1CGen` rejects a program
         // with a zero divisor at that assertion, which precedes the division. Reaching here with
         // one means that ordering broke.
-        // FIELD-ASSUMPTION: L4-inverse
         let Some(inverse) = rhs.inverse() else {
             ice!(
                 "zero divisor reached the R1CS field division fold; \
@@ -259,9 +253,8 @@ impl<F: MavrosField> Value<F> {
     /// to operands.
     fn const_u128(&self, what: &str) -> Option<u128> {
         match self {
-            // FIELD-ASSUMPTION: L4-decompose
             Value::Const(c) => {
-                let limbs = c.into_bigint().0;
+                let limbs = c.canonical_limbs();
                 IntBits::field_limbs_fit(&limbs, HOST_WORD_BITS)
                     .then(|| host_word(&IntBits::from_field_limbs(&limbs, HOST_WORD_BITS)))
             }
@@ -279,7 +272,10 @@ impl<F: MavrosField> Value<F> {
             let Value::Const(c) = self else {
                 ice_unreachable!("const_u128 panics on a non-constant")
             };
-            ice!("expected {what}, but field value is {}", c.into_bigint())
+            ice!(
+                "expected {what}, but field value is {}",
+                biguint_of_limbs(&c.canonical_limbs())
+            )
         })
     }
 
@@ -319,14 +315,12 @@ impl<F: MavrosField> Value<F> {
     /// here is not truncated by anything.
     fn expect_pattern(&self, bits: usize) -> IntBits {
         match self {
-            // FIELD-ASSUMPTION: L4-decompose
-            Value::Const(c) => IntBits::from_field_limbs(&c.into_bigint().0, bits),
+            Value::Const(c) => IntBits::from_field_limbs(&c.canonical_limbs(), bits),
             Value::Wide(pattern) => pattern.cast(bits),
             r => ice!("expected an int{bits}, got {r:?}"),
         }
     }
 
-    // FIELD-ASSUMPTION: L4-eval
     pub fn mul(&self, other: &Value<F>) -> Value<F> {
         match (self, other) {
             (Value::Const(lhs), Value::Const(rhs)) => Value::Const(lhs * rhs),
@@ -636,7 +630,6 @@ impl<F: MavrosField> symbolic_executor::Context<Value<F>> for R1CGen<F> {
     }
 }
 
-// FIELD-ASSUMPTION: L4-eval
 impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
     fn cmp(&self, b: &Self, kind: CmpKind, bits: Option<usize>, ctx: &mut R1CGen<F>) -> Self {
         if let Some(holds) = Value::wide_unsigned_cmp(kind, self, b) {
@@ -855,7 +848,6 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
     /// calls: the source is read as a pattern up to the window's top, and the window is minted back
     /// through `Value::of_pattern`. A window of an element is below the modulus; only a window of a
     /// [`Value::Wide`] can exceed it.
-    // FIELD-ASSUMPTION: L4-decompose
     fn bit_range(
         &self,
         offset: usize,
@@ -904,6 +896,9 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
             (hlssa::CastTarget::FieldLimbs, _) => {
                 ice!("a {cast_target} cast should have been lowered by WideWitnessInts")
             }
+            (hlssa::CastTarget::IntUnchecked(_), _) => {
+                ice!("a {cast_target} cast should have been rewritten by LowerWitnessNarrowingCast")
+            }
             _ => self.clone(),
         }
     }
@@ -922,7 +917,6 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
         Ok(())
     }
 
-    // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(
         &self,
         endianness: hlssa::Endianness,
@@ -931,15 +925,8 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
         ctx: &mut R1CGen<F>,
     ) -> Self {
         let value_const = self.expect_constant();
-        let mut bits = value_const.into_bigint().to_bits_le();
-        // Truncate or pad to the desired output size
-        if bits.len() > size {
-            bits.truncate(size);
-        } else {
-            while bits.len() < size {
-                bits.push(false);
-            }
-        }
+        let limbs = value_const.canonical_limbs();
+        let bits: Vec<bool> = (0..size).map(|bit| limb_bit(&limbs, bit)).collect();
         // Handle endianness
         let final_bits = match endianness {
             crate::compiler::ssa::hlssa::Endianness::Little => bits,
@@ -1034,15 +1021,10 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
 
     fn mem_op(&self, _kind: RefCountOp, _ctx: &mut R1CGen<F>) {}
 
-    // FIELD-ASSUMPTION: L4-decompose
     fn rangecheck(&self, max_bits: usize, _ctx: &mut R1CGen<F>) -> Result<(), AssertionFailure> {
         let self_const = self.expect_constant();
-        let check = self_const
-            .into_bigint()
-            .to_bits_le()
-            .iter()
-            .skip(max_bits)
-            .all(|b| !b);
+        let limbs = self_const.canonical_limbs();
+        let check = (max_bits..limbs.len() * u64::BITS as usize).all(|bit| !limb_bit(&limbs, bit));
         if !check {
             return Err(AssertionFailure::new(format!(
                 "rangecheck failed: {self_const:?} does not fit in {max_bits} bits"
@@ -1051,7 +1033,6 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
         Ok(())
     }
 
-    // FIELD-ASSUMPTION: L4-decompose
     fn to_radix(
         &self,
         radix: &Radix<Self>,
@@ -1062,7 +1043,12 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
     ) -> Self {
         match radix {
             Radix::Bytes => {
-                let mut bytes = self.expect_constant().into_bigint().to_bytes_le();
+                let mut bytes: Vec<u8> = self
+                    .expect_constant()
+                    .canonical_limbs()
+                    .iter()
+                    .flat_map(|limb| limb.to_le_bytes())
+                    .collect();
                 if bytes.len() > size {
                     bytes.truncate(size);
                 } else {
@@ -1515,10 +1501,10 @@ impl<F: MavrosField> R1CGen<F> {
                         // -> y = m_n / (alpha - n + beta*2^n),
                         //    constraint `y * (alpha - n + beta*2^n) - m_n = 0`
                         //
-                        // FIELD-ASSUMPTION: L4-decompose. The largest value is 2^(2^size - 1),
-                        // which is 2^127 at the widest size `MAX_POW2_TABLE_SIZE` admits; that
-                        // ceiling is set so the widest row clears the modulus, so no row wraps.
-                        // `two_pow` would wrap silently if it ever did.
+                        // The largest value is 2^(2^size - 1), which is 2^127 at the widest size
+                        // `MAX_POW2_TABLE_SIZE` admits; that ceiling is set so the widest row
+                        // clears the modulus, so no row wraps. `two_pow` would wrap silently if it
+                        // ever did.
                         let len = 1usize << size;
                         let mut sum_lhs: LC<F> = vec![];
                         for n in 0..len {
@@ -2960,6 +2946,130 @@ mod int_semantics_conformance {
                     cast.expect_pattern(bits),
                     model_field_to_int(field, &element, bits),
                     "{field:?}: {canonical} as u{bits}"
+                );
+            }
+        }
+    }
+
+    /// Every fold that reads a constant element as its integer agrees with the model at every
+    /// corner on both fields: its bits and bytes, a bit window, an ordering, a division, and an
+    /// unsigned comparison with a pattern past the modulus, which only the magnitudes answer.
+    #[test]
+    fn the_element_folds_read_the_canonical_integer_on_both_fields() {
+        check_element_folds::<RawField>(FieldConfig::bn254());
+        check_element_folds::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks());
+    }
+
+    fn check_element_folds<F: mavros_artifacts::MavrosField>(field: FieldConfig) {
+        use num_bigint::BigUint;
+        use symbolic_executor::Value as _;
+
+        use crate::compiler::{
+            ssa::hlssa::{CmpKind, Endianness, Radix},
+            util::test::{element_of, modulus_of},
+        };
+
+        let mut generator = super::R1CGen::<F>::new(field);
+        let p = modulus_of(field);
+        let bits = field.field_bit_size() as usize;
+        let bytes = bits.div_ceil(8);
+        let digits = |value: super::Value<F>| -> Vec<u64> {
+            value
+                .expect_array()
+                .borrow()
+                .data
+                .iter()
+                .map(super::Value::<F>::expect_u64)
+                .collect()
+        };
+        let past = super::Value::<F>::of_pattern(field, IntBits::from_biguint(bits + 1, &p));
+        let elements = corners::field_cast_elements(&p);
+        for canonical in &elements {
+            let element = element_of(field, canonical);
+            let value = super::Value::<F>::Const(element);
+
+            let little: Vec<u64> = (0..bits)
+                .map(|index| u64::from(canonical.bit(index as u64)))
+                .collect();
+            let big: Vec<u64> = little.iter().rev().copied().collect();
+            for (endianness, want) in [(Endianness::Little, &little), (Endianness::Big, &big)] {
+                let got = value.to_bits(endianness, bits, &Type::field(), &mut generator);
+                assert_eq!(
+                    &digits(got),
+                    want,
+                    "{field:?}: {canonical} to {endianness:?} bits"
+                );
+            }
+            let mut want = canonical.to_bytes_le();
+            want.resize(bytes, 0);
+            let got = value.to_radix(
+                &Radix::Bytes,
+                Endianness::Little,
+                bytes,
+                &Type::field(),
+                &mut generator,
+            );
+            let want: Vec<u64> = want.into_iter().map(u64::from).collect();
+            assert_eq!(digits(got), want, "{field:?}: {canonical} to bytes");
+
+            for (offset, width) in [
+                (0, 1),
+                (0, 8),
+                (3, 10),
+                (bits / 2 - 4, 8),
+                (bits - 8, 8),
+                (bits - 1, 1),
+                (1, bits - 1),
+                (0, bits),
+            ] {
+                let want = (canonical >> offset) % (BigUint::from(1u8) << width);
+                let got = value.bit_range(offset, width, &Type::field(), &mut generator);
+                assert_eq!(
+                    got.expect_constant(),
+                    element_of(field, &want),
+                    "{field:?}: bits {offset}..+{width} of {canonical}"
+                );
+            }
+
+            let ordered = |a: &super::Value<F>, b: &super::Value<F>, kind| {
+                <super::Value<F> as symbolic_executor::Value<super::R1CGen<F>>>::cmp(
+                    a,
+                    b,
+                    kind,
+                    None,
+                    &mut super::R1CGen::<F>::new(field),
+                )
+                .expect_constant()
+                    == field.one()
+            };
+            assert!(
+                !ordered(&value, &past, CmpKind::Eq),
+                "{field:?}: {canonical} == p"
+            );
+            assert!(
+                ordered(&value, &past, CmpKind::ULt),
+                "{field:?}: {canonical} < p"
+            );
+            assert!(
+                !ordered(&past, &value, CmpKind::ULt),
+                "{field:?}: p < {canonical}"
+            );
+
+            for divisor in &elements {
+                let other = super::Value::<F>::Const(element_of(field, divisor));
+                assert_eq!(
+                    ordered(&value, &other, CmpKind::ULt),
+                    canonical < divisor,
+                    "{field:?}: {canonical} < {divisor}"
+                );
+                if divisor.bits() == 0 {
+                    continue;
+                }
+                let quotient = value.div(&other).expect_constant();
+                assert_eq!(
+                    quotient * element_of(field, divisor),
+                    element,
+                    "{field:?}: {canonical} / {divisor}"
                 );
             }
         }

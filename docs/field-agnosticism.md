@@ -27,8 +27,7 @@ field it is operating over (see #120). This is a multi-stage process that will o
       schoolbook limbs + a multi-cell representation) and **repeated LogUp** (`L4-logup-challenges`
       — one challenge is unsound on a small field). The user-facing `--logup-soundness=<bits>` flag
       (default 128) sizes the repetitions the argument needs (one on bn254), and R1CS generation,
-      witgen, AD and the forward verifier repeat it that many times; the LLVM and WASM paths refuse
-      more than one.
+      witgen, AD (on the VM and on WASM) and the forward verifier repeat it that many times.
 
 **Phase 3 Complete:** a `FieldConfig` is homed on the `SSA` (`ssa/mod.rs`) and reached through
 `ssa.field()` / `b.field()` / the `HLEmitter::field()` trait method; the middle-end's three symbolic
@@ -43,9 +42,9 @@ phases**, not left undone here:
 
 - The **fourth evaluator**, `codegen/hlssa_to_r1cs.rs`, which P4 moved onto `FieldElement` (see the
   Phase 4 note).
-- The `--field` selector that will seed `SSA::field` from the `Driver` (P5). `SSA::empty` seeds
-  `FieldConfig::bn254()`, which is why P3 and P4's field generalisation leave bn254's artifacts
-  byte-identical.
+- The `--field` selector, which seeds `SSA::field` from the `Driver` in P5 (see Layer 5's **Field
+  selection**). `SSA::empty` seeds `FieldConfig::bn254()`, which is why P3 and P4's field
+  generalisation leave bn254's artifacts byte-identical.
 
 **Phase 4 Complete:** every field opcode is generated per field. `#[interpreter(fields(..))]` in
 `vm/src/bytecode.rs` names the fields (bn254 and the one-cell `Goldilocks` of
@@ -67,7 +66,7 @@ Underneath:
   converting to the raw `LC` coefficients with `.to_ark()` where a constant meets one.
 - **The WASM path** carries the field into LLSSA (`LLSSA::with_field(hlssa.field())`), names the
   runtime's entry points through `FieldRuntimeSymbols::of(field)`, and the runtime expands
-  `field_runtime!` once per field (bn254 keeps its `__field_*` names).
+  `field_runtime!` for bn254.
 
 The generalisation leaves bn254's R1CS, bytecode, witnesses and WASM module code byte-identical; the
 renumbering below moves the bytecode and its debug sidecar. The WASM module bytes differ only
@@ -76,7 +75,7 @@ through the runtime archive, where `field_runtime!` relocates three of the runti
 
 Carried into P5: the WASM struct width (`L3-llstruct`) and the `[4 x i64]` runtime ABI, the
 `BigInt<4>`/`[u64; 4]` signatures (`L3-felt-limbs`), the raw `Field` alias (`L1-alias`) and its
-serde (`L1-serde`), a second field's runtime instance, `wasm-runner` and the `--field` selector.
+serde (`L1-serde`), a second field's runtime instance and the `--field` selector.
 
 **Opcode renumbering:** P4 ends by dropping the opcodes the compiler never emits (`reserved_92`,
 `assert_r1c`, `unbox_field`, `tuple_alloc`, `tuple_proj`) and the always-empty struct-layout table
@@ -105,21 +104,30 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
   `MavrosField::from_element`, and a serialized coefficient is `F::CANONICAL_LIMBS` limbs.
 - **The R1CS artifact** (`r1cs.bin`: a `MAVR1CS` header with format version, field tag and digest)
   names the field and the format of the system it carries.
-- **The WASM path** refuses Goldilocks (`Error::WasmFieldUnsupported`): the runtime has no
-  Goldilocks instance.
+- **The WASM path** runs Goldilocks. LLSSA and LLVM read an element's width from `FieldConfig`, and
+  the runtime's `__goldilocks_*` entry points (`wasm-runtime/src/goldilocks.rs`) take and return one
+  `u64`, because LLVM returns a one-`i64` struct directly on wasm32. A module exports its field
+  (`__mavros_field`), and a host over another field refuses it.
 - **The Noir path** compiles over BN254 and Goldilocks; a Noir `Field` literal enters a configured
   field only below its modulus (`L1-noir-frontend`).
 - **LogUp:** at the default `--logup-soundness=128`, a Goldilocks program with a lookup argument
   repeats the argument three times (four for `2^20 < D ≤ 2^31`; `L4-logup-challenges`).
+- **Field selection:** `mavros --field` and the type parameter of `mavros_compiler::api`'s functions
+  pick the field (Layer 5's **Field selection**).
 
 Goldilocks is tested through hand-built SSA (`compiler/tests/bigints/goldilocks.rs`): field
 arithmetic, equality and constant folding at the field's boundary values, a witnessed 64-bit
 decomposition, the integer operations of Phase 5b, and the pure casts across the field boundary; the
-witnessed casts run on both fields in `compiler/tests/bigints/main.rs`. One gap refuses through the
-`unsupported` funnel: an integer entry parameter wider than 63 bits, since an `Int` entry parameter
-is one entry-blob element. An integer return that wide is not refused: it is bound as its residue
-modulo `p` in one public column, so two returns one modulus apart publish the same value, and the
-published value can be one the program's assertions on the integer exclude.
+witnessed casts run on both fields in `compiler/tests/bigints/main.rs`. Every program is also
+compiled to WASM, its AD run there, and its witnesses generated there, with two exceptions. The
+operand sweeps of the Phase 5b operations generate witnesses on the VM only. The limbed matrix past
+64 bits has no WASM module at all: it is large enough to reach the locals limit of a wasm function,
+so `every_limbed_operation_runs_on_wasm_at_128_bits` samples it on WASM instead, one accepted and
+one rejected pair to a program. One gap is refused with an error: an integer entry parameter wider
+than 63 bits, since an `Int` entry parameter is one entry-blob element. An integer return that wide
+is not refused: it is bound as its residue modulo `p` in one public column, so two returns one
+modulus apart publish the same value, and the published value can be one the program's assertions on
+the integer exclude.
 
 **Phase 5b (integer arithmetic on Goldilocks):** the witness limb is the widest power of two `h`
 whose limb product is an injective integer, `2h <= widest_injective_int_bits`
@@ -141,27 +149,33 @@ a carry, which neither column probe reaches.
 `--logup-soundness` target before sealing and repeats the argument at independent challenges over
 shared multiplicities, so the pre-commitment witness is unchanged. bn254 keeps `K = 1`, with
 byte-identical constraints and witnesses; `r1cs.bin` (format version 2) and the VM header (format
-version 5) carry `K`. The layout is under `L4-logup-challenges` below.
+version 5) carry `K`. The layout is under `L4-logup-challenges` below. The WASM path repeats the
+argument as the VM does, and a one-repetition module holds exactly the instructions of a single
+argument.
 
 **Cast semantics:** an HLSSA cast across the field boundary is total on every field, but for the
-bare witnessed narrowing below. `Int(n) → Field` reduces the integer modulo `p`, and
-`Field → Int(n)` truncates or zero-extends the element's canonical value (`docs/int-semantics.md`,
-"Field Casts"). Mavros refuses no cast into `Field`; Noir's elaborator refuses a non-injective
-`uN as Field` in Noir source. The SCCP folder and the specializer through it, the cost interpreter,
-the value ranges, R1CS generation and the VM are checked against the `mavros-int-semantics` model on
-both fields, and LLVM and the WASM runtime on bn254. On a witness:
+unchecked narrowing below. `Int(n) → Field` reduces the integer modulo `p`, and `Field → Int(n)`
+truncates or zero-extends the element's canonical value (`docs/int-semantics.md`, "Field Casts").
+Mavros refuses no cast into `Field`; Noir's elaborator refuses a non-injective `uN as Field` in Noir
+source. The SCCP folder and the specializer through it, the cost interpreter, the value ranges, R1CS
+generation, the VM, LLVM and the WASM runtime are checked against the `mavros-int-semantics` model
+on both fields. On a witness:
 
 - a wide integer's single residue is its limb sum, and the injective image a lookup needs is a
   separate cast target, `FieldLimbs`, of one element per limb;
 - a witnessed `Field`'s bit window (`x as uN`) decomposes the element into its canonical bytes,
   `B = ⌈k/8⌉` of them for a `k`-bit modulus, and compares them against `p − 1` in two halves split
   at `8·⌈B/2⌉` bits (128 on bn254, 32 on Goldilocks);
-- a bare witnessed narrowing `Field → Int(n)`, with no window in front, relabels the element, so its
-  emitter owes the bound (`L1-noir-frontend`).
+- a witnessed narrowing `Field → Int(n)` truncates as a pure one does: `LowerWitnessNarrowingCast`
+  puts a window in front of any source it cannot bound. `IntUnchecked(n)` is the relabel, for an
+  emitter that bounds the element itself: the entry point's parameters, `WideWitnessInts`' limbs,
+  and the standard library's crate-private `unsafe_cast`. The lowerings after that rule's phase cast
+  elements they have already pinned with a bare `Int`, which is a relabel there.
 
-bn254's constraints, witnesses and bytecode are byte-identical, except where a witnessed `Field`'s
-bit window starts or ends inside a byte: the split of that byte checks its low part too, one more
-8-bit lookup, since the two gap checks alone let the prover push it negative.
+bn254's constraints and witnesses are byte-identical, except where a witnessed `Field`'s bit window
+starts or ends inside a byte: the split of that byte checks its low part too, one more 8-bit lookup,
+since the two gap checks alone let the prover push it negative. Its bytecode is identical or
+smaller: a pure `x as uN` is a single truncating cast, with no bit window.
 
 The rest of Phase 5 is open:
 
@@ -173,13 +187,6 @@ The rest of Phase 5 is open:
   included, so only a hand-built HLSSA program reaches this.
 - **The Noir path** (`L1-noir-frontend`): remaining field-specific builtins and BN254-only crypto
   implementations.
-- **A Goldilocks WASM runtime** (`L3-llstruct`, the `[4 x i64]` runtime ABI, `field_runtime!`), with
-  repeated LogUp: a Goldilocks lookup argument needs `K = 3` or 4, and the LLVM and WASM paths
-  refuse `K > 1` (`Error::WasmLogupRepetitionsUnsupported`) because the LLSSA AD emitters
-  (`hlssa_to_llssa.rs`) bind one repetition's challenges. Emitting them at the `LogupStrides`
-  offsets the VM uses lifts the refusal. WASM witgen's phase 2 runs through the interpreter's
-  `run_phase2`, which fills every repetition from the phase-1 metadata in repetition 0's rows.
-  `repeated_lookup_arguments` in `compiler/tests/verifier.rs` then runs on both backends.
 - **`crypto-primitives`** (Layer 5).
 
 The current state has each site of a field assumption tagged with `// FIELD-ASSUMPTION: <tag>`
@@ -203,7 +210,7 @@ Repetitive clusters of the same operation get one marker per file with a count.
 Completion gate (Phase 5):
 `rg -t rust 'ark_bn254|into_bigint\(|\.0\.0|FELT_LIMBS|FIELD_SIZE|\b254\b'` over
 `compiler/ vm/ mavros-artifacts/ opcode-gen/ wasm-runtime/` returns only façade-internal hits. The
-gate is open: the search returns 162 lines, 44 of them in `compiler/tests/`.
+gate is open: the search returns 132 lines, 44 of them in `compiler/tests/`.
 
 ---
 
@@ -214,26 +221,25 @@ gate is open: the search returns 162 lines, 44 of them in `compiler/tests/`.
 - [x] `compiler/src/compiler/mod.rs` — the **compiler middle-end's** alias is now
       `pub use mavros_artifacts::FieldElement as Field`. Everything from HLSSA constants through the
       passes and analyses rides it.
-- [ ] `mavros-artifacts/src/lib.rs` — `pub type Field = ark_bn254::Fr;` names bn254 for the callers
-      that name no field (the Noir path, WASM, the test runner). `LC`/`R1C`/`R1CS`/
-      `InputValueOrdered` are generic over `F: MavrosField` with `Field` as the default (P5), so the
-      alias is their bn254 instance. `vm/src/lib.rs` re-exports it. `hlssa_to_r1cs`'s `R1CGen<F>`
-      computes its `LC`s in `F` and converts a constant at the boundary with
+- [ ] `mavros-artifacts/src/lib.rs` — `pub type Field = ark_bn254::Fr;` is the bn254 instance of the
+      field-generic types, and the CLI names it only as the `--field bn254` choice. It stays open
+      while it is their default type argument: `LC`/`R1C`/`R1CS`/`InputValueOrdered` are generic
+      over `F: MavrosField` with `Field` as the default (P5), as is `vm/src/interpreter.rs`'s
+      `VerifierResult<F = crate::Field>`, and `vm/src/lib.rs` re-exports it. `hlssa_to_r1cs`'s
+      `R1CGen<F>` computes its `LC`s in `F` and converts a constant at the boundary with
       `MavrosField::from_element`; `Driver::generate_r1cs::<F>` refuses an `F` other than the
       program's field (`Error::R1csFieldMismatch`), and `r1cs_compact::analyze` takes any `R1CS<F>`.
 
 **`FieldConfig` answers per field through exhaustive matches.** Every accessor on
 `mavros-artifacts/src/field/config.rs` that depends on the field is an **exhaustive
 `match self.id`** or delegates to one (`two_pow` and `constant` to `IntoFieldElement`'s integer
-embedding, `modulus_limbs` to `modulus`), so adding a variant to `FieldId` is a compile error at
-every such site, where a debug-only assertion would fire only if something constructed the new
-config. `FieldConfig` also has **no `Default` impl**, so a config cannot be conjured without naming
-a field: between the two, a config can only be constructed deliberately and can only be read through
-a match a new field breaks. P5 gives each accessor its Goldilocks arm (`FieldConfig::goldilocks()`).
-`modulus() -> BigInt<4>` and `modulus_limbs() -> [u64; 4]` carry a canonical integer zero-extended
-to four limbs, and `from_bigint` refuses a Goldilocks integer with a non-zero upper limb, so the
-four-limb signatures describe the canonical integer, never a field's storage width
-(`L3-felt-limbs`).
+embedding), so adding a variant to `FieldId` is a compile error at every such site, where a
+debug-only assertion would fire only if something constructed the new config. `FieldConfig` also has
+**no `Default` impl**, so a config cannot be conjured without naming a field: between the two, a
+config can only be constructed deliberately and can only be read through a match a new field breaks.
+P5 gives each accessor its Goldilocks arm (`FieldConfig::goldilocks()`). `modulus_limbs()` and
+`from_canonical_limbs` carry a canonical integer as the field's own number of limbs, never its
+storage width (`L3-felt-limbs`).
 
 ### `L1-direct-ref` — Direct `ark_bn254::Fr` Refs Bypassing the Alias (Hardcoded, P2)
 
@@ -267,11 +273,13 @@ stays raw by design until P5. By file (count):
       `Value::Const(Field)`, with coefficient arithmetic, `two_pow` and the seal/lookup coefficients
       minted through `ctx.field()`; the `LC` it emits stays raw (see L1-alias).
 - [x] `compiler/src/bin/test_runner.rs` — the functional runner compiles and executes each test
-      under BN254 and Goldilocks, using field-specific AD coefficients and separate success rates.
-      WASM remains BN254-only; unsupported Goldilocks stages are reported as failures.
-- [ ] `wasm-runtime/src/lib.rs` (1) — the `field_runtime!` invocation's `ark_bn254::Fr` (see
-      L3-llstruct).
-- [ ] `compiler/src/api.rs` (1) — `Fr::rand` input setup. Raw, feeds the VM.
+      under BN254 and Goldilocks, on the VM and on WASM, using field-specific AD coefficients and
+      separate success rates. Unsupported Goldilocks stages are reported as failures.
+- [x] `wasm-runtime/src/lib.rs` (1) — the `field_runtime!` invocation's `ark_bn254::Fr`: bn254's
+      runtime instance, which names its field.
+- [x] `compiler/src/api.rs` — `random_ad_coeffs::<F>` draws each coefficient with
+      `MavrosField::random`: arkworks' `Fr::rand` on bn254, and rejection sampling of one `u64` on
+      Goldilocks.
 - [x] `compiler/src/abi_helpers.rs` — ordered inputs and manifest checks are generic over the VM
       field. Input parsing uses the selected modulus and rejects scalars that cannot fit it.
 
@@ -293,20 +301,20 @@ before conversion to the chosen VM field.
 - [x] `compiler/src/compiler/lowering/expression_converter.rs` — `integer_constant` takes a
       literal's magnitude into the configured field, refusing one at or above its modulus with a
       located diagnostic, and negates it for a negative literal (so `-1` is `p - 1` on Goldilocks).
-- [x] `compiler/src/driver.rs` — `run_noir_compiler_for_field` passes the selected field to both
-      Noir's frontend and Mavros' AST lowering. Existing callers default to BN254.
+- [x] `compiler/src/driver.rs` — `run_noir_compiler` passes the `FieldConfig` it is given to both
+      Noir's frontend and Mavros' AST lowering.
 - [x] Mavros' injected stdlib compiles under both fields. BN254-only curve, Poseidon2 and vendored
       bignum modules are field-gated before type checking. ECDSA and Poseidon2 calls on Goldilocks
       produce unavailable-item frontend diagnostics; their BN254 constants are never reduced into
       the smaller field. SHA-256 uses a portable integer implementation on Goldilocks and retains
       the packed spread implementation on BN254. BLAKE's small-field additions likewise use integer
       carries, avoiding native-field bit decomposition. AES is shared.
-- [ ] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` with no `bit_range` in front is a relabel, on
-      every field: `LowerWitnessNarrowingCast` windows an `Int` source only. The constraints carry
-      the whole element while the witness generator truncates it, so an honest witness of a value at
-      or above `2^n` is unsatisfiable, and a dishonest one is bound only by what the program checks.
-      The frontend puts `bit_range(v, 0, n)` before Noir's `x as uN`; `unsafe_cast` emits the bare
-      cast and leaves the bound to its caller.
+- [x] A bare HLSSA `cast WitnessOf(Field) -> Int(n)` present when `LowerWitnessNarrowingCast` runs
+      truncates on every field: the rule windows a witnessed `Field` source as it does an `Int` one,
+      and Noir's `x as uN` reaches it as that bare cast. An emitter that bounds the element itself
+      emits `CastTarget::IntUnchecked`, which the rule rewrites into a plain `Int` with no window.
+      `unsafe_cast` emits one and leaves the bound to its caller, so it is `pub(crate)` in the
+      standard library.
 
 ---
 
@@ -327,10 +335,9 @@ before conversion to the chosen VM field.
 
 ### `L2-lower` — HLSSA→LLSSA Erases Field-ness to Raw Limbs (Representation, P5)
 
-- [ ] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — `lower_constant_to_ll_constant`'s
-      `Constant::Field(fr)` → `LLStruct::field_elem()`. It reads `fr.storage_cells()`, so the
-      _access_ is abstracted; the struct's `FIELD_LIMBS` width is the residual (`L3-llstruct`).
-      These are the Montgomery **storage** limbs; the canonical-limb round-trip op is `L3-limb-op`.
+- [x] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — `lower_constant_to_ll_constant`'s
+      `Constant::Field(fr)` → `LLStruct::field_elem(field)`, reading `fr.storage_cells()`. These are
+      the Montgomery **storage** limbs; the canonical-limb round-trip op is `L3-limb-op`.
 
 ### `L2-seam` — Symbolic-Executor `Value`/`Context` (Type-Parametric, P3 — resolved elsewhere)
 
@@ -354,20 +361,29 @@ before conversion to the chosen VM field.
       element of `ELEM_CELLS` kind, goes through `F::from_canonical_limbs` and asserts
       `cells <= F::CANONICAL_LIMBS`; `codegen::bytecode::lookup_elem_kind` asserts the matching
       bound where the cell count is chosen.
-- [ ] `compiler/src/compiler/passes/instruction_lowering/bit_range.rs` —
-      `decompose_canonical_field_bytes` reads the modulus through its four-limb `BigInt` and holds
-      each half in a `u128`, so the field fits 256 bits. Its shape already follows the modulus
-      (`CanonicalBytes`: `⌈k/8⌉` bytes, split at `8·⌈bytes/2⌉` bits, which needs `p > 2^(split+1)`),
-      so a witnessed `Field`'s bit window works on Goldilocks.
-- [ ] `compiler/src/compiler/util.rs` — `field_constant` builds a `[u64; 4]` because
-      `FieldConfig::from_bigint` takes an `ark_ff::BigInt<4>`. The count moves with that signature,
-      and the width bound it computes then becomes the per-value question it already asks.
+- [x] `mavros-artifacts/src/field/{element,config}.rs` — an element's canonical integer is
+      `FieldElement::canonical_limbs()`, as many limbs as `FieldConfig::canonical_limbs()`, and
+      `FieldConfig::from_canonical_limbs` and `MavrosField::try_from_canonical_limbs` take a slice
+      of any length, where a non-zero limb past the field's is past the modulus. `modulus_limbs()`
+      is a slice too. No compiler signature fixes a limb count, so the compiler bounds no field's
+      width; the bit, byte and radix folds read an element's limbs zero-extended, as far as the
+      operation asks.
+- [x] `compiler/src/compiler/passes/instruction_lowering/bit_range.rs` —
+      `decompose_canonical_field_bytes` reads the modulus as an integer and mints each half from its
+      limbs. Its shape follows the modulus (`CanonicalBytes`: `⌈k/8⌉` bytes, split at `8·⌈bytes/2⌉`
+      bits, which needs `p > 2^(split+1)`), so a witnessed `Field`'s bit window works on Goldilocks.
+- [x] `compiler/src/compiler/util.rs` — `field_constant` passes an integer pattern's limbs to
+      `from_canonical_limbs`, which asks the per-value question: below the modulus or not.
+
+The one width bound left is outside the compiler: a Noir input reaches Mavros as the fork's
+`acvm::FieldElement`, a bn254 element (`L1-noir-frontend`), so a field whose modulus exceeds bn254's
+needs the fork's ABI to carry wider values.
 
 ### `L3-field-size` — 32-byte Field Size in the WASM Host (Representation, P4 — done)
 
 - [x] `compiler/src/wasm_host.rs` — `FIELD_SIZE` is gone: `field_size::<F>()` is
-      `F::STORAGE_CELLS * 8`, asserting `F` has `LLStruct::FIELD_LIMBS` cells (the runtime's
-      element), and the region readers and writers go through `from_frame_cells`/`to_frame_cells`.
+      `F::STORAGE_CELLS * 8`, and the region readers and writers go through
+      `from_frame_cells`/`to_frame_cells`.
 
 ### `L3-opcode-width` — The Opcode Macro's 4-limb Field Operand (Representation, P4 — done)
 
@@ -380,42 +396,40 @@ cells.
 - [x] `opcode-gen/src/lib.rs` — the serializer encodes through `F::to_frame_cells`, and the printer
       formats the element.
 
-### `L3-llstruct` — LLVM/WASM Field Struct (Representation, P5)
+### `L3-llstruct` — LLVM/WASM Field Struct (Representation, P5 — done)
 
-- [ ] `compiler/src/compiler/ssa/llssa/mod.rs` — `LLStruct::FIELD_LIMBS`, the count both
-      `field_elem()` and `limbs()` are built from and the one every packing reads. Becomes per-field
-      width; it is the single place that has to change for `L3-limb-op` to follow.
-- [ ] `compiler/src/compiler/codegen/llssa_to_llvm.rs` — `field_llvm_type()`/`limbs_llvm_type()`.
-- [ ] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — the Rangecheck lowering asserts the field's
-      bit size fits `INT_TO_FIELD_MAX_BITS`, since its limit sets one bit of the limbs.
-- [ ] `wasm-runtime/src/lib.rs` — `field_runtime!`'s bodies take a four-limb `Fp` by value (the
-      `[4 x i64]` ABI), and its helpers expand at the call site, so a second field's instance needs
-      a separate module and a `FieldId` arm in `FieldRuntimeSymbols::of`.
-- [x] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` and `llssa_to_llvm.rs` — the sites that read the
-      width off the layout constant: `field_limbs` (the lookup generators' keys and flags), the byte
-      and bit decompositions' bounds (`INT_TO_FIELD_MAX_BITS`), the Rangecheck limit's limbs and
-      `FieldEq`'s limb loop. They follow the layout and carry no marker.
+- [x] `compiler/src/compiler/ssa/llssa/mod.rs` — `LLStruct::field_elem(field)` holds
+      `field.storage_cells()` `i64`s, `LLStruct::limbs(field)` holds `field.canonical_limbs()`, and
+      the AD nodes that inline an element take the field too.
+- [x] `compiler/src/compiler/codegen/llssa_to_llvm.rs` — `field_llvm_type()`/`limbs_llvm_type()` and
+      `FieldEq`'s limb loop read the generator's field.
+- [x] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — the type helpers take the field, and
+      `int_to_field_max_bits(field)` is the packing's capacity. The Rangecheck lowering asserts the
+      field's bit size fits it, since its limit sets one bit of the limbs.
+- [x] `wasm-runtime/src/lib.rs` — `field_runtime!` is bn254's instance: its operands are four limbs
+      by value and a result comes back through a pointer. LLVM returns a one-`i64` struct directly,
+      so `wasm-runtime/src/goldilocks.rs` defines Goldilocks' entry points over `u64`s, on the
+      arithmetic in `limb-arith/src/goldilocks.rs`. A field of two or more limbs takes the pointer
+      shape. `the_runtime_archive_defines_the_field_entry_points` runs each field's ABI through a
+      linked module, and `wasm-ld --fatal-warnings` refuses a wrong signature at link time.
 
-### `L3-limb-op` — The `field.to_limbs`/`from_limbs` LLSSA Op (Representation, P5)
+### `L3-limb-op` — The `field.to_limbs`/`from_limbs` LLSSA Op (Representation, P5 — done)
 
 A first-class LLSSA instruction that round-trips a field value through its **canonical
 (non-Montgomery) raw limbs** — the substrate the LLVM backend uses to implement
 `to_bits`/`to_bytes`/bitwise ops. Distinct from the Montgomery **storage** limbs in
-`L2-lower`/`L3-frame`. Fixed at `LLStruct::FIELD_LIMBS` × i64; becomes per-field width.
+`L2-lower`/`L3-frame`. It holds `field.canonical_limbs()` × i64.
 
-- [ ] `compiler/src/compiler/ssa/llssa/mod.rs` — the `field.to_limbs`/`field.from_limbs` op
+- [x] `compiler/src/compiler/ssa/llssa/mod.rs` — the `field.to_limbs`/`field.from_limbs` op
       (`LLOp::FieldToLimbs`/`FieldFromLimbs`); builder emitters `field_to_limbs`/`field_from_limbs`
       in `llssa/builder.rs`.
-- [ ] `compiler/src/compiler/codegen/llssa_to_llvm.rs` — declares and calls the runtime's
-      `to_limbs`/`from_limbs` entry points (`[4 x i64]` ↔ Montgomery) under the names
-      `FieldRuntimeSymbols::of(field)` gives them (`__field_to_limbs`/`__field_from_limbs` for
-      bn254). The runtime defines them in `wasm-runtime/src/lib.rs`'s `field_runtime!` (see
-      `L3-llstruct`).
+- [x] `compiler/src/compiler/codegen/llssa_to_llvm.rs` — declares and calls the runtime's
+      `to_limbs`/`from_limbs` entry points under the names `FieldRuntimeSymbols::of(field)` gives
+      them (`__bn254_*` and `__goldilocks_*`).
 - [x] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — emitters that round-trip through the op to
       lower bit/byte/bitwise ops. The integer packing, `int_to_raw_limbs` / `int_from_raw_limbs`,
-      fills and reads `LLStruct::FIELD_LIMBS` limbs, the same constant the struct is built from, so
-      these sites follow the layout. `INT_TO_FIELD_MAX_BITS` derives from that constant and is the
-      layout's capacity; it caps no width. What remains is the constant, which is `L3-llstruct`.
+      fills and reads as many limbs as `LLStruct::limbs(field)` holds, and an integer past
+      `int_to_field_max_bits(field)` folds in chunks of it.
 
 ### `L3-width254` — The 254-bit Field-Width Literal (Hardcoded, P3 — done)
 
@@ -455,9 +469,9 @@ No literal field width remains in the tree; every one of these reads `field_bit_
 
 Each does add/sub/mul/div/inverse/eq/lt/cast/to_bits over the concrete field. All four evaluators
 hold a `FieldConfig` and mint/compare through it (`field.zero()`, `field.constant(..)`,
-`field.from_bigint(..)`); their arithmetic runs on `FieldElement`, which follows the configured
-field. What each assumes about the field's _width_ is tracked under `L4-decompose`. Their casts
-across the field boundary answer the integer model's `int_to_field` and `field_to_int` on both
+`field.from_canonical_limbs(..)`); their arithmetic runs on `FieldElement`, which follows the
+configured field. What each assumes about the field's _width_ is tracked under `L4-decompose`. Their
+casts across the field boundary answer the integer model's `int_to_field` and `field_to_int` on both
 fields, which the `mavros-int-semantics` register checks.
 
 - [x] `compiler/src/compiler/analysis/click_cooper/lattice.rs` — SCCP
@@ -472,52 +486,68 @@ fields, which the `mavros-int-semantics` register checks.
       arithmetic (`add`/`sub`/`mul`/`div`, the comparisons, `select`, the decompositions) on
       `FieldElement`, minting through `ctx.field()`. The `LC` coefficients it emits stay raw.
 
-### `L4-inverse` — Modular Inverses (Hardcoded-by-Modulus, VM P4 done / compiler P5)
+### `L4-inverse` — Modular Inverses (Hardcoded-by-Modulus, done)
 
 The compiler sites call `FieldElement::inverse`, a method on the _value_, so they follow the
-configured field and need no `FieldConfig`. `FieldElement` has a Goldilocks variant (P5); the sites
-are ticked once a Goldilocks program reaches them. The VM and the runtime invert in the field they
-are instantiated over.
+configured field and need no `FieldConfig`. Each is ticked on a Goldilocks test that a
+Goldilocks-only perturbation of the site fails. The VM and the runtime invert in the field they are
+instantiated over.
 
-- [ ] `compiler/src/compiler/passes/simplifier.rs` — `(*denom).inverse().unwrap()`
-      (Div→Mul-by-inverse).
-- [ ] `compiler/src/compiler/analysis/click_cooper/lattice.rs` — SCCP field `Div`.
-- [ ] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` — `Value::div` multiplies by `rhs.inverse()`,
-      ICEing on a zero divisor (`LowerPureGuards` rejects one first).
-- [ ] `compiler/src/compiler/analysis/instrumenter.rs` — field `Div`.
+- [x] `compiler/src/compiler/passes/simplifier.rs` — `(*denom).inverse().unwrap()`
+      (Div→Mul-by-inverse), checked by `field_constants_fold_modulo_the_goldilocks_prime`.
+- [x] `compiler/src/compiler/analysis/click_cooper/lattice.rs` — SCCP field `Div`, checked at every
+      corner pair on both fields by `the_element_folds_read_the_canonical_integer_on_both_fields`.
+- [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` — `Value::div` multiplies by `rhs.inverse()`,
+      ICEing on a zero divisor (`LowerPureGuards` rejects one first). Checked by the conformance
+      test of the same name.
+- [x] `compiler/src/compiler/analysis/instrumenter.rs` — field `Div`, checked by
+      `the_element_evaluators_read_the_canonical_integer_on_both_fields`.
 - [x] `vm/src/interpreter.rs` — lookup batch inversion, `MavrosField::inverse` (P4).
 - [x] `vm/src/bytecode.rs` — the generic `div_field` body, `b.inverse().map_or(F::ZERO, ..)` (P4).
 - [x] `wasm-runtime/src/lib.rs` — `field_runtime!`'s `div` entry point divides in the instance's
       field, zero on a zero divisor (P4).
 
-### `L4-decompose` — Bit/Byte Decomposition & Range Reasoning (Representation + Modulus, P5)
+### `L4-decompose` — Bit/Byte Decomposition & Range Reasoning (Representation + Modulus, done)
 
-- [ ] `compiler/src/compiler/passes/specializer.rs:400-412` — `to_bits` const-fold
-      (`into_bigint().to_bits_le()`).
+Every site reads an element through its canonical limbs and the field's width. Each is ticked on a
+Goldilocks test or sweep program that a Goldilocks-only perturbation of the site fails; the tests
+named here check every corner element on both fields.
+
+- [x] `compiler/src/compiler/passes/specializer.rs` — the `to_bits` const-fold reads
+      `limb_bit(&f.canonical_limbs(), ..)`; the Goldilocks sweep's `to_bits` programs check it.
 - [x] `compiler/src/compiler/passes/specializer.rs` — a field `bit_range` or cast folds through
       `lattice::eval_bit_range`/`eval_cast`, so it is the lattice's item below.
-- [ ] `compiler/src/compiler/analysis/instrumenter.rs:487-515,636-728` —
-      `bit_range_op`/`to_bits`/`to_radix`.
-- [ ] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` — the constant reads of a `Value`'s canonical
-      integer, `bit_range`/`to_bits`/`rangecheck`/`to_radix`, and the pow2 table's widest row.
-- [ ] `compiler/src/compiler/analysis/click_cooper/lattice.rs` — the field constant's canonical
-      integer in the bit-range fold. The cast fold is checked against the model on both fields.
-- [ ] `compiler/src/compiler/passes/instruction_lowering/witness_field.rs` — `lower_to_bits` and
-      `lower_to_radix` (the radix-256 byte path).
-- [ ] `compiler/src/compiler/passes/instruction_lowering/integer_digits.rs` — the byte chunk the
-      field carries injectively.
-- [ ] `compiler/src/compiler/ssa/hlssa/mod.rs` — the pow2 lookup table's widest row against the
-      modulus.
-- [ ] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — the Rangecheck lowering's `2^max_bits` limit.
+- [x] `compiler/src/compiler/analysis/instrumenter.rs` — `bit_range_op`/`to_bits`/`to_radix`,
+      checked by `the_element_evaluators_read_the_canonical_integer_on_both_fields`.
+- [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` — the constant reads of a `Value`'s canonical
+      integer (`magnitude`, `const_u128`, the field→int cast), `bit_range`/`to_bits`/`rangecheck`/
+      `to_radix`, and the pow2 table's rows. Checked by the conformance tests
+      `the_element_folds_read_the_canonical_integer_on_both_fields` and
+      `the_field_casts_agree_with_the_model_on_both_fields`, the Goldilocks `bigints` tests and, for
+      `rangecheck`, the Goldilocks sweep.
+- [x] `compiler/src/compiler/analysis/click_cooper/lattice.rs` — the field constant's canonical
+      integer in the bit-range and cast folds, checked against the model on both fields.
+- [x] `compiler/src/compiler/passes/instruction_lowering/witness_field.rs` — `lower_to_bits` and
+      `lower_to_radix` (the radix-256 byte path), checked by
+      `a_field_element_decomposes_into_its_{64_bits,8_bytes}`.
+- [x] `compiler/src/compiler/passes/instruction_lowering/integer_digits.rs` — the byte chunk the
+      field carries injectively, checked on both fields by `every_decomposition_left_has_one_answer`
+      and on Goldilocks by `an_integer_decomposes_into_its_pattern_past_one_element`.
+- [x] `compiler/src/compiler/ssa/hlssa/mod.rs` — the pow2 lookup table's widest row against the
+      modulus. The bound is `limbs::max_pow2_table_size`, pinned per field by
+      `the_pow2_ceiling_is_the_widest_row_the_modulus_can_hold`.
+- [x] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` — the Rangecheck lowering's `2^max_bits` limit
+      is set in the field's canonical limbs, and asserts the field fits `int_to_field_max_bits`.
 - [x] `vm/src/bytecode.rs` — `rangecheck`, the lookups' keys and flags, `lt_field`, the
       `cast_field_to_int*` casts and `to_bytes_*`/`to_bits_*` read `F::to_canonical_limbs()`, and
       `limbs_fit_bits` takes any limb count (P4).
-- [ ] `compiler/src/compiler/passes/shared/limbs.rs` — `combine_limbs_of_value` place values
-      (`two_pow`).
-- [ ] `compiler/src/compiler/passes/instruction_lowering/witness_bitwise.rs` — bitmask/sign-extend
-      via `b.field().two_pow(..)`. The helper is gone (see `L4-two-pow`); what remains is the
-      _strategy_, one field product per shift, which `single_cell_shift_fits` keeps below the
-      modulus by sending every wider shift to the limb-wise one (see `L6-int-op-strategy`).
+- [x] `compiler/src/compiler/passes/shared/limbs.rs` — `combine_limbs_of_value` place values
+      (`two_pow`), checked by the Goldilocks `bigints` tests.
+- [x] `compiler/src/compiler/passes/instruction_lowering/witness_bitwise.rs` — bitmask/sign-extend
+      via `b.field().two_pow(..)`, checked by the Goldilocks `bigints`, `frontend_stdlib` and sweep
+      programs. The helper is gone (see `L4-two-pow`); what remains is the _strategy_, one field
+      product per shift, which `single_cell_shift_fits` keeps below the modulus by sending every
+      wider shift to the limb-wise one (see `L6-int-op-strategy`).
 
 ### `L4-low-limb` — Low-Word Integer Extraction in Witgen (Representation, P4 — done)
 
@@ -536,22 +566,20 @@ reading the canonical integer would convert out of Montgomery form and corrupt t
 - [x] `compiler/src/compiler/passes/instruction_lowering/bit_range.rs` —
       `decompose_canonical_field_bytes` writes no prime digits: its constants (`modulus_hi`,
       `modulus_lo_m1`, and the `mod_limbs` the borrow's hint compares) are derived from
-      `b.field().modulus()`. **No literal prime remains anywhere in the middle-end.** The byte count
-      and split follow the modulus too (`L3-felt-limbs`).
+      `b.field().modulus_limbs()`. **No literal prime remains anywhere in the middle-end.** The byte
+      count and split follow the modulus too (`L3-felt-limbs`).
 
 ### `L4-modulus-query` — Modulus/Width derived from the type (Type-Parametric, P3 done / width P5)
 
 All three read the configured field through the `FieldConfig` instance, with no static associated
-item, which is all P3 owed them. The residual on the first two is that `modulus_limbs()` returns
-`[u64; 4]`, so the limb-count assumption is moved and not erased — that signature is
-`L3-felt-limbs`, and it is retired with the rest of the fixed width in P5.
+item. `modulus_limbs()` is a slice of the field's own limb count (`L3-felt-limbs`), so none of them
+assumes a width.
 
-- [ ] `compiler/src/compiler/analysis/value_range_analysis.rs` — `field_modulus(field)` (renamed
+- [x] `compiler/src/compiler/analysis/value_range_analysis.rs` — `field_modulus(field)` (renamed
       from `bn254_modulus`, now the single shared limbs→`BigInt` helper), used by `field_top` and by
-      the integer-lowering gate below. Reads `field.modulus_limbs()`, a `[u64; 4]`.
-- [ ] `compiler/src/compiler/passes/instruction_lowering/witness_integer_arith.rs` —
-      `range_fits_field_injectively` calls the shared `field_modulus` (`hi-lo < p`). Same `[u64; 4]`
-      residual.
+      the integer-lowering gate below.
+- [x] `compiler/src/compiler/passes/instruction_lowering/witness_integer_arith.rs` —
+      `range_fits_field_injectively` calls the shared `field_modulus` (`hi-lo < p`).
 - [x] `compiler/src/compiler/passes/instruction_lowering/pure_guards.rs` — `MODULUS_BIT_SIZE` →
       `emitter.field().field_bit_size()`.
 
@@ -576,7 +604,7 @@ Collapsed onto one `FieldConfig::two_pow(exp)`, reached as `b.field().two_pow(ex
 - [x] `compiler/src/compiler/passes/lookup_spilling.rs` — deleted. Its `two_pow_u128` stays: that
       one is integer place-value arithmetic, not a field operation.
 
-### `L4-logup-challenges` — Single LogUp Challenge Assumes a Large Field (Hardcoded count, P5 — done on the VM)
+### `L4-logup-challenges` — Single LogUp Challenge Assumes a Large Field (Hardcoded count, P5 — done)
 
 The LogUp lookup argument proves the log-derivative identity `Σᵢ mᵢ/(α − tᵢ) = Σⱼ flagⱼ/(α − keyⱼ)`
 (width-2 tables fold `(key, value)` into `key + β·value`). One repetition (`alpha` plus an optional
@@ -612,8 +640,7 @@ sections, in the witness and in the constraints, are K consecutive copies of one
 prover draws all `challenges_size` challenges _independently_ (powers `α, α², …` are invalid for
 this identity) after committing to the pre-commitment witness, and passes them in order to
 `run_witgen_phase2`: challenge `i` sits at `challenges_start() + i`. The layout word is part of
-`r1cs.bin` (format version 2) and of the VM header's constraint layouts (format version 5). The LLVM
-and WASM paths refuse `K > 1` (`Error::WasmLogupRepetitionsUnsupported`).
+`r1cs.bin` (format version 2) and of the VM header's constraint layouts (format version 5).
 
 - [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` —
       `compute_logup_soundness`/`logup_soundness_report` + `SoundnessReport` (the formula,
@@ -625,8 +652,9 @@ and WASM paths refuse `K > 1` (`Error::WasmLogupRepetitionsUnsupported`).
       the others, then fills each repetition from its challenges (`fill_repetition`).
 - [x] `vm/src/bytecode.rs` (AD) and `vm/src/verifier.rs` — the table and lookup handlers run over
       repetition 0's cursors and emit each repetition at its `LogupStrides` offset.
-- [ ] `hlssa_to_llssa.rs` (6 sites) — the LLSSA AD emitters bind one repetition's challenges;
-      `lower_with_layout` and the driver refuse `K > 1` (Goldilocks WASM, Phase 5).
+- [x] `compiler/src/compiler/ssa/hlssa_to_llssa.rs` (AD) — the table and lookup helpers keep
+      repetition 0's cursors and snapshots and emit each repetition at its `LogupStrides` offset
+      (`AdLogup`). WASM witgen writes repetition 0 only: its phase 2 is the VM's `run_phase2`.
 
 ---
 
@@ -681,18 +709,18 @@ ECDSA replacement fails with a frontend diagnostic.
       0 names none). Dispatch needs no field selection, since the opcodes name the field
       (`bn254_add_field`, …); the word lets `interpreter::run*::<F>` refuse, in every build, a
       program over another field, whose handlers would read and write the wrong element width.
-- [ ] **Field selection** — `SSA::empty` seeds `FieldConfig::bn254()` and `SSA::with_field` seeds
-      any field; HLSSA→LLSSA lowering carries it (`LLSSA::with_field(hlssa.field())`), codegen picks
-      the field's opcodes (`FieldOpCode::for_field`) and runtime symbols from it, and
-      `LLVMCodeGen::new` takes it and ICEs on an LLSSA over another field. What is left is a
-      `--field` selector in `compiler/src/api.rs` / `driver.rs` that seeds it, mirroring the
-      `set_logup_soundness` path (Phase 5).
-- [ ] **Per-field WASM runtime** — one archive serves every field: `wasm-runtime/src/lib.rs` expands
-      `field_runtime!` once per field (bn254 only in P4), and codegen names each field's entry
-      points through `FieldRuntimeSymbols::of` (`llssa_to_llvm.rs`), bn254 keeping its `__field_*`
-      names. A second field adds an invocation in a separate module and a `FieldId` arm (Phase 5).
-- [ ] **JS host** — `wasm-runner/src/field.ts` hardcodes bn254 modulus/R/R_INV; needs a goldilocks
-      path (Phase 5; out of scope for Rust corpus validation).
+- [x] **Field selection** — `mavros --field bn254|goldilocks` (default bn254, global to the
+      subcommands, parsed as a `FieldId`) and the `F` of `mavros_compiler::api`'s functions
+      (`compile_to_r1cs::<F>`, `compile_to_r1cs_with::<F>`, `read_prover_inputs::<F>`,
+      `random_ad_coeffs::<F>`, `random_ad_coeffs_with::<F>`) select the field;
+      `Driver::run_noir_compiler(F::CONFIG)` seeds the frontend and the SSA with it. HLSSA→LLSSA
+      lowering carries it (`LLSSA::with_field(hlssa.field())`), codegen picks the field's opcodes
+      (`FieldOpCode::for_field`) and runtime symbols from it, and `LLVMCodeGen::new` takes it and
+      ICEs on an LLSSA over another field.
+- [x] **Per-field WASM runtime** — one archive serves every field: `field_runtime!` for bn254 and
+      `wasm-runtime/src/goldilocks.rs` for Goldilocks, and codegen names each field's entry points
+      through `FieldRuntimeSymbols::of` (`llssa_to_llvm.rs`), as `__bn254_*` and `__goldilocks_*`. A
+      further field adds its entry points, in the ABI shape of its width, and a `FieldId` arm.
 
 ---
 
@@ -733,6 +761,13 @@ Every lowering whose precondition the configured field fails, with no FALSE-case
 back on, refuses through one funnel, `compiler/src/compiler/passes/shared/unsupported.rs`, which
 names the field's modulus and witness limb widths. Its call sites **are** the machine-readable half
 of this register.
+
+Two of them a program can reach, and the driver asks their question first, so the program gets
+`Error::LoweringRefused` with a diagnostic rather than a panic: `witness_field`'s `to_bits` and
+`to_radix` (`DecompositionWidthValidation`, run between the two witness phases of
+`Driver::spill_witness`), and `prepare_entry_point`'s integer entry parameter
+(`PrepareEntryPoint::param_refusals`, before the pass). The others cannot fire, since an earlier
+lowering routes every operation past them, and stay as backstops.
 
 The call sites: `witness_bitwise`'s `lower_word_bitwise` (spread width); `witness_integer_arith`'s
 `lower_unsigned_mul` (both the single-field product and the two-limb packing, the latter covering
@@ -850,10 +885,10 @@ A single-field arithmetic op assumes its exact result span fits one cell (one `b
       all-ones mask this mints is bounded by `2^(bits(p) - 1) - 1 < p` on any field and cannot wrap
       at any width. The assert on the bound states the coupling; it guards no reachable case.
 
-The `signed_value_from_encoded`/`encode_signed_value` sign packing carries a `FIELD-ASSUMPTION`
-comment but no unchecked assumption: every lowering that reads it asserts the bound that keeps its
-place values below the modulus, `widest_cell_sum_bits` for the sum and the difference and
-`single_cell_signed_product_fits` for the product and the division.
+The `signed_value_from_encoded`/`encode_signed_value` sign packing makes no unchecked assumption:
+every lowering that reads it asserts the bound that keeps its place values below the modulus,
+`widest_cell_sum_bits` for the sum and the difference and `single_cell_signed_product_fits` for the
+product and the division.
 
 Note that the funnel's condition is per-site, because `witness_limb_bits` certifies only that a limb
 product is injective. A lowering that additionally scales a column by a place value asks
@@ -897,8 +932,8 @@ serde). Wide integers are supported; no cap removes them.
       it is taken.
 
 The `value_range_analysis.rs` interval domain is over `BigInt` and stays correct on any field — it
-already produces the exact spans the FALSE-case codegen consumes (no new marker; only `field_top` /
-`field_modulus` remain `L4-modulus-query`).
+already produces the exact spans the FALSE-case codegen consumes; `field_top` and `field_modulus`
+read the modulus from the configured field (`L4-modulus-query`).
 
 ---
 

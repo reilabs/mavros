@@ -7,7 +7,6 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use ark_ff::{BigInt, BigInteger};
 use itertools::Itertools;
 use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::{self as semantics, CmpOp, IntBits, int_bits::FIELD_LIMB_BITS};
@@ -30,7 +29,10 @@ use crate::{
                 LookupTarget, Radix, RefCountOp, SequenceTargetType, SliceOpDir, Type, TypeExpr,
             },
         },
-        util::{field_constant, field_residue, host_word, ice_non_elided_tuple},
+        util::{
+            field_constant, field_residue, host_word, ice_non_elided_tuple, limb_bit,
+            limb_bit_window,
+        },
     },
 };
 
@@ -111,7 +113,6 @@ impl ValueSignature {
 }
 
 #[derive(Debug, Clone)]
-// FIELD-ASSUMPTION: L4-eval
 pub enum Value {
     /// A raw two's-complement pattern. The opcode, not the value, decides which reading applies.
     Int(IntBits),
@@ -290,11 +291,9 @@ impl Value {
             ),
 
             (Value::Field(x), Value::Field(y)) => match group {
-                // FIELD-ASSUMPTION: L4-eval
                 ArithGroup::Add => Value::Field(x + y),
                 ArithGroup::Sub => Value::Field(x - y),
                 ArithGroup::Mul => Value::Field(x * y),
-                // FIELD-ASSUMPTION: L4-inverse
                 ArithGroup::Div => Value::Field(if *y == instrumenter.field().zero() {
                     instrumenter.field().zero()
                 } else {
@@ -483,7 +482,6 @@ impl Value {
         }
     }
 
-    // FIELD-ASSUMPTION: L4-decompose
     fn bit_range_op(
         &self,
         offset: usize,
@@ -498,17 +496,8 @@ impl Value {
             Value::Int(v) if width == 0 => Value::Int(IntBits::zero(v.bits())),
             Value::Int(v) => Value::Int(v.bit_range(offset, width).cast(v.bits())),
             Value::Field(f) => {
-                let bits = f
-                    .into_bigint()
-                    .to_bits_le()
-                    .into_iter()
-                    .skip(offset)
-                    .take(width)
-                    .collect::<Vec<_>>();
-                let r = instrumenter
-                    .field()
-                    .from_bigint(BigInt::from_bits_le(&bits));
-                Value::Field(r.unwrap())
+                let window = limb_bit_window(&f.canonical_limbs(), offset, width);
+                Value::Field(instrumenter.field().from_canonical_limbs(&window).unwrap())
             }
             _ => ice!("Cannot extract bit range from {:?}", self),
         }
@@ -580,7 +569,9 @@ impl Value {
                     .collect(),
             ),
             (Value::UnknownSlice, CastTarget::Map(_)) => Value::UnknownSlice,
-            (Value::Unknown(_), CastTarget::Int(s)) => Value::Unknown(ScalarKind::Int(*s)),
+            (Value::Unknown(_), CastTarget::Int(s) | CastTarget::IntUnchecked(s)) => {
+                Value::Unknown(ScalarKind::Int(*s))
+            }
             (Value::Unknown(_), CastTarget::Field) => Value::Unknown(ScalarKind::Field),
             (Value::Unknown(kind), CastTarget::Nop | CastTarget::ArrayToSlice) => {
                 Value::Unknown(*kind)
@@ -588,16 +579,18 @@ impl Value {
             (Value::WitnessOf(inner), target) => {
                 Value::WitnessOf(Box::new(inner.cast_op(target, instrumenter)))
             }
-            (Value::Int(_), CastTarget::Int(0)) => {
+            (Value::Int(_), CastTarget::Int(0) | CastTarget::IntUnchecked(0)) => {
                 ice!("a cast to int0 describes a value with no bits")
             }
-            (Value::Int(v), CastTarget::Int(s2)) => Value::Int(v.cast(*s2)),
+            (Value::Int(v), CastTarget::Int(s2) | CastTarget::IntUnchecked(s2)) => {
+                Value::Int(v.cast(*s2))
+            }
             (Value::Int(v), CastTarget::Field) => {
                 Value::Field(field_residue(instrumenter.field(), v))
             }
             (Value::Field(f), CastTarget::Field) => Value::Field(*f),
-            (Value::Field(f), CastTarget::Int(s)) => {
-                Value::Int(IntBits::from_field_limbs(&f.into_bigint().0, *s))
+            (Value::Field(f), CastTarget::Int(s) | CastTarget::IntUnchecked(s)) => {
+                Value::Int(IntBits::from_field_limbs(&f.canonical_limbs(), *s))
             }
             (_, CastTarget::Nop | CastTarget::ArrayToSlice) => self.clone(),
             _ => ice!("Cannot cast {:?} to {:?}", self, cast_target),
@@ -632,7 +625,6 @@ impl Value {
         Ok(())
     }
 
-    // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(&self, endianness: &Endianness, size: usize) -> Value {
         match self {
             Value::Unknown(_) => Value::array(vec![Value::Unknown(ScalarKind::Int(1)); size]),
@@ -662,10 +654,9 @@ impl Value {
                 Value::array(r)
             }
             Value::Field(f) => {
-                let bigint = f.into_bigint();
-                let raw_bits = bigint.to_bits_le();
+                let limbs = f.canonical_limbs();
                 let mut bits = (0..size)
-                    .map(|i| Value::int(1, raw_bits.get(i).copied().unwrap_or(false) as u128))
+                    .map(|i| Value::int(1, limb_bit(&limbs, i) as u128))
                     .collect::<Vec<_>>();
                 if *endianness == Endianness::Big {
                     bits.reverse();
@@ -676,15 +667,10 @@ impl Value {
         }
     }
 
-    fn to_radix(
-        &self,
-        radix: &Radix<Value>,
-        _endianness: &crate::compiler::ssa::hlssa::Endianness,
-        size: usize,
-    ) -> Value {
+    fn to_radix(&self, radix: &Radix<Value>, endianness: &Endianness, size: usize) -> Value {
         match self {
             Value::WitnessOf(inner) => {
-                let result = inner.to_radix(radix, _endianness, size);
+                let result = inner.to_radix(radix, endianness, size);
                 match result {
                     Value::Array(digits) => Value::array(
                         digits
@@ -705,21 +691,25 @@ impl Value {
                     Radix::Bytes => 256,
                     _ => ice!("Cannot convert {:?} to radix {:?}", self, radix),
                 };
-                let mut val = f.into_bigint();
+                let mut val = f.canonical_limbs();
                 let mut digits = vec![];
                 for _ in 0..size {
                     let digit = {
-                        let limb = val.0[0] as u128;
+                        let limb = val[0] as u128;
                         limb % radix_val
                     };
                     digits.push(Value::int(8, digit));
+
                     // Divide val by radix_val
                     let mut carry: u128 = 0;
-                    for i in (0..val.0.len()).rev() {
-                        let cur = (carry << FIELD_LIMB_BITS) | (val.0[i] as u128);
-                        val.0[i] = (cur / radix_val) as u64;
+                    for i in (0..val.len()).rev() {
+                        let cur = (carry << FIELD_LIMB_BITS) | (val[i] as u128);
+                        val[i] = (cur / radix_val) as u64;
                         carry = cur % radix_val;
                     }
+                }
+                if *endianness == Endianness::Big {
+                    digits.reverse();
                 }
                 Value::array(digits)
             }
@@ -2548,6 +2538,101 @@ mod tests {
                             "{field:?}: {canonical} as {target}"
                         ),
                         other => panic!("{field:?}: {canonical} as {target} gave {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// The evaluators that read an element as its integer agree with the model at every corner on
+    /// both fields: its bits and bytes, a bit window and a division. A wrong answer here only
+    /// misprices, but a mispriced specialization is never the one that pays.
+    #[test]
+    fn the_element_evaluators_read_the_canonical_integer_on_both_fields() {
+        use num_bigint::BigUint;
+
+        use crate::compiler::util::test::{FIELDS, element_of, modulus_of};
+
+        let digits = |value: Value, digit_bits: usize| -> Vec<u128> {
+            let Value::Array(digits) = value else {
+                panic!("a decomposition answers an array, not {value:?}");
+            };
+            digits
+                .iter()
+                .map(|digit| match digit {
+                    Value::Int(pattern) if pattern.bits() == digit_bits => {
+                        u128::try_from(pattern).expect("a digit fits a host word")
+                    }
+                    other => panic!("a {digit_bits}-bit digit, not {other:?}"),
+                })
+                .collect()
+        };
+        for field in FIELDS {
+            let mut dummy = DummyInstrumenter { field };
+            let p = modulus_of(field);
+            let bits = field.field_bit_size() as usize;
+            let bytes = bits.div_ceil(8);
+            let elements = corners::field_cast_elements(&p);
+            for canonical in &elements {
+                let element = element_of(field, canonical);
+                let value = Value::Field(element);
+
+                let little: Vec<u128> = (0..bits)
+                    .map(|index| u128::from(canonical.bit(index as u64)))
+                    .collect();
+                assert_eq!(
+                    digits(value.to_bits(&Endianness::Little, bits), 1),
+                    little,
+                    "{field:?}: {canonical} to bits"
+                );
+                let mut want = canonical.to_bytes_le();
+                want.resize(bytes, 0);
+                let want: Vec<u128> = want.into_iter().map(u128::from).collect();
+                let got = value.to_radix(&Radix::Bytes, &Endianness::Little, bytes);
+                assert_eq!(digits(got, 8), want, "{field:?}: {canonical} to bytes");
+                let got = value.to_radix(&Radix::Bytes, &Endianness::Big, bytes);
+                let mut big = want.clone();
+                big.reverse();
+                assert_eq!(
+                    digits(got, 8),
+                    big,
+                    "{field:?}: {canonical} to big-endian bytes"
+                );
+
+                for (offset, width) in [
+                    (0, 1),
+                    (0, 8),
+                    (3, 10),
+                    (bits / 2 - 4, 8),
+                    (bits - 8, 8),
+                    (bits - 1, 1),
+                    (1, bits - 1),
+                    (0, bits),
+                ] {
+                    let want = (canonical >> offset) % (BigUint::from(1u8) << width);
+                    match value.bit_range_op(offset, width, &mut dummy) {
+                        Value::Field(got) => assert_eq!(
+                            got,
+                            element_of(field, &want),
+                            "{field:?}: bits {offset}..+{width} of {canonical}"
+                        ),
+                        other => panic!("{field:?}: a window of {canonical} gave {other:?}"),
+                    }
+                }
+
+                for divisor in elements.iter().filter(|divisor| divisor.bits() > 0) {
+                    let divisor_element = element_of(field, divisor);
+                    match value.binary_arith_op(
+                        &Value::Field(divisor_element),
+                        &BinaryArithOpKind::UDiv,
+                        &mut dummy,
+                    ) {
+                        Value::Field(quotient) => assert_eq!(
+                            quotient * divisor_element,
+                            element,
+                            "{field:?}: {canonical} / {divisor}"
+                        ),
+                        other => panic!("{field:?}: {canonical} / {divisor} gave {other:?}"),
                     }
                 }
             }

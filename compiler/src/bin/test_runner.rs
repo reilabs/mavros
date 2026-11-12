@@ -12,10 +12,7 @@ use std::{
 
 use cargo_metadata::MetadataCommand;
 
-use ark_ff::UniformRand as _;
-use mavros_artifacts::{
-    Field as RawField, FieldConfig, FieldId, Goldilocks, MavrosField, WitnessManifest,
-};
+use mavros_artifacts::{Field as Bn254, FieldId, Goldilocks, MavrosField, WitnessManifest};
 use mavros_compiler::{
     Project, abi_helpers, api,
     collections::HashMap,
@@ -30,12 +27,12 @@ use mavros_compiler::{
     vm::interpreter,
     wasm_host, wasm_runtime,
 };
-use rand::{RngCore, SeedableRng};
+use rand::SeedableRng;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Child mode: --run-single <path> [--expect-failure] [--analyze-r1cs]
+    // Child mode: --run-single <path> [--expect-failure] [--analyze-r1cs] [--field F]
     if args.len() >= 3 && args[1] == "--run-single" {
         let expect_failure = args[3..].iter().any(|a| a == "--expect-failure");
         let analyze = args[3..].iter().any(|a| a == "--analyze-r1cs");
@@ -73,23 +70,39 @@ fn main() {
         std::process::exit(check_regression(&baseline, &current));
     }
 
-    // Growth check mode: --check-growth <baseline> <current>
-    // Prints markdown to stdout if any rows/cols grew; exits 0 always.
+    // Growth check mode: --check-growth <baseline> <current> [--comments <dir>]
+    // Prints markdown to stdout if any rows/cols grew; exits 0 always. With `--comments`, also
+    // writes the report split into PR comments that each fit GitHub's limit, as
+    // `<dir>/comment-NN.md`.
     if args.len() >= 4 && args[1] == "--check-growth" {
         let baseline = PathBuf::from(&args[2]);
         let current = PathBuf::from(&args[3]);
-        check_growth(&baseline, &current);
+        let report = check_growth(&baseline, &current);
+        print!("{}", report.render());
+        if args.len() >= 6 && args[4] == "--comments" {
+            let dir = PathBuf::from(&args[5]);
+            fs::create_dir_all(&dir).expect("Cannot create the comment directory");
+            for (index, comment) in report
+                .into_comments(GROWTH_COMMENT_BYTES)
+                .iter()
+                .enumerate()
+            {
+                fs::write(dir.join(format!("comment-{:02}.md", index + 1)), comment)
+                    .expect("Cannot write a growth report comment");
+            }
+        }
         return;
     }
 
-    // Determinism check mode: --check-determinism [--runs N] [--jobs N] [test names...]
+    // Determinism check mode: --check-determinism [--runs N] [--jobs N] [--field F] [test names...]
     // Compiles each test several times in fresh processes and verifies the compiler
     // output (SSA dumps, bytecode, R1CS shape) is byte-identical across runs.
     if args.len() >= 2 && args[1] == "--check-determinism" {
         let runs = parse_runs_arg(&args);
         let jobs = parse_jobs_arg(&args);
         let tests = parse_determinism_tests(&args);
-        std::process::exit(check_determinism(&tests, runs, jobs));
+        let field = parse_field_arg(&args);
+        std::process::exit(check_determinism(&tests, runs, jobs, field));
     }
 
     // Parent mode
@@ -169,50 +182,20 @@ fn parse_jobs_arg(args: &[String]) -> usize {
     1
 }
 
-const SUPPORTED_FIELDS: &[FieldId] = &[FieldId::Bn254, FieldId::Goldilocks];
-
-fn field_name(field: FieldId) -> &'static str {
-    match field {
-        FieldId::Bn254 => "bn254",
-        FieldId::Goldilocks => "goldilocks",
-    }
-}
-
-fn field_config(field: FieldId) -> FieldConfig {
-    match field {
-        FieldId::Bn254 => FieldConfig::bn254(),
-        FieldId::Goldilocks => FieldConfig::goldilocks(),
-    }
-}
-
 fn parse_field_arg(args: &[String]) -> FieldId {
     let Some(index) = args.iter().position(|arg| arg == "--field") else {
         return FieldId::Bn254;
     };
-    match args.get(index + 1).map(String::as_str) {
-        Some("bn254") => FieldId::Bn254,
-        Some("goldilocks") => FieldId::Goldilocks,
-        _ => panic!("--field requires bn254 or goldilocks"),
-    }
+    let name = args.get(index + 1).map_or("", String::as_str);
+    name.parse()
+        .unwrap_or_else(|error| panic!("--field: {error}"))
 }
 
 fn parse_fields_arg(args: &[String]) -> Vec<FieldId> {
     if args.iter().any(|arg| arg == "--field") {
         vec![parse_field_arg(args)]
     } else {
-        SUPPORTED_FIELDS.to_vec()
-    }
-}
-
-fn random_field<F: MavrosField>(rng: &mut rand::rngs::StdRng) -> F {
-    match F::ID {
-        // Preserve the BN254 harness's seeded coefficient sequence.
-        FieldId::Bn254 => F::from_element(ark_bn254::Fr::rand(rng).into()),
-        FieldId::Goldilocks => loop {
-            if let Some(value) = F::from_canonical_limbs(&[rng.next_u64()]) {
-                break value;
-            }
-        },
+        FieldId::ALL.to_vec()
     }
 }
 
@@ -225,20 +208,14 @@ struct SingleRun<F: MavrosField> {
 
 fn run_single(root: PathBuf, expect_failure: bool, analyze: bool, field: FieldId) {
     match field {
-        FieldId::Bn254 => {
-            if let Some(run) = run_single_vm::<RawField>(root, expect_failure, analyze) {
-                run_single_wasm(run);
-            }
-        }
-        FieldId::Goldilocks => {
-            if let Some(run) = run_single_vm::<Goldilocks>(root, expect_failure, analyze) {
-                if run.r1cs.is_some() {
-                    emit("START:WASM_COMPILE");
-                    eprintln!("WASM compile error: the WASM backend does not support Goldilocks");
-                    emit("END:WASM_COMPILE:fail");
-                }
-            }
-        }
+        FieldId::Bn254 => run_single_in::<Bn254>(root, expect_failure, analyze),
+        FieldId::Goldilocks => run_single_in::<Goldilocks>(root, expect_failure, analyze),
+    }
+}
+
+fn run_single_in<F: MavrosField>(root: PathBuf, expect_failure: bool, analyze: bool) {
+    if let Some(run) = run_single_vm::<F>(root, expect_failure, analyze) {
+        run_single_wasm(run);
     }
 }
 
@@ -305,7 +282,7 @@ fn run_single_vm<F: MavrosField>(
     };
     let mut driver = Driver::new(project, false);
     let compile_result = (|| -> Result<(), DriverError> {
-        driver.run_noir_compiler_for_field(field_config(F::ID))?;
+        driver.run_noir_compiler(F::CONFIG)?;
         driver.make_struct_access_static()?;
         driver.monomorphize()?;
         driver.spill_witness()?;
@@ -433,7 +410,7 @@ fn run_single_vm<F: MavrosField>(
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let inputs = api::read_prover_inputs_for_field::<F>(driver.package_root(), driver.abi())
+    let inputs = api::read_prover_inputs::<F>(driver.package_root(), driver.abi())
         .map_err(|e| e.to_string());
     let ordered_params = inputs.as_ref().map(|(params, _)| params.clone());
 
@@ -524,10 +501,8 @@ fn run_single_vm<F: MavrosField>(
         .and_then(|artifact| {
             emit("START:AD_RUN");
             let r1cs = r1cs.as_ref().unwrap();
-            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-            let ad_coeffs: Vec<F> = (0..r1cs.constraints.len())
-                .map(|_| random_field::<F>(&mut rng))
-                .collect();
+            let ad_coeffs: Vec<F> =
+                api::random_ad_coeffs_with(r1cs, &mut rand::rngs::StdRng::seed_from_u64(42));
             match interpreter::run_ad(
                 &artifact.binary,
                 &ad_coeffs,
@@ -578,7 +553,7 @@ fn run_single_vm<F: MavrosField>(
     })
 }
 
-fn run_single_wasm(run: SingleRun<RawField>) {
+fn run_single_wasm<F: MavrosField>(run: SingleRun<F>) {
     let SingleRun {
         mut driver,
         r1cs,
@@ -739,10 +714,8 @@ fn run_single_wasm(run: SingleRun<RawField>) {
     let ad_wasm_result = wasm_path.as_ref().and_then(|wasm_path| {
         emit("START:AD_WASM_RUN");
         let r1cs = r1cs.as_ref().unwrap();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let ad_coeffs: Vec<RawField> = (0..r1cs.constraints.len())
-            .map(|_| ark_bn254::Fr::rand(&mut rng))
-            .collect();
+        let ad_coeffs: Vec<F> =
+            api::random_ad_coeffs_with(r1cs, &mut rand::rngs::StdRng::seed_from_u64(42));
         match load(wasm_path).and_then(|loaded| wasm_host::run_ad_loaded(loaded, r1cs, &ad_coeffs))
         {
             Ok(result) => {
@@ -1094,7 +1067,7 @@ fn run_parent(
                             let mut cmd = Command::new(&exe);
                             cmd.arg("--run-single")
                                 .arg(&entry.path)
-                                .args(["--field", field_name(field)]);
+                                .args(["--field", field.name()]);
                             if entry.expectation != TestExpectation::ExecutionSuccess {
                                 cmd.arg("--expect-failure");
                             }
@@ -1123,7 +1096,7 @@ fn run_parent(
                         eprintln!(
                             "[{n}/{total}] {} [{}]{suffix}",
                             entry.display_name,
-                            field_name(field)
+                            field.name()
                         );
                         *slots[idx * fields.len() + field_idx].lock().unwrap() = Some(result);
                     }
@@ -1142,7 +1115,7 @@ fn run_parent(
     if analyze {
         for r in &results {
             if let Some(stats) = &r.analysis_stats {
-                println!("{} [{}]: {stats}", r.name, field_name(r.field));
+                println!("{} [{}]: {stats}", r.name, r.field.name());
             }
         }
     }
@@ -1347,7 +1320,7 @@ fn parse_determinism_tests(args: &[String]) -> Vec<String> {
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
-            "--runs" | "--jobs" => i += 2,
+            "--runs" | "--jobs" | "--field" => i += 2,
             name => {
                 tests.push(name.to_string());
                 i += 1;
@@ -1396,11 +1369,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 }
 
 /// Compile the test at `root` in a fresh child process and fingerprint the result.
-fn determinism_run(exe: &Path, wasm_runtime_lib: &Path, root: &Path) -> RunFingerprint {
+fn determinism_run(
+    exe: &Path,
+    wasm_runtime_lib: &Path,
+    root: &Path,
+    field: FieldId,
+) -> RunFingerprint {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
     let mut child = Command::new(exe)
         .args(["--run-single", root.to_str().unwrap()])
+        .args(["--field", field.name()])
         .env(wasm_runtime::WASM_RUNTIME_LIB_ENV, wasm_runtime_lib)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1466,7 +1445,7 @@ fn fingerprint_divergences(reference: &RunFingerprint, fp: &RunFingerprint) -> V
 /// Run each test `runs` times in fresh processes (fresh process = fresh hash seeds, which is
 /// the property under test) and check all compiler output is byte-identical across runs.
 /// Returns the process exit code: 0 if everything is deterministic, 1 otherwise.
-fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
+fn check_determinism(tests: &[String], runs: usize, jobs: usize, field: FieldId) -> i32 {
     let resolved: Vec<TestEntry> = tests
         .iter()
         .map(|name| {
@@ -1530,7 +1509,7 @@ fn check_determinism(tests: &[String], runs: usize, jobs: usize) -> i32 {
                         break;
                     }
                     let (t, r, dst) = &work[idx];
-                    let fp = determinism_run(&exe, &wasm_runtime_lib, dst);
+                    let fp = determinism_run(&exe, &wasm_runtime_lib, dst, field);
                     let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
                     eprintln!("[{n}/{total}] {} run {}", resolved[*t].display_name, r + 1);
                     *slots[idx].lock().unwrap() = Some(fp);
@@ -1762,7 +1741,7 @@ fn parse_status_content(content: &str) -> StatusTable {
 /// Merge one complete report per supported field. Refuse missing fields, duplicate rows and
 /// different test inventories so CI never publishes a partial corpus as a complete result.
 fn merge_status_reports(reports: &[String]) -> Result<String, String> {
-    if reports.len() != SUPPORTED_FIELDS.len() {
+    if reports.len() != FieldId::ALL.len() {
         return Err("expected one report per supported field".into());
     }
     let mut seen_fields = Vec::new();
@@ -1780,12 +1759,12 @@ fn merge_status_reports(reports: &[String]) -> Result<String, String> {
             other => return Err(format!("unsupported report field: {other}")),
         };
         if seen_fields.contains(&field) {
-            return Err(format!("duplicate report for {}", field_name(field)));
+            return Err(format!("duplicate report for {}", field.name()));
         }
         seen_fields.push(field);
         let mut names = HashMap::default();
         for (index, row) in table.rows.iter().enumerate() {
-            if row.field != field_name(field) {
+            if row.field != field.name() {
                 return Err("each input report must contain exactly one field".into());
             }
             if names.insert(row.name.clone(), index).is_some() {
@@ -1930,22 +1909,29 @@ fn check_regression(baseline_path: &Path, current_path: &Path) -> i32 {
     }
 }
 
-fn check_growth(baseline_path: &Path, current_path: &Path) {
+fn check_growth(baseline_path: &Path, current_path: &Path) -> GrowthReport {
     let baseline = parse_status_table(baseline_path);
     let current = parse_status_table(current_path);
     validate_layout(&baseline, baseline_path);
     validate_layout(&current, current_path);
 
-    for &field in SUPPORTED_FIELDS {
-        let name = field_name(field);
+    let mut report = GrowthReport::default();
+    for field in FieldId::ALL {
+        let name = field.name();
         if current.rows.iter().any(|row| row.field == name) {
-            println!("## {name}\n");
-            check_growth_for_field(&baseline, &current, name);
+            report.blocks.push(ReportBlock::Heading(name.to_string()));
+            check_growth_for_field(&baseline, &current, name, &mut report);
         }
     }
+    report
 }
 
-fn check_growth_for_field(baseline: &StatusTable, current: &StatusTable, field: &str) {
+fn check_growth_for_field(
+    baseline: &StatusTable,
+    current: &StatusTable,
+    field: &str,
+    report: &mut GrowthReport,
+) {
     let base_map: HashMap<(&str, &str), &ParsedRow> = baseline
         .rows
         .iter()
@@ -2053,10 +2039,10 @@ fn check_growth_for_field(baseline: &StatusTable, current: &StatusTable, field: 
     };
 
     // Always print overall success rate
-    println!(
-        "**{field} success rate on test cases: {:.1}%**\n",
+    report.text(format!(
+        "**{field} success rate on test cases: {:.1}%**\n\n",
         total_current_pct
-    );
+    ));
 
     // Metrics in display order. Each renders its own folding table, separately for decreases
     // (under Positive Changes) and increases (under Warnings).
@@ -2075,67 +2061,237 @@ fn check_growth_for_field(baseline: &StatusTable, current: &StatusTable, field: 
     let has_positive_news =
         !new_checkmarks.is_empty() || existing_pct_change > 0.0 || any_decreases;
     if has_positive_news {
-        println!("### Positive Changes\n");
+        report.text("### Positive Changes\n\n");
 
         if !new_checkmarks.is_empty() || existing_pct_change.abs() > 0.001 {
             if !new_checkmarks.is_empty() {
-                println!(
-                    "<details>\n<summary>{} cell(s) turned into checkmarks ✅</summary>\n",
-                    new_checkmarks.len()
-                );
-                for (test, col) in &new_checkmarks {
-                    println!("- **{}** / {}", test, col);
-                }
-                println!("\n</details>\n");
+                report.blocks.push(ReportBlock::Folded {
+                    summary: format!("{} cell(s) turned into checkmarks ✅", new_checkmarks.len()),
+                    bold: false,
+                    header: String::new(),
+                    rows: new_checkmarks
+                        .iter()
+                        .map(|(test, col)| format!("- **{}** / {}", test, col))
+                        .collect(),
+                });
             }
             if existing_pct_change.abs() > 0.001 {
-                println!(
-                    "- Existing tests: {:.1}% → {:.1}% ({:+.1}%)",
+                report.text(format!(
+                    "- Existing tests: {:.1}% → {:.1}% ({:+.1}%)\n",
                     existing_baseline_pct, existing_current_pct, existing_pct_change
-                );
+                ));
             }
-            println!();
+            report.text("\n");
         }
 
         // One folding table per metric that shrank.
         for m in metrics {
-            print_change_table(&format!("{} decreased", m.name), &m.decreases);
+            push_change_table(report, &format!("{} decreased", m.name), &m.decreases);
         }
     }
 
     if !any_increases {
         if !has_positive_news {
-            println!("No test improvements or size changes detected.");
+            report.text("No test improvements or size changes detected.\n");
         } else {
-            println!("No size growth detected.");
+            report.text("No size growth detected.\n");
         }
         return;
     }
 
     // Print warnings section: one folding table per metric that grew.
-    println!("### Warnings\n");
+    report.text("### Warnings\n\n");
     for m in metrics {
-        print_change_table(&format!("{} grew", m.name), &m.increases);
+        push_change_table(report, &format!("{} grew", m.name), &m.increases);
     }
 }
 
-/// Render a folding section wrapping one before/after table. A no-op when there are no rows,
-/// so metrics that did not change don't clutter the report.
-fn print_change_table(summary: &str, rows: &[String]) {
+/// Add a folding section wrapping one before/after table. A no-op when there are no rows, so
+/// metrics that did not change don't clutter the report.
+fn push_change_table(report: &mut GrowthReport, summary: &str, rows: &[String]) {
     if rows.is_empty() {
         return;
     }
-    println!("<details>");
-    println!(
-        "<summary><b>{summary} ({} test(s))</b></summary>\n",
-        rows.len()
-    );
-    println!("| Test | Before | After | Change |");
-    println!("|------|--------|-------|--------|");
-    for row in rows {
-        println!("{row}");
+    report.blocks.push(ReportBlock::Folded {
+        summary: format!("{summary} ({} test(s))", rows.len()),
+        bold: true,
+        header: "| Test | Before | After | Change |\n|------|--------|-------|--------|\n"
+            .to_string(),
+        rows: rows.to_vec(),
+    });
+}
+
+/// The most bytes of report one PR comment carries. GitHub refuses a comment over 65,536
+/// characters, and a character is at least a byte; the margin leaves room for the part line and
+/// the comparison details the workflow appends.
+const GROWTH_COMMENT_BYTES: usize = 60_000;
+
+/// The growth report, as blocks a PR comment can be split between.
+#[derive(Default)]
+struct GrowthReport {
+    blocks: Vec<ReportBlock>,
+}
+
+enum ReportBlock {
+    /// A field's section heading, repeated at the top of a comment that continues its section.
+    Heading(String),
+    /// Text kept whole.
+    Text(String),
+    /// A folding list, one row per line, which may be split between comments.
+    Folded {
+        summary: String,
+        bold: bool,
+        /// Lines printed before the rows, such as a table's header.
+        header: String,
+        rows: Vec<String>,
+    },
+}
+
+impl GrowthReport {
+    fn text(&mut self, text: impl Into<String>) {
+        self.blocks.push(ReportBlock::Text(text.into()));
     }
-    println!("\n</details>\n");
+
+    /// The whole report.
+    fn render(&self) -> String {
+        self.blocks
+            .iter()
+            .map(|block| match block {
+                ReportBlock::Heading(name) => render_heading(name, false),
+                ReportBlock::Text(text) => text.clone(),
+                ReportBlock::Folded {
+                    summary,
+                    bold,
+                    header,
+                    rows,
+                } => render_folded(summary, *bold, false, header, rows),
+            })
+            .collect()
+    }
+
+    /// The report split into comments of at most `limit` bytes, each numbered when there are
+    /// several. Blocks stay whole where they fit; a list too long for one comment continues in the
+    /// next, with its summary and header repeated, and the comment repeats the section heading.
+    fn into_comments(self, limit: usize) -> Vec<String> {
+        // Each part line is under this many bytes, so the pieces are cut to leave room for it.
+        const PART_LINE_BYTES: usize = 64;
+        let mut comments = Comments {
+            budget: limit - PART_LINE_BYTES,
+            done: vec![String::new()],
+            heading: None,
+        };
+
+        for block in self.blocks {
+            match block {
+                ReportBlock::Heading(name) => {
+                    comments.heading = None;
+                    comments.push(&render_heading(&name, false));
+                    comments.heading = Some(name);
+                }
+                ReportBlock::Text(text) => comments.push(&text),
+                ReportBlock::Folded {
+                    summary,
+                    bold,
+                    header,
+                    rows,
+                } => {
+                    // A piece fits a comment that opens with the continued heading.
+                    let room = comments.budget - comments.continued_heading().len();
+                    let empty = render_folded(&summary, bold, true, &header, &[]).len();
+                    let mut piece: Vec<String> = Vec::new();
+                    let mut piece_len = empty;
+                    let mut continued = false;
+                    for row in rows {
+                        if !piece.is_empty() && piece_len + row.len() + 1 > room {
+                            let rows = std::mem::take(&mut piece);
+                            comments
+                                .push(&render_folded(&summary, bold, continued, &header, &rows));
+                            piece_len = empty;
+                            continued = true;
+                        }
+                        piece_len += row.len() + 1;
+                        piece.push(row);
+                    }
+                    comments.push(&render_folded(&summary, bold, continued, &header, &piece));
+                }
+            }
+        }
+
+        let mut comments = comments.done;
+        let count = comments.len();
+        if count > 1 {
+            for (index, comment) in comments.iter_mut().enumerate() {
+                comment.insert_str(
+                    0,
+                    &format!("_Growth report, part {} of {count}._\n\n", index + 1),
+                );
+            }
+        }
+        comments
+    }
+}
+
+/// The comments [`GrowthReport::into_comments`] has filled so far.
+struct Comments {
+    budget: usize,
+    /// Never empty: the last is the comment being filled.
+    done: Vec<String>,
+    /// The section being filled, which a new comment reopens.
+    heading: Option<String>,
+}
+
+impl Comments {
+    fn continued_heading(&self) -> String {
+        self.heading
+            .as_ref()
+            .map_or_else(String::new, |name| render_heading(name, true))
+    }
+
+    /// Append `piece`, starting a new comment if it would overfill this one.
+    fn push(&mut self, piece: &str) {
+        let current = self.done.last().expect("there is always a comment");
+        if !current.is_empty() && current.len() + piece.len() > self.budget {
+            self.done.push(self.continued_heading());
+        }
+        self.done
+            .last_mut()
+            .expect("there is always a comment")
+            .push_str(piece);
+    }
+}
+
+fn render_heading(name: &str, continued: bool) -> String {
+    if continued {
+        format!("## {name} (continued)\n\n")
+    } else {
+        format!("## {name}\n\n")
+    }
+}
+
+fn render_folded(
+    summary: &str,
+    bold: bool,
+    continued: bool,
+    header: &str,
+    rows: &[String],
+) -> String {
+    let summary = if continued {
+        format!("{summary}, continued")
+    } else {
+        summary.to_string()
+    };
+    let summary = if bold {
+        format!("<b>{summary}</b>")
+    } else {
+        summary
+    };
+    let mut folded = format!("<details>\n<summary>{summary}</summary>\n\n{header}");
+    for row in rows {
+        folded.push_str(row);
+        folded.push('\n');
+    }
+    folded.push_str("\n</details>\n\n");
+    folded
 }
 
 /// Per-metric before/after changes for the growth report, split into shrink (`decreases`,
@@ -2234,7 +2390,7 @@ fn render_markdown(results: &[TestResult]) -> String {
             s("AD_WASM_RUN"),
             s("AD_WASM_CORRECT"),
             s("AD_WASM_NOLEAK"),
-            field_name(r.field),
+            r.field.name(),
         ));
     }
 
@@ -2242,7 +2398,7 @@ fn render_markdown(results: &[TestResult]) -> String {
     md.push_str(
         "Success rates count passed or not-applicable stages; ignored tests are excluded.\n\n",
     );
-    for &field in SUPPORTED_FIELDS {
+    for field in FieldId::ALL {
         if !results.iter().any(|result| result.field == field) {
             continue;
         }
@@ -2254,7 +2410,7 @@ fn render_markdown(results: &[TestResult]) -> String {
         };
         md.push_str(&format!(
             "- **{} success rate: {percent:.1}%** ({handled}/{total} stages)\n",
-            field_name(field)
+            field.name()
         ));
     }
     md
@@ -2290,20 +2446,35 @@ mod tests {
 
     #[test]
     fn corpus_field_selection_defaults_to_every_field() {
-        assert_eq!(parse_fields_arg(&lines(&["test-runner"])), SUPPORTED_FIELDS);
-        for &field in SUPPORTED_FIELDS {
+        assert_eq!(parse_fields_arg(&lines(&["test-runner"])), FieldId::ALL);
+        for field in FieldId::ALL {
             assert_eq!(
-                parse_fields_arg(&lines(&["test-runner", "--field", field_name(field)])),
+                parse_fields_arg(&lines(&["test-runner", "--field", field.name()])),
                 vec![field]
             );
         }
     }
 
     #[test]
+    fn determinism_tests_skip_the_field_selector() {
+        let args = lines(&[
+            "test-runner",
+            "--check-determinism",
+            "--field",
+            "goldilocks",
+            "--runs",
+            "2",
+            "sha256",
+        ]);
+        assert_eq!(parse_determinism_tests(&args), ["sha256"]);
+        assert_eq!(parse_field_arg(&args), FieldId::Goldilocks);
+    }
+
+    #[test]
     fn separate_field_reports_merge_to_the_combined_report() {
         let mut results = Vec::new();
         for name in ["suite/z", "suite/a"] {
-            for &field in SUPPORTED_FIELDS {
+            for field in FieldId::ALL {
                 let mut result = parse_child_output(
                     name,
                     TestExpectation::ExecutionSuccess,
@@ -2532,7 +2703,7 @@ mod tests {
                 &result.out_c
             ));
         }
-        run::<RawField>();
+        run::<Bn254>();
         run::<Goldilocks>();
     }
 
@@ -3134,5 +3305,82 @@ mod tests {
         assert_eq!(row.rows, Some(200));
         assert_eq!(row.wasm_size_bytes, None);
         assert_eq!(table.cell(row, "AD WASM No Leak"), Some("✅"));
+    }
+
+    /// A growth report with one field, a sentence, and a table of `rows` rows.
+    fn growth_report(rows: usize) -> GrowthReport {
+        let mut report = GrowthReport::default();
+        report
+            .blocks
+            .push(ReportBlock::Heading("bn254".to_string()));
+        report.text("**bn254 success rate on test cases: 100.0%**\n\n");
+        push_change_table(
+            &mut report,
+            "WASM Size (bytes) grew",
+            &(0..rows)
+                .map(|row| format!("| noir_tests/test_{row} | 100 | 140 | +40 (+40.0%) |"))
+                .collect::<Vec<_>>(),
+        );
+        report
+    }
+
+    /// The report's list rows, in order, wherever they are.
+    fn table_rows(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|line| line.starts_with("| noir_tests/"))
+            .collect()
+    }
+
+    #[test]
+    fn a_growth_report_that_fits_is_one_unnumbered_comment() {
+        let report = growth_report(5);
+        let whole = report.render();
+        assert_eq!(report.into_comments(GROWTH_COMMENT_BYTES), vec![whole]);
+    }
+
+    /// Splitting loses nothing: every row arrives once, in order, and each comment is a well-formed
+    /// piece of the report under the limit.
+    #[test]
+    fn a_growth_report_too_long_for_one_comment_is_split_without_losing_a_row() {
+        let limit = 2_000;
+        let report = growth_report(100);
+        let whole = report.render();
+        let comments = report.into_comments(limit);
+
+        assert!(comments.len() > 1, "{} comment(s)", comments.len());
+        let rows: Vec<&str> = comments
+            .iter()
+            .flat_map(|comment| table_rows(comment))
+            .collect();
+        assert_eq!(rows, table_rows(&whole));
+        for (index, comment) in comments.iter().enumerate() {
+            assert!(
+                comment.len() <= limit,
+                "comment {index} is {} bytes",
+                comment.len()
+            );
+            assert!(comment.starts_with(&format!(
+                "_Growth report, part {} of {}._\n\n",
+                index + 1,
+                comments.len()
+            )));
+            assert_eq!(
+                comment.matches("<details>").count(),
+                comment.matches("</details>").count()
+            );
+        }
+        // A comment that continues the table reopens its section, summary and header.
+        let last = comments.last().unwrap();
+        assert!(last.contains("## bn254 (continued)\n\n<details>"));
+        assert!(
+            last.contains(
+                "<summary><b>WASM Size (bytes) grew (100 test(s)), continued</b></summary>"
+            )
+        );
+        assert!(
+            last.contains(
+                "| Test | Before | After | Change |\n|------|--------|-------|--------|\n"
+            )
+        );
     }
 }

@@ -12,7 +12,34 @@ use crate::compiler::{
         },
     },
 };
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
+
+/// Why a witnessed `to_bits` of `count` bits is refused on `field`, or `None` where it lowers.
+///
+/// This refuses rather than pads: a wider decomposition needs a decision on how its leading zeroes
+/// fit the field-agnostic lowering contract. `DecompositionWidthValidation` asks it before the
+/// lowering runs, so the driver reports the refusal as an error.
+pub(crate) fn witness_to_bits_refusal(count: usize, field: FieldConfig) -> Option<String> {
+    (count > field.field_bit_size() as usize).then(|| {
+        format!("a witness `to_bits` of {count} bits asks for more bits than a field element has")
+    })
+}
+
+/// Why a witnessed `to_radix` of `count` bytes is refused on `field`, or `None` where it lowers.
+///
+/// Unlike bits, the top byte may be only partially occupied (BN254 needs 32 bytes). Wider
+/// zero-padded decompositions need an explicit field-agnostic contract. Asked first as
+/// [`witness_to_bits_refusal`] is.
+pub(crate) fn witness_to_radix_refusal(count: usize, field: FieldConfig) -> Option<String> {
+    let max_bytes = (field.field_bit_size() as usize).div_ceil(8);
+    (count > max_bytes).then(|| {
+        format!(
+            "a witness `to_radix` of {count} bytes asks for more than the {max_bytes} bytes a \
+             field element occupies"
+        )
+    })
+}
 
 pub struct LowerWitnessFieldOps {}
 
@@ -277,7 +304,6 @@ impl LowerWitnessFieldOps {
     /// Lower the bit-decomposition builtin. The builtin is designed to provide a raw decomposition,
     /// so this intentionally adds no canonicity check. That check is provided in unconstrained Noir
     /// code by the user-facing `to_le_bits`/`to_be_bits` wrappers.
-    // FIELD-ASSUMPTION: L4-decompose
     fn lower_to_bits(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -291,15 +317,8 @@ impl LowerWitnessFieldOps {
         if !context.types().get_value_type(value).is_witness_of() {
             return false;
         }
-        // This refuses rather than pads: a wider decomposition needs a decision on how its
-        // leading zeroes fit the field-agnostic lowering contract.
-        if count > b.field().field_bit_size() as usize {
-            unsupported_on_this_field(
-                format_args!(
-                    "a witness `to_bits` of {count} bits asks for more bits than a field element has"
-                ),
-                b.field(),
-            );
+        if let Some(refusal) = witness_to_bits_refusal(count, b.field()) {
+            unsupported_on_this_field(format_args!("{refusal}"), b.field());
         }
 
         // Compute the decomposition in witgen, then bind each hinted bit to a fresh circuit
@@ -359,7 +378,6 @@ impl LowerWitnessFieldOps {
     /// Lower the radix-decomposition builtin. Like `lower_to_bits`, this is designed to provide a
     /// raw decomposition with no canonicity check; unconstrained Noir code in the user-facing
     /// `to_le_bytes`/`to_be_bytes` wrappers provides that check.
-    // FIELD-ASSUMPTION: L4-decompose
     fn lower_to_radix(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -409,9 +427,8 @@ impl LowerWitnessFieldOps {
                 },
                 None => decomposition,
             };
-            // FIELD-ASSUMPTION: L4-decompose. The assertion above establishes radix 256,
-            // so each digit contributes exactly eight bits. This is the source conversion,
-            // before any raw witness hint is emitted.
+            // The assertion above establishes radix 256, so each digit contributes exactly eight
+            // bits. This is the source conversion, before any raw witness hint is emitted.
             super::pure_decompositions::emit_fit_check(
                 b,
                 context,
@@ -423,16 +440,8 @@ impl LowerWitnessFieldOps {
             return true;
         }
 
-        // Unlike bits, the top byte may be only partially occupied (BN254 needs 32 bytes). Wider
-        // zero-padded decompositions need an explicit field-agnostic contract.
-        let max_bytes = (b.field().field_bit_size() as usize).div_ceil(8);
-        if count > max_bytes {
-            unsupported_on_this_field(
-                format_args!(
-                    "a witness `to_radix` of {count} bytes asks for more than the {max_bytes} bytes a field element occupies"
-                ),
-                b.field(),
-            );
+        if let Some(refusal) = witness_to_radix_refusal(count, b.field()) {
+            unsupported_on_this_field(format_args!("{refusal}"), b.field());
         }
 
         let pure_value = b.value_of(value);

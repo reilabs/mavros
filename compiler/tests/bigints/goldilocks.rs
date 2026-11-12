@@ -1,28 +1,31 @@
-//! Goldilocks programs built directly as SSA, compiled to a Goldilocks R1CS and VM bytecode, run on
-//! the VM, and checked against the field and integer model.
+//! Goldilocks programs built directly as SSA, compiled to a Goldilocks R1CS, VM bytecode and WASM,
+//! run on the VM, and checked against the field and integer model.
 //!
-//! Every program here also passes the harness' AD check. None has a WASM lane: the runtime has no
-//! Goldilocks instance.
+//! Every program here also passes the harness' AD check, on each lane it has.
 
 use mavros_artifacts::{
     Field, FieldConfig, Goldilocks, InputValueOrdered, field::goldilocks::MODULUS,
 };
-use mavros_compiler::compiler::{
-    passes::shared::limbs::witness_limb_bits,
-    ssa::{
-        ValueId,
-        hlssa::{
-            BinaryArithOpKind, CmpKind, Endianness, Type,
-            builder::{HLBlockEmitter, HLEmitter as _},
+use mavros_compiler::{
+    compiler::{
+        passes::shared::limbs::witness_limb_bits,
+        ssa::{
+            ValueId,
+            hlssa::{
+                BinaryArithOpKind, CastTarget, CmpKind, Endianness, Radix, Type,
+                builder::{HLBlockEmitter, HLEmitter as _},
+            },
         },
     },
+    driver::Error as DriverError,
 };
 use mavros_int_semantics::{CmpOp, IntBits, IntOp, SignedValue, corners};
 use num_bigint::BigUint;
 
 use crate::{
     Limbed, Rhs, assert_every_column_is_pinned, assert_no_two_columns_trade_a_limb,
-    check_limbed_grid_in, corner_pairs, dedup, few_shift_amounts, half_width_corners,
+    check_limbed_grid_in, check_limbed_pairs_on, corner_pairs, dedup, few_shift_amounts,
+    half_width_corners,
     harness::{BinaryOpOracle, Compiled, Verdict, input_block_in, main_program_in},
     limb_reaching_values, limb_shift_amounts, signed_limb_corners_at,
 };
@@ -68,8 +71,19 @@ fn compile(
     Compiled::compile(ssa).unwrap_or_else(|error| panic!("a Goldilocks program failed: {error}"))
 }
 
+/// The verdicts on `inputs` of the VM and of the WASM module, in that order.
+fn on_both_lanes(
+    compiled: &Compiled<Goldilocks>,
+    inputs: &[InputValueOrdered<Goldilocks>],
+) -> [Verdict<Goldilocks>; 2] {
+    [
+        compiled.run(inputs),
+        compiled.run_wasm(inputs).expect("the WASM lane builds"),
+    ]
+}
+
 /// Asserts `inputs` with `expected` declared as the return is accepted, and with the return off
-/// by one is refused at the return check, so the return is constrained.
+/// by one is refused at the return check, so the return is constrained. Both lanes are judged.
 fn assert_returns(
     what: &str,
     compiled: &Compiled<Goldilocks>,
@@ -79,22 +93,24 @@ fn assert_returns(
 ) {
     let mut block = inputs.to_vec();
     block.push(expected);
-    let verdict = compiled.run(&block);
-    assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+    for verdict in on_both_lanes(compiled, &block) {
+        assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+    }
 
     *block.last_mut().unwrap() = wrong;
-    let verdict = compiled.run(&block);
-    assert!(
-        matches!(verdict, Verdict::ReturnMismatch { .. }),
-        "{what}: a wrong return gave {verdict:?}"
-    );
+    for verdict in on_both_lanes(compiled, &block) {
+        assert!(
+            matches!(verdict, Verdict::ReturnMismatch { .. }),
+            "{what}: a wrong return gave {verdict:?}"
+        );
+    }
 }
 
 // FIELD ARITHMETIC
 // ================================================================================================
 
 /// Both field casts of a pure value agree with the model at every corner, around the field's 64
-/// bits, the host limbs and the four-limb packing, and far past them.
+/// bits, which are also its one-limb packing's, the host limbs, and far past them.
 #[test]
 fn pure_field_casts_agree_with_the_model_on_goldilocks() {
     let widths = [1usize, 32, 63, 64, 65, 128, 129, 256, 257, 1000, 16384];
@@ -103,8 +119,9 @@ fn pure_field_casts_agree_with_the_model_on_goldilocks() {
         &widths,
     ))
     .unwrap_or_else(|error| panic!("a pure field cast does not compile: {error}"));
-    let verdict = compiled.run(&crate::unconstrained_inputs_in::<Goldilocks>(0));
-    assert!(verdict.is_accepted(), "{verdict:?}");
+    for verdict in on_both_lanes(&compiled, &crate::unconstrained_inputs_in::<Goldilocks>(0)) {
+        assert!(verdict.is_accepted(), "{verdict:?}");
+    }
 }
 
 /// A pure element's bit window reads its canonical integer, whose bytes number 8 here.
@@ -115,8 +132,10 @@ fn pure_field_bit_windows_read_the_canonical_integer_on_goldilocks() {
         let compiled =
             Compiled::<Goldilocks>::compile(crate::pure_field_window_program(field, window))
                 .unwrap_or_else(|error| panic!("the window {window:?} does not compile: {error}"));
-        let verdict = compiled.run(&crate::unconstrained_inputs_in::<Goldilocks>(0));
-        assert!(verdict.is_accepted(), "{window:?}: {verdict:?}");
+        let inputs = crate::unconstrained_inputs_in::<Goldilocks>(0);
+        for verdict in on_both_lanes(&compiled, &inputs) {
+            assert!(verdict.is_accepted(), "{window:?}: {verdict:?}");
+        }
     }
 }
 
@@ -148,8 +167,12 @@ fn field_arithmetic_agrees_with_the_field() {
                         input(expected + Goldilocks::ONE),
                     ),
                     None => {
-                        let verdict = compiled.run(&[input(a), input(b), input(Goldilocks::ZERO)]);
-                        assert!(verdict.is_refusal(), "{kind:?}({a}, {b}): {verdict:?}");
+                        // A refusal is a trap on the VM, and a witness the constraints refuse on
+                        // WASM.
+                        let inputs = [input(a), input(b), input(Goldilocks::ZERO)];
+                        let [vm, wasm] = on_both_lanes(&compiled, &inputs);
+                        assert!(vm.is_refusal(), "{kind:?}({a}, {b}): {vm:?}");
+                        assert!(wasm.rejects(), "{kind:?}({a}, {b}), WASM: {wasm:?}");
                     }
                 }
             }
@@ -340,16 +363,15 @@ fn check_limbed_matrix_pairs(
     check_limbed_grid_in::<Goldilocks>(limbed, bits, lefts, &rights, rhs);
 }
 
-/// [`crate::check_limbed_pairs_in`] reaches the WASM lane through [`Compiled::as_bn254`], so a
-/// downcast that missed bn254 would skip that lane without a failure.
+/// A field without the lane would skip it with no failure.
 #[test]
-fn only_a_bn254_program_has_a_wasm_lane() {
+fn every_field_has_a_wasm_lane() {
     let program =
         |field| main_program_in(field, &[Type::int(8)], &[Type::int(8)], |_, p| vec![p[0]]);
     let bn254 = Compiled::<Field>::compile(program(FieldConfig::bn254())).unwrap();
-    assert!(bn254.as_bn254().is_some());
+    assert!(bn254.wasm_is_available());
     let goldilocks = Compiled::<Goldilocks>::compile(program(FieldConfig::goldilocks())).unwrap();
-    assert!(goldilocks.as_bn254().is_none());
+    assert!(goldilocks.wasm_is_available());
 }
 
 /// 63 bits, the widest integer one Goldilocks element holds injectively: the limbed lowerings split
@@ -413,30 +435,164 @@ fn a_field_element_decomposes_into_its_64_bits() {
             let bits: Vec<_> = (0..64).map(|index| input(bit(index))).collect();
             let mut block = vec![input(a)];
             block.extend(bits);
-            let verdict = compiled.run(&block);
-            assert!(
-                verdict.is_accepted(),
-                "{a} to {endianness:?} bits: {verdict:?}"
-            );
+            for verdict in on_both_lanes(&compiled, &block) {
+                assert!(
+                    verdict.is_accepted(),
+                    "{a} to {endianness:?} bits: {verdict:?}"
+                );
+            }
 
             let mut wrong = block.clone();
             wrong[1] = input(Goldilocks::ONE - bit(0));
-            let verdict = compiled.run(&wrong);
-            assert!(
-                !verdict.is_accepted(),
-                "{a} to {endianness:?} bits accepted a flipped first bit: {verdict:?}"
-            );
+            for verdict in on_both_lanes(&compiled, &wrong) {
+                assert!(
+                    !verdict.is_accepted(),
+                    "{a} to {endianness:?} bits accepted a flipped first bit: {verdict:?}"
+                );
+            }
         }
     }
 }
 
-/// A Goldilocks element has 64 bits, so a witnessed decomposition into 65 is refused.
+/// A witnessed field element decomposes into the 8 bytes of its integer, in either order.
 #[test]
-#[should_panic(expected = "asks for more bits than a field element has")]
-fn a_65_bit_decomposition_is_refused_on_goldilocks() {
-    compile(&[Type::field()], &[Type::int(1).array_of(65)], |e, p| {
-        vec![e.to_bits(p[0], Endianness::Little, 65)]
-    });
+fn a_field_element_decomposes_into_its_8_bytes() {
+    for endianness in [Endianness::Little, Endianness::Big] {
+        let compiled = compile(&[Type::field()], &[Type::int(8).array_of(8)], |e, p| {
+            vec![e.to_radix(p[0], Radix::Bytes, endianness, 8)]
+        });
+        for &a in &operands() {
+            let byte = |index: usize| {
+                let position = match endianness {
+                    Endianness::Little => index,
+                    Endianness::Big => 7 - index,
+                };
+                Goldilocks::from((a.value() >> (8 * position)) & 0xFF)
+            };
+            let mut block = vec![input(a)];
+            block.extend((0..8).map(|index| input(byte(index))));
+            for verdict in on_both_lanes(&compiled, &block) {
+                assert!(
+                    verdict.is_accepted(),
+                    "{a} to {endianness:?} bytes: {verdict:?}"
+                );
+            }
+
+            let mut wrong = block.clone();
+            wrong[1] = input(byte(0) + Goldilocks::ONE);
+            for verdict in on_both_lanes(&compiled, &wrong) {
+                assert!(
+                    !verdict.is_accepted(),
+                    "{a} to {endianness:?} bytes accepted a wrong first byte: {verdict:?}"
+                );
+            }
+        }
+    }
+}
+
+/// An integer decomposes into the bits and bytes of its pattern, either way round, past the 63
+/// bits one element carries injectively, so it is cut into chunks of whole bytes. Each value is
+/// at least the modulus, where its pattern and its residue's differ.
+///
+/// The 64-bit value is `2^64 - 2`; the 128-bit one adds `2^127`, past a zero gap from bit 64.
+#[test]
+fn an_integer_decomposes_into_its_pattern_past_one_element() {
+    let low = (BigUint::from(1u8) << 64u32) - 2u8;
+    let high = &low + (BigUint::from(1u8) << 127u32);
+    // (operand, bytes rather than bits, big-endian, digits, digit read, want)
+    let cases = [
+        (&low, 64usize, false, false, 64usize, 0usize, 0u64),
+        (&low, 64, false, false, 64, 1, 1),
+        (&low, 64, false, false, 64, 63, 1),
+        (&low, 64, false, true, 64, 0, 1),
+        (&low, 64, false, true, 64, 63, 0),
+        (&low, 64, true, false, 8, 0, 0xFE),
+        (&low, 64, true, false, 8, 7, 0xFF),
+        (&low, 64, true, true, 8, 0, 0xFF),
+        (&low, 64, true, true, 8, 7, 0xFE),
+        (&low, 64, false, false, 100, 99, 0),
+        (&low, 64, true, false, 12, 11, 0),
+        (&high, 128, false, false, 128, 56, 1),
+        (&high, 128, false, false, 128, 64, 0),
+        (&high, 128, false, false, 128, 127, 1),
+        (&high, 128, true, false, 16, 6, 0xFF),
+        (&high, 128, true, false, 16, 7, 0xFF),
+        (&high, 128, true, false, 16, 8, 0),
+        (&high, 128, true, false, 16, 15, 0x80),
+        (&high, 128, true, true, 16, 0, 0x80),
+    ];
+    for (value, bits, bytes, big, digits, read, want) in cases {
+        // The pattern is `2 | rest`, and the 2 comes from the parameter, so it is witnessed.
+        let rest = IntBits::from_biguint(bits, &(value - 2u8));
+        let digit_bits = if bytes { 8 } else { 1 };
+        let endianness = if big {
+            Endianness::Big
+        } else {
+            Endianness::Little
+        };
+        let compiled = compile(&[Type::field()], &[Type::int(digit_bits)], |e, p| {
+            let operand = e.cast_to(CastTarget::Int(bits), p[0]);
+            let rest = e.int_const(rest);
+            let operand = e.bin(BinaryArithOpKind::Or, operand, rest);
+            let decomposed = if bytes {
+                e.to_radix(operand, Radix::Bytes, endianness, digits)
+            } else {
+                e.to_bits(operand, endianness, digits)
+            };
+            let index = e.int_const(IntBits::from_u128(32, read as u128));
+            vec![e.array_get(decomposed, index)]
+        });
+        let what = format!(
+            "int{bits} into {digits} {endianness:?} {}, digit {read}",
+            if bytes { "bytes" } else { "bits" }
+        );
+        assert_returns(
+            &what,
+            &compiled,
+            &[input(element(2))],
+            input(element(want)),
+            input(element(want ^ 1)),
+        );
+    }
+}
+
+/// A Goldilocks element has 64 bits in 8 bytes, so a witnessed decomposition into 65 bits or 9
+/// bytes is refused, as an error that names it and what the field offers.
+#[test]
+fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
+    let bits = main_program_in(
+        FieldConfig::goldilocks(),
+        &[Type::field()],
+        &[Type::int(1).array_of(65)],
+        |e, p| vec![e.to_bits(p[0], Endianness::Little, 65)],
+    );
+    let bytes = main_program_in(
+        FieldConfig::goldilocks(),
+        &[Type::field()],
+        &[Type::int(8).array_of(9)],
+        |e, p| vec![e.to_radix(p[0], Radix::Bytes, Endianness::Little, 9)],
+    );
+    for (ssa, refusal) in [
+        (
+            bits,
+            "a witness `to_bits` of 65 bits asks for more bits than a field element has",
+        ),
+        (
+            bytes,
+            "a witness `to_radix` of 9 bytes asks for more than the 8 bytes a field element occupies",
+        ),
+    ] {
+        let Err(error) = Compiled::<Goldilocks>::compile(ssa) else {
+            panic!("compiled although {refusal}");
+        };
+        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
+        let message = error.to_string();
+        assert!(message.contains(refusal), "{message}");
+        assert!(
+            message.contains("64-bit modulus and a 16-bit witness limb"),
+            "{message}"
+        );
+    }
 }
 
 /// No witness column of an accepted run can move alone, and no two can trade a limb's place value,
@@ -505,6 +661,69 @@ fn every_witness_column_of_a_goldilocks_operation_is_pinned() {
 fn every_limbed_operation_agrees_with_the_model_past_one_element() {
     for bits in [64, 100, 128] {
         check_limbed_matrix(bits);
+    }
+}
+
+/// Eight limbs on the WASM lane, a width the matrix above runs on the VM alone, with one accepted
+/// pair to a program and, where the model rejects any of a few corners, one rejected pair beside it.
+/// The accepted left operand reaches the top limb, and a signed operation also takes `-1` there.
+#[test]
+fn every_limbed_operation_runs_on_wasm_at_128_bits() {
+    use Limbed::{
+        Difference, Ordering, Product, Quotient, Remainder, ShiftLeft, ShiftRight,
+        SignedDifference, SignedOrdering, SignedProduct, SignedQuotient, SignedRemainder,
+        SignedShiftLeft, SignedShiftRight, SignedSum, Sum,
+    };
+    let bits = 128;
+    let int = |value: u128| IntBits::from_u128(bits, value);
+    let wide = int((1 << 120) + 5);
+    let seven = int(7);
+    let minus_one = IntBits::all_ones(bits);
+    let rejectable = [
+        (wide.clone(), int(0)),
+        (seven.clone(), wide.clone()),
+        (minus_one.clone(), seven.clone()),
+        (wide.clone(), int(200)),
+        (int(1 << 127), minus_one.clone()),
+        (int((1 << 127) - 1), seven.clone()),
+        (int(1 << 127), seven.clone()),
+    ];
+    let with_a_rejection = |limbed: Limbed, accepted: (IntBits, IntBits)| {
+        let rejected = rejectable
+            .iter()
+            .find(|(left, right)| limbed.model(left, right).is_none())
+            .cloned();
+        std::iter::once(accepted)
+            .chain(rejected)
+            .collect::<Vec<_>>()
+    };
+    for limbed in [
+        Sum, Difference, Ordering, Product, Quotient, Remainder, ShiftLeft, ShiftRight,
+    ] {
+        check_limbed_pairs_on::<Goldilocks>(
+            limbed,
+            bits,
+            with_a_rejection(limbed, (wide.clone(), seven.clone())),
+            Rhs::Witnessed,
+            true,
+        );
+    }
+    for limbed in [
+        SignedSum,
+        SignedDifference,
+        SignedOrdering,
+        SignedProduct,
+        SignedQuotient,
+        SignedRemainder,
+        SignedShiftLeft,
+        SignedShiftRight,
+    ] {
+        for pairs in [
+            with_a_rejection(limbed, (wide.clone(), seven.clone())),
+            vec![(minus_one.clone(), seven.clone())],
+        ] {
+            check_limbed_pairs_on::<Goldilocks>(limbed, bits, pairs, Rhs::Witnessed, true);
+        }
     }
 }
 

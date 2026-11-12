@@ -145,7 +145,7 @@ impl Rewriter<'_> {
                             max_bits: 1,
                         },
                     );
-                    (None, self.cast(bit, CastTarget::Int(even_width)))
+                    (None, self.relabel(bit, even_width))
                 }
                 _ => {
                     let (odd, even) = (self.fresh(), self.fresh());
@@ -249,15 +249,12 @@ impl Rewriter<'_> {
             } else {
                 rest = self.bin(BinaryArithOpKind::USub, rest, placed);
             }
-            pieces.push((
-                self.cast(written, CastTarget::Int(containers[index])),
-                *piece_read,
-            ));
+            pieces.push((self.relabel(written, containers[index]), *piece_read));
         }
         match sum {
             Some(sum) => self.constrain_equal(source, sum, guard),
             None => {
-                let lowest = self.cast(rest, CastTarget::Int(containers[0]));
+                let lowest = self.relabel(rest, containers[0]);
                 pieces.insert(0, (lowest, reads[0]));
             }
         }
@@ -313,7 +310,7 @@ impl Rewriter<'_> {
             self.push(OpCode::Cast {
                 result: target,
                 value: sum.expect("a limb is at least one half-limb"),
-                target: CastTarget::Int(width),
+                target: CastTarget::IntUnchecked(width),
             });
         }
     }

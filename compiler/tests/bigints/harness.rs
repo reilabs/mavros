@@ -19,20 +19,18 @@
 //!
 //! [`Compiled::run_wasm`] makes the same judgement with the compiled WASM against the **same**
 //! R1CS, so a disagreement between the lanes is one between two implementations of one program.
-//! Only bn254 has a WASM runtime, so only a bn254 program has that lane. It answers [`None`] only
-//! when the linker produced no module; a lane that fails to compile fails the test.
+//! It answers [`None`] only when the linker produced no module; a lane that fails to compile fails
+//! the test.
 
 use std::{
-    any::Any,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
-use ark_ff::UniformRand as _;
 use mavros_artifacts::{Field, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
 use mavros_int_semantics::{IntBits, IntOp, Outcome, residue};
 use num_bigint::BigUint;
-use rand::{RngCore as _, SeedableRng as _, rngs::StdRng};
+use rand::{SeedableRng as _, rngs::StdRng};
 use tempfile::TempDir;
 
 use mavros_compiler::{
@@ -66,47 +64,25 @@ use mavros_compiler::{
 
 /// A field the harness compiles and runs programs over.
 pub trait HarnessField: MavrosField {
-    /// The field's configuration, which a program built for it carries.
-    const CONFIG: FieldConfig;
-
-    /// A random element, for the coefficients of the AD check.
-    fn random(rng: &mut StdRng) -> Self;
-
     /// `value` as an element. bn254 reduces it modulo the modulus; Goldilocks refuses a value at or
     /// above its modulus, since no entry point takes one.
     fn of_biguint(value: &BigUint) -> Self;
 }
 
 impl HarnessField for Field {
-    const CONFIG: FieldConfig = FieldConfig::bn254();
-
-    fn random(rng: &mut StdRng) -> Self {
-        Field::rand(rng)
-    }
-
     fn of_biguint(value: &BigUint) -> Self {
         Field::from(value.clone())
     }
 }
 
 impl HarnessField for Goldilocks {
-    const CONFIG: FieldConfig = FieldConfig::goldilocks();
-
-    // A uniform 128-bit integer reduced modulo `p < 2^64` is within `2^-64` of uniform.
-    fn random(rng: &mut StdRng) -> Self {
-        Goldilocks::from(u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64()))
-    }
-
     fn of_biguint(value: &BigUint) -> Self {
-        u64::try_from(value)
-            .ok()
-            .and_then(Goldilocks::from_canonical)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the input {value} is not below the Goldilocks modulus, so no entry point \
+        Goldilocks::try_from_canonical_limbs(&value.to_u64_digits()).unwrap_or_else(|| {
+            panic!(
+                "the input {value} is not below the Goldilocks modulus, so no entry point \
                      takes it"
-                )
-            })
+            )
+        })
     }
 }
 
@@ -305,11 +281,9 @@ pub struct Compiled<F: HarnessField = Field> {
     /// Where the parameters and the return landed in the witness.
     entry_columns: EntryColumns,
 
-    /// The same program compiled to WASM, when the field has a WASM runtime and the linker produced
-    /// a module.
+    /// The same program compiled to WASM, when the linker produced a module.
     ///
-    /// [`None`] for a field without a WASM runtime, or when no module came out; a compilation that
-    /// _fails_ panics. See [`compile_wasm`].
+    /// [`None`] when no module came out; a compilation that _fails_ panics. See [`compile_wasm`].
     wasm: Option<WasmArtifact>,
 }
 
@@ -352,11 +326,13 @@ pub const KEEP_DUMPS_ENV: &str = "MAVROS_ORACLE_DUMPS";
 pub const AD_SEED_ENV: &str = "MAVROS_ORACLE_AD_SEED";
 
 impl Compiled {
-    /// [`Self::compile`] for a program over bn254, the field with a WASM lane.
+    /// [`Self::compile`] for a program over bn254.
     pub fn new(ssa: HLSSA) -> Result<Self, DriverError> {
         Self::compile(ssa)
     }
+}
 
+impl<F: HarnessField> Compiled<F> {
     /// Whether the WASM lane was built for this program.
     #[must_use]
     pub fn wasm_is_available(&self) -> bool {
@@ -368,9 +344,9 @@ impl Compiled {
     ///
     /// # Panics
     ///
-    /// If the module was built but no engine will load it: a broken lane, which scored as a trap
-    /// would pass a test that expects a rejection.
-    pub fn run_wasm(&self, inputs: &[InputValueOrdered]) -> Option<Verdict> {
+    /// If the module was built but no engine will load it, or the host refuses it as over another
+    /// field: a broken lane, which scored as a trap would pass a test that expects a rejection.
+    pub fn run_wasm(&self, inputs: &[InputValueOrdered<F>]) -> Option<Verdict<F>> {
         let wasm = self.wasm.as_ref()?;
         let (params, declared) = self.split_inputs(inputs);
         let loaded = wasm
@@ -380,6 +356,9 @@ impl Compiled {
         let run = wasm_host::run_witgen_loaded(loaded, &self.r1cs, params, entry_blob_field_count);
         let result = match run {
             Ok(result) => result,
+            Err(error) if error.is::<wasm_host::ModuleFieldMismatch>() => {
+                panic!("the WASM host refused the module: {error}")
+            }
             Err(error) => {
                 return Some(Verdict::Trapped {
                     message: with_causes(error.as_ref()),
@@ -406,22 +385,23 @@ impl Compiled {
         }
         Some(self.judge_return(witness, declared))
     }
-}
-
-impl<F: HarnessField> Compiled<F> {
-    /// This program as a bn254 one, the field with a WASM lane, or [`None`] over any other field.
-    #[must_use]
-    pub fn as_bn254(&self) -> Option<&Compiled> {
-        (self as &dyn Any).downcast_ref::<Compiled>()
-    }
 
     /// Runs the production pipeline over `ssa`, from `make_struct_access_static` to the VM
     /// binary. The Noir frontend is the only stage skipped, because the program did not come
     /// from Noir source.
     ///
-    /// `ssa` must be a program over `F`. Only bn254 has a WASM runtime, so only a bn254 program
-    /// gets a WASM lane.
+    /// `ssa` must be a program over `F`.
     pub fn compile(ssa: HLSSA) -> Result<Self, DriverError> {
+        Self::compile_lanes(ssa, true)
+    }
+
+    /// [`Self::compile`] with no WASM lane, for a program too large to be worth linking.
+    /// [`Self::run_wasm`] then answers [`None`].
+    pub fn compile_for_the_vm(ssa: HLSSA) -> Result<Self, DriverError> {
+        Self::compile_lanes(ssa, false)
+    }
+
+    fn compile_lanes(ssa: HLSSA, wasm_lane: bool) -> Result<Self, DriverError> {
         let (debug_output_dir, scratch) = match std::env::var_os(KEEP_DUMPS_ENV) {
             Some(root) => {
                 static NEXT: std::sync::atomic::AtomicUsize =
@@ -467,9 +447,9 @@ impl<F: HarnessField> Compiled<F> {
             include_debug_info: true,
         })?;
 
-        let wasm = (r1cs.system() as &dyn Any)
-            .downcast_ref::<R1CS>()
-            .and_then(|r1cs| compile_wasm(&mut driver, r1cs));
+        let wasm = wasm_lane
+            .then(|| compile_wasm(&mut driver, r1cs.system()))
+            .flatten();
 
         let compiled = Self {
             r1cs,
@@ -501,9 +481,7 @@ impl<F: HarnessField> Compiled<F> {
             Err(_) => rand::random(),
         };
         let mut rng = StdRng::seed_from_u64(seed);
-        let coeffs: Vec<F> = (0..self.r1cs.constraints.len())
-            .map(|_| F::random(&mut rng))
-            .collect();
+        let coeffs: Vec<F> = api::random_ad_coeffs_with(&self.r1cs, &mut rng);
         let replay = format!("replay with {AD_SEED_ENV}={seed}");
 
         let mut binary = self.binary.clone();
@@ -518,18 +496,21 @@ impl<F: HarnessField> Compiled<F> {
         );
 
         if let Some(wasm) = &self.wasm {
-            let (r1cs, coeffs) = (self.r1cs.system() as &dyn Any)
-                .downcast_ref::<R1CS>()
-                .zip((&coeffs as &dyn Any).downcast_ref::<Vec<Field>>())
-                .expect("only a bn254 program has a WASM lane");
+            let r1cs = self.r1cs.system();
             let loaded = wasm.loaded().unwrap_or_else(|error| {
                 panic!("the WASM engine refused the module: {error}; {replay}")
             });
-            let result = wasm_host::run_ad_loaded(loaded, r1cs, coeffs).unwrap_or_else(|error| {
+            let result = wasm_host::run_ad_loaded(loaded, r1cs, &coeffs).unwrap_or_else(|error| {
                 panic!("the AD entry point trapped on WASM: {error}; {replay}")
             });
             assert!(
-                api::check_ad(r1cs, coeffs, &result.out_da, &result.out_db, &result.out_dc),
+                api::check_ad(
+                    r1cs,
+                    &coeffs,
+                    &result.out_da,
+                    &result.out_db,
+                    &result.out_dc
+                ),
                 "the WASM AD entry point disagrees with the constraint system; {replay}"
             );
         }
@@ -885,7 +866,7 @@ pub fn bytecode_listing(ssa: &HLSSA) -> String {
 /// cannot pass by skipping. [`None`] means only that no scratch directory could be made, or that
 /// the linker succeeded without writing a module; [`Compiled::wasm_is_available`] tells those
 /// apart from a lane that ran.
-fn compile_wasm(driver: &mut Driver, r1cs: &R1CS) -> Option<WasmArtifact> {
+fn compile_wasm<F: MavrosField>(driver: &mut Driver, r1cs: &R1CS<F>) -> Option<WasmArtifact> {
     let scratch = TempDir::new().ok()?;
     let path = scratch.path().join("program.wasm");
     let options = WasmCompileOpts::fast(

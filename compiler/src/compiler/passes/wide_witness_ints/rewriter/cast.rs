@@ -17,7 +17,7 @@ impl Rewriter<'_> {
         let source_bits = source_type.int_width();
 
         match target {
-            CastTarget::Int(to_bits) => {
+            CastTarget::Int(to_bits) | CastTarget::IntUnchecked(to_bits) => {
                 // The other side of the field boundary: a wide value read back out of the field
                 // elements its limbs were pinned as. Each limb returns at its width, so there
                 // is nothing to recombine and no place value to mint.
@@ -47,7 +47,7 @@ impl Rewriter<'_> {
                         self.push(OpCode::Cast {
                             result,
                             value: limb,
-                            target: CastTarget::Int(width),
+                            target: CastTarget::IntUnchecked(width),
                         });
                     }
                     return;

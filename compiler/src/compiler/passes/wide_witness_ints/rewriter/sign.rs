@@ -309,9 +309,7 @@ impl Rewriter<'_> {
             .enumerate()
             .map(|(index, width)| match (index, sign) {
                 (0, Sign::Known(_)) => (self.int_const(IntBits::one(*width)), false),
-                (0, Sign::Bit(bit, witnessed)) => {
-                    (self.cast(bit, CastTarget::Int(*width)), witnessed)
-                }
+                (0, Sign::Bit(bit, witnessed)) => (self.relabel(bit, *width), witnessed),
                 _ => (self.int_const(IntBits::zero(*width)), false),
             })
             .collect();
@@ -410,7 +408,7 @@ impl Rewriter<'_> {
             .zip(widths)
             .map(|(limb, width)| match self.constant_limb(limb, *width) {
                 Some(pattern) => (self.int_const(pattern), false),
-                None => (self.cast(limb, CastTarget::Int(*width)), true),
+                None => (self.relabel(limb, *width), true),
             })
             .collect()
     }
@@ -450,7 +448,7 @@ impl Rewriter<'_> {
                 None => {
                     let x = self.cast(limb, CastTarget::Field);
                     let flipped = self.bin(BinaryArithOpKind::USub, ones, x);
-                    (self.cast(flipped, CastTarget::Int(width)), witnessed)
+                    (self.relabel(flipped, width), witnessed)
                 }
             },
             Sign::Bit(sign, sign_witnessed) => {
@@ -460,7 +458,7 @@ impl Rewriter<'_> {
                 let moved = self.bin(BinaryArithOpKind::UMul, sign, span);
                 let flipped = self.bin(BinaryArithOpKind::UAdd, x, moved);
                 let witnessed = (witnessed && known.is_none()) || sign_witnessed;
-                (self.cast(flipped, CastTarget::Int(width)), witnessed)
+                (self.relabel(flipped, width), witnessed)
             }
         }
     }

@@ -1236,7 +1236,7 @@ impl VM {
         debug_assert!(
             self.field_ops.field == TypeId::of::<F>(),
             "an opcode over {} ran on a VM built for another field",
-            std::any::type_name::<F>()
+            F::ID
         );
     }
 
@@ -2404,10 +2404,7 @@ mod def {
     ) {
         // A value below the modulus is its element; any other reduces by Horner over the cells,
         // from the top.
-        let canonical = (a.len() <= F::CANONICAL_LIMBS)
-            .then(|| F::from_canonical_limbs(a))
-            .flatten();
-        let reduced = canonical.unwrap_or_else(|| {
+        let reduced = F::try_from_canonical_limbs(a).unwrap_or_else(|| {
             let base = F::from(1u128 << 64);
             a.iter()
                 .rev()

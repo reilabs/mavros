@@ -20,6 +20,10 @@
 
 #![no_std]
 
+/// The exported function naming a module's field: `() -> i32`, answering `FieldId::code`. An
+/// element's stride in the host's buffers follows the field.
+pub const FIELD_TAG_EXPORT: &str = "__mavros_field";
+
 /// Size of a pointer in wasm32 linear memory (used to derive layout).
 pub const WASM_PTR_SIZE: u32 = 4;
 
