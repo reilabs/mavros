@@ -1,7 +1,10 @@
 // insert/remove on a *pure-length* slice: purify leaves the ops untouched and the
 // LowerSliceInsert/LowerSliceRemove scans run with pure bounds (selects fold when the index is
 // pure). Covers the insert-at-len append edge and a round trip back to the original content.
-fn main(x: Field, expected: pub Field) {
+fn main(x: u8, expected: pub u8) {
+    let x = x as Field;
+    let expected = expected as Field;
+
     let mut s: [Field] = [10, 20];
     s = s.insert(1, x);
     assert_eq(s.len() as Field, 3);

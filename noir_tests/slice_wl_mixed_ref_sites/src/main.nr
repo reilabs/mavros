@@ -15,7 +15,11 @@ fn grow(r: &mut [Field], v: Field) {
     *r = (*r).push_back(v);
 }
 
-fn main(w: Field, elen_a: pub Field, elen_b: pub Field) {
+fn main(w: u8, elen_a: pub u8, elen_b: pub u8) {
+    let w = w as Field;
+    let elen_a = elen_a as Field;
+    let elen_b = elen_b as Field;
+
     // Pure-length site: `a`'s own shapes never make this cell witness-length.
     let mut a: [Field] = [10];
     grow(&mut a, 15);

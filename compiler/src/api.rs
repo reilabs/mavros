@@ -1,20 +1,17 @@
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 use crate::{
     Project,
-    abi_helpers::{
-        declared_return_from_btreemap_for_field, ordered_params_from_btreemap_for_field,
-    },
+    abi_helpers::{declared_return, ordered_params},
     compiler::codegen::hlssa_to_r1cs::{R1CS, SealedR1CS},
     driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
     vm::{bytecode::DebugInfo, interpreter},
 };
 use mavros_artifacts::{ConstraintsLayout, InputValueOrdered, MavrosField, WitnessLayout};
-use noirc_abi::input_parser::Format;
+use noirc_abi::{bytes, input_parser::Format};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -78,51 +75,53 @@ pub fn compile_to_r1cs_with<F: MavrosField>(
     Ok((driver, r1cs))
 }
 
-/// The entry blob in ABI order and the optional expected return, from the package's `Prover.toml`,
-/// decoded over `F`.
+/// The parameters in ABI order and the optional expected return, from the package's `Prover.toml`
+/// read by the byte codec's parser (`noirc_abi::bytes::parse`), as elements of `F`.
 pub fn read_prover_inputs<F: MavrosField>(
     root: &Path,
     abi: &noirc_abi::Abi,
 ) -> Result<(Vec<InputValueOrdered<F>>, Option<InputValueOrdered<F>>), Error> {
     let file_path = root.join("Prover.toml");
 
-    if !file_path.exists() {
-        if abi.parameters.is_empty() {
-            let inputs = BTreeMap::new();
-            return Ok((
-                ordered_params_from_btreemap_for_field(abi, &inputs)?,
-                declared_return_from_btreemap_for_field(abi, &inputs)?,
-            ));
-        }
+    let inputs_src = if file_path.exists() {
+        fs::read_to_string(&file_path)?
+    } else if abi.parameters.is_empty() {
+        String::new()
+    } else {
         return Err(format!(
             "the ABI declares {} parameter(s) but {} does not exist",
             abi.parameters.len(),
             file_path.display()
         )
         .into());
-    }
-
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default();
-
-    let Some(format) = Format::from_ext(ext) else {
-        return Err(format!("unsupported input file extension: {ext}").into());
     };
 
-    let inputs_src = fs::read_to_string(&file_path)?;
-    let inputs = format
-        .parse(
-            &inputs_src,
-            abi,
-            acvm::FieldConfig::new(crate::abi_helpers::noir_field_id(F::ID)),
-        )
+    let inputs = bytes::parse(&Format::Toml, &inputs_src, abi)
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
-    let ordered_params = ordered_params_from_btreemap_for_field(abi, &inputs)?;
-    let declared_return = declared_return_from_btreemap_for_field(abi, &inputs)?;
+    let ordered_params = ordered_params(abi, &inputs.params)?;
+    let declared_return = declared_return(abi, inputs.ret.as_ref())?;
 
     Ok((ordered_params, declared_return))
+}
+
+/// The parameters in ABI order from their byte encoding (`noirc_abi::bytes`), as elements of `F`.
+pub fn decode_param_bytes<F: MavrosField>(
+    abi: &noirc_abi::Abi,
+    blob: &[u8],
+) -> Result<Vec<InputValueOrdered<F>>, Error> {
+    let params =
+        bytes::decode_params(abi, blob).map_err(|e| format!("failed to decode inputs: {e}"))?;
+    Ok(ordered_params(abi, &params)?)
+}
+
+/// The expected return from its byte encoding (`noirc_abi::bytes`), as elements of `F`.
+pub fn decode_return_bytes<F: MavrosField>(
+    abi: &noirc_abi::Abi,
+    blob: &[u8],
+) -> Result<InputValueOrdered<F>, Error> {
+    let ret =
+        bytes::decode_return(abi, blob).map_err(|e| format!("failed to decode the return: {e}"))?;
+    Ok(declared_return(abi, Some(&ret))?.expect("`decode_return` refuses an ABI with no return"))
 }
 
 pub fn run_witgen_from_binary<F: MavrosField>(

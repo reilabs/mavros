@@ -599,6 +599,7 @@ impl FnBuilder<'_> {
             // --- No pointer flow. ---
             OpCode::Cmp { .. }
             | OpCode::BinaryArithOp { .. }
+            | OpCode::IntFromLimbs { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::SliceLen { .. }

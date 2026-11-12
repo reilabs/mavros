@@ -108,6 +108,14 @@ struct Scrutinee {
     tag: Option<ValueId>,
 }
 
+/// The parts of a function's `Function` type.
+pub(super) struct FunctionSignature<'a> {
+    pub params: &'a [AstType],
+    pub ret: &'a AstType,
+    /// `Unit` for a function or a closure without captures.
+    pub env: &'a AstType,
+}
+
 impl<'a> ExpressionConverter<'a> {
     pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
@@ -164,24 +172,30 @@ impl<'a> ExpressionConverter<'a> {
         emit(&mut e)
     }
 
-    /// The SSA type of an ident that names a function.
-    fn function_ident_type(&self, ident: &noirc_frontend::monomorphization::ast::Ident) -> Type {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-
-        // Noir types such an ident as the constrained/unconstrained pair while `convert_ident`
-        // emits one `FnPtr`.
+    /// The `Function` type of an ident that names a function.
+    ///
+    /// Noir types a function value as the constrained/unconstrained pair of its variants, while
+    /// `convert_ident` emits one `FnPtr`.
+    pub(super) fn function_signature(
+        ident: &noirc_frontend::monomorphization::ast::Ident,
+    ) -> FunctionSignature<'_> {
         let declared: &AstType = &ident.typ;
         let signature = match declared {
             AstType::Tuple(pair) => pair.first().unwrap_or(declared),
             other => other,
         };
-
-        let AstType::Function(_, ret, _, _) = signature else {
+        let AstType::Function(params, ret, env, _) = signature else {
             ice!(
                 "the ident `{}` names a function but is typed {declared:?}",
                 ident.name
             )
         };
+        FunctionSignature { params, ret, env }
+    }
+
+    /// The SSA type of an ident that names a function.
+    fn function_ident_type(&self, ident: &noirc_frontend::monomorphization::ast::Ident) -> Type {
+        let ret = Self::function_signature(ident).ret;
         Type::function_returning(vec![self.type_converter.convert_type(ret)])
     }
 

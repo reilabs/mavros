@@ -1,6 +1,6 @@
 pub struct IDData {
     pub id: u8,
-    pub lucky_number: Field,
+    pub lucky_number: u8,
 }
 
 

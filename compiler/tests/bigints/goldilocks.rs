@@ -260,7 +260,7 @@ fn every_operation_agrees_with_the_model_on_goldilocks() {
 
 /// The additive and bitwise operations agree up to 63 bits, the widest integer one Goldilocks
 /// element holds injectively. 62 bits is the widest sum one element holds, and 63 the first width
-/// whose sum takes the carry chain. Wider integer _parameters_ do not fit one entry-blob element.
+/// whose sum takes the carry chain.
 #[test]
 fn additive_and_bitwise_operations_agree_up_to_63_bits() {
     use BinaryArithOpKind::{And, Or, SAdd, SSub, UAdd, USub, Xor};

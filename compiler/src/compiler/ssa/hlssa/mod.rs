@@ -271,6 +271,17 @@ pub enum OpCode {
         elems: Vec<ValueId>,
         element_types: Vec<Type>,
     },
+    /// An `int(bits)` spelled by `limbs`, little-endian: `WideWitnessInts`' limbs of that width on
+    /// this SSA's field, each an integer of its limb's width.
+    ///
+    /// Nothing here bounds a limb, so its emitter must. `WideWitnessInts` rewrites every one, so none
+    /// reaches a later pass: witnessed limbs become the value's representation, pure ones are
+    /// recombined.
+    IntFromLimbs {
+        result: ValueId,
+        limbs: Vec<ValueId>,
+        bits: usize,
+    },
     Todo {
         payload: String,
         results: Vec<ValueId>,
@@ -397,6 +408,7 @@ impl OpCode {
             | OpCode::TupleProj { .. }
             | OpCode::TupleRefProj { .. }
             | OpCode::MkTuple { .. }
+            | OpCode::IntFromLimbs { .. }
             | OpCode::Todo { .. }
             | OpCode::InitGlobal { .. }
             | OpCode::DropGlobal { .. }
@@ -937,6 +949,20 @@ impl Instruction for OpCode {
                 let elems_str = elems.iter().map(|v| format!("v{}", v.0)).join(", ");
                 format!("v{}{} = ({})", result.0, annotate_value(*result), elems_str)
             }
+            OpCode::IntFromLimbs {
+                result,
+                limbs,
+                bits,
+            } => {
+                let limbs_str = limbs.iter().map(|v| format!("v{}", v.0)).join(", ");
+                format!(
+                    "v{}{} = int{} from limbs [{}]",
+                    result.0,
+                    annotate_value(*result),
+                    bits,
+                    limbs_str
+                )
+            }
             OpCode::Todo {
                 payload,
                 results,
@@ -1212,6 +1238,11 @@ impl Instruction for OpCode {
                 result: _,
                 elems: e,
                 element_types: _,
+            }
+            | OpCode::IntFromLimbs {
+                result: _,
+                limbs: e,
+                bits: _,
             } => e.iter().collect::<Vec<_>>().into_iter(),
             Self::Todo { .. } => vec![].into_iter(),
             Self::InitGlobal {
@@ -1249,7 +1280,8 @@ impl Instruction for OpCode {
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
             | Self::TupleRefProj { result: r, .. }
-            | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
+            | Self::MkTuple { result: r, .. }
+            | Self::IntFromLimbs { result: r, .. } => vec![r].into_iter(),
             Self::WriteWitness { result: r, .. } => {
                 let ret_vec = r.iter().collect::<Vec<_>>();
                 ret_vec.into_iter()
@@ -1317,7 +1349,8 @@ impl Instruction for OpCode {
             | Self::NextDCoeff { result: r }
             | Self::TupleProj { result: r, .. }
             | Self::TupleRefProj { result: r, .. }
-            | Self::MkTuple { result: r, .. } => vec![r].into_iter(),
+            | Self::MkTuple { result: r, .. }
+            | Self::IntFromLimbs { result: r, .. } => vec![r].into_iter(),
             Self::WriteWitness { result: r, .. } => {
                 let ret_vec = r.iter_mut().collect::<Vec<_>>();
                 ret_vec.into_iter()
@@ -1513,6 +1546,11 @@ impl Instruction for OpCode {
                 result: _,
                 elems: inputs,
                 element_types: _,
+            }
+            | Self::IntFromLimbs {
+                result: _,
+                limbs: inputs,
+                bits: _,
             } => inputs.iter_mut().collect::<Vec<_>>().into_iter(),
             Self::Select {
                 result: _,
@@ -1829,6 +1867,11 @@ impl Instruction for OpCode {
                 result: r,
                 elems: e,
                 element_types: _,
+            }
+            | OpCode::IntFromLimbs {
+                result: r,
+                limbs: e,
+                bits: _,
             } => {
                 let mut ret_vec = vec![r];
                 ret_vec.extend(e);

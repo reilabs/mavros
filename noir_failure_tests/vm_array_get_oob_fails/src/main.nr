@@ -4,7 +4,9 @@ unconstrained fn read(value: Field, index: u32) -> Field {
     values[index]
 }
 
-fn main(value: Field, index: u32) {
+fn main(value: u8, index: u32) {
+    let value = value as Field;
+
     // Safety: exercise an invalid unconstrained read; execution must trap.
     let result = unsafe { read(value, index) };
     assert_eq(result, 0);

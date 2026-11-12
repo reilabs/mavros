@@ -119,6 +119,12 @@ pub fn ice_non_elided_tuple() -> ! {
     ice!("Tuple encountered after ElideTuples pass")
 }
 
+/// `WideWitnessInts` rewrites every `IntFromLimbs`; reaching one downstream is a compiler bug.
+#[track_caller]
+pub fn ice_int_from_limbs_after_wide_witness_ints() -> ! {
+    ice!("IntFromLimbs encountered after WideWitnessInts")
+}
+
 /// Panic if an `AssertConstant` marker survives its dedicated validation phase.
 #[track_caller]
 pub fn ice_unvalidated_assert_constant() -> ! {

@@ -22,6 +22,11 @@ pub(super) fn limb_widths(bits: usize, limb_bits: usize) -> Vec<usize> {
         .collect()
 }
 
+/// The limb widths of an `int(bits)` held as limbs on `field`, little-endian.
+pub fn int_limb_widths(bits: usize, field: FieldConfig) -> Vec<usize> {
+    limb_widths(bits, witness_limb_bits(field))
+}
+
 /// The types a type expands into: one per limb for a witnessed wide integer, itself otherwise.
 pub(super) fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {
     match &ty.expr {

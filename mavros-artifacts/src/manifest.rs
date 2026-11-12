@@ -49,8 +49,6 @@ use crate::{
 pub enum ParamVisibility {
     Public,
     Private,
-    /// Noir's `call_data` / `return_data`, handled exactly like `Private`.
-    DataBus,
 }
 
 impl ParamVisibility {
@@ -165,7 +163,7 @@ impl WitnessManifest {
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 4;
 /// The first format version with a compiler field.
 const COMPILER_SINCE_VERSION: u32 = 3;
 

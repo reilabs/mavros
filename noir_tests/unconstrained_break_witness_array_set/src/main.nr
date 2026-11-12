@@ -36,7 +36,11 @@ unconstrained fn continuing(w: u32) -> [Field; 4] {
     a
 }
 
-fn main(w: u32, e0: pub Field, e1: pub Field, e2: pub Field) {
+fn main(w: u32, e0: pub u8, e1: pub u8, e2: pub u8) {
+    let e0 = e0 as Field;
+    let e1 = e1 as Field;
+    let e2 = e2 as Field;
+
     let a = unsafe { breaking(w) };
     assert_eq(a[0], e0);
     assert_eq(a[1], e1);

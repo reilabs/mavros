@@ -40,7 +40,9 @@ fn shl_pow(w: Field, v: u8, n: u8) -> u8 {
     s
 }
 
-fn main(w: Field) {
+fn main(w: u8) {
+    let w = w as Field;
+
     let mut acc = w;
     for _ in 0..12 {
         acc = acc + w;

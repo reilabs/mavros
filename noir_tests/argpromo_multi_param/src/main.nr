@@ -7,7 +7,12 @@ fn swap_add(a: &mut Field, b: &mut Field) {
     *b = t + 2;
 }
 
-fn main(x: Field, y: Field, ea: pub Field, eb: pub Field) {
+fn main(x: u8, y: u8, ea: pub u8, eb: pub u8) {
+    let x = x as Field;
+    let y = y as Field;
+    let ea = ea as Field;
+    let eb = eb as Field;
+
     let mut a = x;
     let mut b = y;
     swap_add(&mut a, &mut b);

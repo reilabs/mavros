@@ -28,7 +28,10 @@ fn is_unit_line(s: Shape) -> bool {
     }
 }
 
-fn main(w: Field, h: Field) {
+fn main(w: u8, h: u8) {
+    let w = w as Field;
+    let h = h as Field;
+
     assert_eq(inner_area(Wrapper::Inner(Shape::Rect(w, h))), w * h);
     assert_eq(inner_area(Wrapper::Inner(Shape::Line(w))), w);
     assert_eq(inner_area(Wrapper::Inner(Shape::Empty)), 0);

@@ -1,0 +1,7 @@
+points = [[1, 2], [5, 3]]
+pick = true
+return = [6, 11, 15, 15, 8, 4]
+
+[pair]
+lo = 3
+hi = 4

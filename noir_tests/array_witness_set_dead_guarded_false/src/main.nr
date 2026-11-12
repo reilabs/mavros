@@ -2,7 +2,10 @@
 // `noir_failure_tests/array_witness_set_dead_guarded_true` from passing vacuously: if the bounds
 // check DCE leaves behind were emitted unconditionally rather than inside the branch block, this
 // program would reject on an index it never uses. Same program as the sibling, guard off.
-fn main(w: Field, i: u32, x: Field) {
+fn main(w: u8, i: u32, x: u8) {
+    let w = w as Field;
+    let x = x as Field;
+
     let mut a: [Field; 3] = [1, 2, 3];
     if w == 1 {
         a[i] = 9;

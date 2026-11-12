@@ -123,11 +123,8 @@ compiled to WASM, its AD run there, and its witnesses generated there, with two 
 operand sweeps of the Phase 5b operations generate witnesses on the VM only. The limbed matrix past
 64 bits has no WASM module at all: it is large enough to reach the locals limit of a wasm function,
 so `every_limbed_operation_runs_on_wasm_at_128_bits` samples it on WASM instead, one accepted and
-one rejected pair to a program. One gap is refused with an error: an integer entry parameter wider
-than 63 bits, since an `Int` entry parameter is one entry-blob element. An integer return that wide
-is not refused: it is bound as its residue modulo `p` in one public column, so two returns one
-modulus apart publish the same value, and the published value can be one the program's assertions on
-the integer exclude.
+one rejected pair to a program. An integer entry parameter or return wider than 63 bits crosses as
+its limbs, below.
 
 **Phase 5b (integer arithmetic on Goldilocks):** the witness limb is the widest power of two `h`
 whose limb product is an injective integer, `2h <= widest_injective_int_bits`
@@ -167,23 +164,33 @@ on both fields. On a witness:
   at `8·⌈B/2⌉` bits (128 on bn254, 32 on Goldilocks);
 - a witnessed narrowing `Field → Int(n)` truncates as a pure one does: `LowerWitnessNarrowingCast`
   puts a window in front of any source it cannot bound. `IntUnchecked(n)` is the relabel, for an
-  emitter that bounds the element itself: the entry point's parameters, `WideWitnessInts`' limbs,
-  and the standard library's crate-private `unsafe_cast`. The lowerings after that rule's phase cast
-  elements they have already pinned with a bare `Int`, which is a relabel there.
+  emitter that bounds the element itself: the entry point's parameters and their limbs,
+  `WideWitnessInts`' limbs, and the standard library's crate-private `unsafe_cast`. The lowerings
+  after that rule's phase cast elements they have already pinned with a bare `Int`, which is a
+  relabel there.
 
 bn254's constraints and witnesses are byte-identical, except where a witnessed `Field`'s bit window
 starts or ends inside a byte: the split of that byte checks its low part too, one more 8-bit lookup,
 since the two gap checks alone let the prover push it negative. Its bytecode is identical or
 smaller: a pure `x as uN` is a single truncating cast, with no bit window.
 
+**Wide entry parameters:** an integer parameter wider than one element carries
+(`multi_cell_int_bits`: 253 bits on bn254, 63 on Goldilocks) takes one entry-blob element and one
+witness column per `WideWitnessInts` limb, little-endian. `prepare_entry_point` range-checks each
+column at its limb's width and names the limbs as the value with `IntFromLimbs`, which
+`WideWitnessInts` takes as the value's representation: a value that is limbs from the start, with no
+element to tie them to and so no recombination row. The host splits the integer's bit pattern the
+same way (`abi_helpers::abi_type_elements`, `ordered_value`), so no input is reduced.
+
+**Wide entry returns:** a return that wide is published as its limbs, one public column each,
+little-endian (`prepare_entry_point.rs::bind_return_deep`). Each column is written from the value's
+limb and held equal to it, so the limbs of a witnessed value keep their range checks, and those of a
+constant or other pure value are bound by the equality itself. One column holding the whole integer
+would publish its residue modulo `p`, `v` and `v + p` alike. The manifest's return width counts the
+limbs, and the host splits the `return` the inputs declare the same way.
+
 The rest of Phase 5 is open:
 
-- **Integer entry parameters wider than 63 bits** (`prepare_entry_point.rs`): parameters assembled
-  from ABI limbs.
-- **Integer returns wider than 63 bits** (`prepare_entry_point.rs::bind_return_deep`): bound as
-  their residue modulo `p`, which publishes `v` and `v + p` alike, so a value the program's
-  assertions on the integer exclude can be published. Noir refuses such an entry point, nested types
-  included, so only a hand-built HLSSA program reaches this.
 - **The Noir path** (`L1-noir-frontend`): remaining field-specific builtins and BN254-only crypto
   implementations.
 - **`crypto-primitives`** (Layer 5).
@@ -279,8 +286,9 @@ stays raw by design until P5. By file (count):
 - [x] `compiler/src/api.rs` — `random_ad_coeffs::<F>` draws each coefficient with
       `MavrosField::random`: arkworks' `Fr::rand` on bn254, and rejection sampling of one `u64` on
       Goldilocks.
-- [x] `compiler/src/abi_helpers.rs` — ordered inputs and manifest checks are generic over the VM
-      field. Input parsing uses the selected modulus and rejects scalars that cannot fit it.
+- [x] `compiler/src/abi_helpers/mod.rs` — ordered inputs and manifest checks are generic over the VM
+      field. Inputs are parsed without a field; `ordered_params` and `declared_return` turn them
+      into elements of `F`, with an integer wider than one element as its limbs.
 
 ### `L1-serde` — artifact/ABI serialization pinned to `[u64;4]` (representation, P5 — done)
 
@@ -288,20 +296,28 @@ stays raw by design until P5. By file (count):
       canonical limbs, a fixed-size array (`MavrosField::Limbs`) with no length: four limbs for a
       bn254 coefficient and one for a Goldilocks one. `program.mavros` names the field and the
       format in its header (`manifest.rs`).
-- [x] `mavros-artifacts/src/lib.rs` — `InputValueOrdered::field_sizes` answers `F::STORAGE_CELLS`.
 
 ### `L1-noir-frontend` — Frontend field selection and remaining integration gaps (P5)
 
 The pinned Noir frontend accepts a field per compilation, including compile-time evaluation and
-modulus builtins. A `Field` literal crosses the boundary unreduced, as the signed integer written.
-The ABI parser checks values against the selected modulus, using BN254 elements as exact containers
-before conversion to the chosen VM field.
+modulus builtins. A `Field` literal reaches Mavros' lowering unreduced, as the signed integer
+written. Inputs are read by the fork's byte codec (`noirc_abi::bytes`), the same on every field, and
+become VM field elements only at the host (`abi_helpers::ordered_params`): an integer as its two's
+complement bit pattern, in one element or, past the selected field's widest single-element integer,
+as its limbs.
 
 - [x] `compiler/src/compiler/lowering/expression_converter.rs` — `integer_constant` takes a
       literal's magnitude into the configured field, refusing one at or above its modulus with a
       located diagnostic, and negates it for a negative literal (so `-1` is `p - 1` on Goldilocks).
 - [x] `compiler/src/driver.rs` — `run_noir_compiler` passes the `FieldConfig` it is given to both
       Noir's frontend and Mavros' AST lowering.
+- [x] `main`'s signature holds no field element: the frontend refuses `Field` and the data bus
+      there, and `noirc_abi::bytes::check_abi`, which the driver runs on every ABI it generates,
+      refuses a `Field` too. Every parameter and return is an integer, a `bool` or a `str`, or a
+      sequence of those, and crosses on every field: one element per scalar or string byte, or as
+      its limbs past the field's widest single-element integer (`prepare_entry_point.rs`,
+      `abi_helpers`). The driver also refuses an ABI with the data bus, which the witness manifest
+      has no visibility for.
 - [x] Mavros' injected stdlib compiles under both fields. BN254-only curve, Poseidon2 and vendored
       bignum modules are field-gated before type checking. ECDSA and Poseidon2 calls on Goldilocks
       produce unavailable-item frontend diagnostics; their BN254 constants are never reduced into
@@ -374,9 +390,7 @@ before conversion to the chosen VM field.
 - [x] `compiler/src/compiler/util.rs` — `field_constant` passes an integer pattern's limbs to
       `from_canonical_limbs`, which asks the per-value question: below the modulus or not.
 
-The one width bound left is outside the compiler: a Noir input reaches Mavros as the fork's
-`acvm::FieldElement`, a bn254 element (`L1-noir-frontend`), so a field whose modulus exceeds bn254's
-needs the fork's ABI to carry wider values.
+Noir inputs carry no field width: they reach Mavros as byte-codec integers (`L1-noir-frontend`).
 
 ### `L3-field-size` — 32-byte Field Size in the WASM Host (Representation, P4 — done)
 
@@ -711,9 +725,10 @@ ECDSA replacement fails with a frontend diagnostic.
 - [x] **Field selection** — `mavros --field bn254|goldilocks` (default bn254, global to the
       subcommands, parsed as a `FieldId`) and the `F` of `mavros_compiler::api`'s functions
       (`compile_to_r1cs::<F>`, `compile_to_r1cs_with::<F>`, `read_prover_inputs::<F>`,
-      `random_ad_coeffs::<F>`, `random_ad_coeffs_with::<F>`) select the field;
-      `Driver::run_noir_compiler(F::CONFIG)` seeds the frontend and the SSA with it. HLSSA→LLSSA
-      lowering carries it (`LLSSA::with_field(hlssa.field())`), codegen picks the field's opcodes
+      `decode_param_bytes::<F>`, `decode_return_bytes::<F>`, `random_ad_coeffs::<F>`,
+      `random_ad_coeffs_with::<F>`) select the field; `Driver::run_noir_compiler(F::CONFIG)` seeds
+      the frontend and the SSA with it. HLSSA→LLSSA lowering carries it
+      (`LLSSA::with_field(hlssa.field())`), codegen picks the field's opcodes
       (`FieldOpCode::for_field`) and runtime symbols from it, and `LLVMCodeGen::new` takes it and
       ICEs on an LLSSA over another field.
 - [x] **Per-field WASM runtime** — one archive serves every field: `field_runtime!` for bn254 and
@@ -761,19 +776,17 @@ back on, refuses through one funnel, `compiler/src/compiler/passes/shared/unsupp
 names the field's modulus and witness limb widths. Its call sites **are** the machine-readable half
 of this register.
 
-Two of them a program can reach, and the driver asks their question first, so the program gets
-`Error::LoweringRefused` with a diagnostic rather than a panic: `witness_field`'s `to_bits` and
-`to_radix` (`DecompositionWidthValidation`, run between the two witness phases of
-`Driver::spill_witness`), and `prepare_entry_point`'s integer entry parameter
-(`PrepareEntryPoint::param_refusals`, before the pass). The others cannot fire, since an earlier
-lowering routes every operation past them, and stay as backstops.
+A program can reach only `witness_field`'s `to_bits` and `to_radix`, and the driver asks their
+question first (`DecompositionWidthValidation`, run between the two witness phases of
+`Driver::spill_witness`), so the program gets `Error::LoweringRefused` with a diagnostic rather than
+a panic. The others cannot fire, since an earlier lowering routes every operation past them, and
+stay as backstops.
 
 The call sites: `witness_bitwise`'s `lower_word_bitwise` (spread width); `witness_integer_arith`'s
 `lower_unsigned_mul` (both the single-field product and the two-limb packing, the latter covering
 the limb _count_ as well as the packing); `shared/limbs.rs`'s `combine_limbs_of_value` (the
-recombination); `witness_field`'s `to_bits` and `to_radix`; `wide_witness_ints`' `schoolbook` (the
-product and the division); and `prepare_entry_point`'s integer entry parameter wider than the
-injective width.
+recombination); `witness_field`'s `to_bits` and `to_radix`; and `wide_witness_ints`' `schoolbook`
+(the product and the division).
 
 One kind of neighboring check deliberately stays out: an internal invariant no field choice can
 violate (`bit_range`'s "a field `BitRange` cannot exceed a field element").

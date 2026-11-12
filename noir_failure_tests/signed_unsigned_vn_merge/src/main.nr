@@ -16,7 +16,10 @@
 // This is an execution_failure test, so the assertion that matters is the one the harness
 // makes: the program must be rejected. What makes it load-bearing is that it was *accepted*
 // while `PRE::pre_untaint` keyed these operations sign-free -- all three failures vanished.
-fn main(x: Field, y: Field) {
+fn main(x: [u8; 8], y: [u8; 8]) {
+    let x = Field::from_le_bytes_checked(x);
+    let y = Field::from_le_bytes_checked(y);
+
     // 200 + 200 overflows a `u8`; read as `i8` the same bits are -56, and -56 + -56 = -112 fits.
     let xs = x as i8;
     let xu = x as u8;

@@ -21,7 +21,9 @@ fn add_u8(a: u8, b: u8) -> u8 {
     a + b
 }
 
-fn main(w: Field) {
+fn main(w: u8) {
+    let w = w as Field;
+
     // Keeps `main` from folding away entirely; the addition below is what is under test.
     assert(w != 0);
     // 200 + 100 is 300, which is above the 255 a `u8` holds. `44` is the wrapped answer.

@@ -1030,7 +1030,7 @@ mod tests {
             .unwrap();
             fs::write(
                 root.join("src/main.nr"),
-                format!("fn main(x: Field, y: pub Field) {{ assert({condition}); }}\n"),
+                format!("fn main(x: u8, y: pub u8) {{ assert({condition}); }}\n"),
             )
             .unwrap();
             fs::write(
@@ -1136,7 +1136,7 @@ mod tests {
         }
     }
 
-    /// Covers LogUp slots, unused private inputs and partially read compound parameters.
+    /// Covers LogUp slots and parameters read only by their entry range checks.
     #[test]
     fn compile_writes_one_artifact() {
         use mavros_artifacts::{Artifact, ArtifactPreamble, ParamVisibility};
@@ -1150,7 +1150,7 @@ mod tests {
         .unwrap();
         fs::write(
             root.join("src/main.nr"),
-            "fn main(unused: Field, unused_u8: u8, x: [Field; 3], y: pub [u32; 3]) -> pub [Field; 2] {
+            "fn main(unused_u8: u8, x: [u32; 3], y: pub [u32; 3]) -> pub [u32; 2] {
                 let arr = [1, x[1], 100, x[1] + 1];
                 [arr[y[0]], x[1]]
             }",
@@ -1164,10 +1164,10 @@ mod tests {
         let bytes = fs::read(&output).unwrap();
         let artifact: Artifact = Artifact::from_bytes(&bytes).unwrap();
         let manifest = artifact.manifest();
-        assert_eq!(manifest.entry_blob_field_count(), 8);
+        assert_eq!(manifest.entry_blob_field_count(), 7);
         let abi: noirc_abi::Abi = serde_json::from_slice(artifact.abi()).unwrap();
         let names: Vec<_> = abi.parameters.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["unused", "unused_u8", "x", "y"]);
+        assert_eq!(names, ["unused_u8", "x", "y"]);
         assert_eq!(
             artifact.compiler(),
             mavros_compiler::driver::COMPILER_VERSION
@@ -1181,11 +1181,10 @@ mod tests {
             .iter()
             .map(|p| (p.name.as_str(), p.visibility, p.column_start, p.width))
             .collect();
-        // The unused Field disappears; the u8 range check and partial array read retain columns.
+        // The range checks read every parameter, the unused one included, so each keeps columns.
         assert_eq!(
             columns,
             vec![
-                ("unused", ParamVisibility::Private, None, 1),
                 ("unused_u8", ParamVisibility::Private, Some(4), 1),
                 ("x", ParamVisibility::Private, Some(5), 3),
                 ("y", ParamVisibility::Public, Some(1), 3)
@@ -1327,7 +1326,7 @@ mod tests {
         fs::write(project.path().join("Prover.toml"), "x = \"1\"\n").unwrap();
         fs::write(
             project.path().join("src/main.nr"),
-            "fn main(x: Field) { assert_eq(x, 1); }\n",
+            "fn main(x: u8) { assert_eq(x, 1); }\n",
         )
         .unwrap();
 
@@ -1391,8 +1390,9 @@ mod tests {
         assert!(ProgramOptions::try_parse_from(["mavros", "--field", "babybear"]).is_err());
     }
 
-    /// A package whose `main` squares `x` into `y` and reads `x` back from a witness-indexed
-    /// array. The read is a lookup, so on Goldilocks the R1CS repeats its LogUp argument.
+    /// A package whose `main` reads `x` and `y` as field elements, squares `x` into `y` and reads
+    /// `x` back from a witness-indexed array. The read is a lookup, so on Goldilocks the R1CS
+    /// repeats its LogUp argument.
     fn field_fixture(prover_toml: &str) -> tempfile::TempDir {
         let project = tempfile::tempdir().unwrap();
         fs::create_dir(project.path().join("src")).unwrap();
@@ -1403,8 +1403,13 @@ mod tests {
         .unwrap();
         fs::write(
             project.path().join("src/main.nr"),
-            "fn main(x: Field, y: pub Field, a: [Field; 3], i: u32) {\n\
-             assert_eq(x * x, y);\n\
+            "fn main(x: [u8; 8], y: pub [u8; 16], i: u32) {\n\
+             let x = Field::from_le_bytes_checked(x);\n\
+             // Folded by hand: `Field::from_le_bytes_checked` refuses 16 bytes on Goldilocks.\n\
+             let mut square = 0;\n\
+             for j in 0..16 { square = square * 256 + y[15 - j] as Field; }\n\
+             assert_eq(x * x, square);\n\
+             let a = [1, 2, x];\n\
              assert_eq(a[i], x);\n\
              }\n",
         )
@@ -1421,36 +1426,40 @@ mod tests {
         run_package(&options, None)
     }
 
+    /// `value` as the TOML array of its `len` low little-endian bytes.
+    fn le_bytes(value: u128, len: usize) -> String {
+        let bytes: Vec<String> = value.to_le_bytes()[..len]
+            .iter()
+            .map(u8::to_string)
+            .collect();
+        format!("[{}]", bytes.join(", "))
+    }
+
     #[test]
     fn run_executes_over_the_selected_field() {
         use mavros_artifacts::field::goldilocks::MODULUS;
 
-        let x = MODULUS - 1;
+        let inputs =
+            |x: u128, y: u128| format!("x = {}\ny = {}\ni = 2\n", le_bytes(x, 8), le_bytes(y, 16));
         // `(p - 1)^2 = 1` holds only modulo the Goldilocks prime.
-        let wraps = field_fixture(&format!(
-            "x = \"{x}\"\ny = \"1\"\na = [\"1\", \"2\", \"{x}\"]\ni = \"2\"\n"
-        ));
+        let wraps = field_fixture(&inputs(u128::from(MODULUS - 1), 1));
         assert_eq!(
             run_over(wraps.path(), "goldilocks").unwrap(),
             ExitCode::SUCCESS
         );
-        // The inputs decode and witgen runs; only the constraint check fails.
         assert_eq!(run_over(wraps.path(), "bn254").unwrap(), ExitCode::FAILURE);
 
-        // The integer square is the bn254 answer and is not a canonical Goldilocks input.
-        let square = u128::from(x) * u128::from(x);
-        let integer = field_fixture(&format!(
-            "x = \"{x}\"\ny = \"{square}\"\na = [\"1\", \"2\", \"{x}\"]\ni = \"2\"\n"
-        ));
+        // The Goldilocks modulus is a bn254 element, but not a canonical Goldilocks one.
+        let modulus = u128::from(MODULUS);
+        let outside = field_fixture(&inputs(modulus, modulus * modulus));
         assert_eq!(
-            run_over(integer.path(), "bn254").unwrap(),
+            run_over(outside.path(), "bn254").unwrap(),
             ExitCode::SUCCESS
         );
-        let error = run_over(integer.path(), "goldilocks")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&square.to_string()), "{error}");
-        assert!(error.to_lowercase().contains("goldilocks"), "{error}");
+        assert_eq!(
+            run_over(outside.path(), "goldilocks").unwrap(),
+            ExitCode::FAILURE
+        );
     }
 
     #[test]

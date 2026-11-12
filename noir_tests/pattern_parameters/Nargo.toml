@@ -1,0 +1,6 @@
+[package]
+name = "pattern_parameters"
+type = "bin"
+authors = [""]
+
+[dependencies]

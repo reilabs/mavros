@@ -1,5 +1,12 @@
-use mavros_artifacts::Field;
-use mavros_compiler::{api, compiler::codegen::CodeGenOptions, vm::bytecode::parse_program_header};
+use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+use mavros_compiler::{
+    api,
+    compiler::{
+        codegen::CodeGenOptions,
+        ssa::hlssa::{Type, builder::HLEmitter as _},
+    },
+    vm::bytecode::parse_program_header,
+};
 
 mod common;
 
@@ -8,7 +15,7 @@ fn entry_blob_and_return_checks_follow_the_abi() {
     let cases = [
         ("fn main() {}", "", 0, true),
         (
-            "fn main(x: Field) -> pub () { assert(x != 0); }",
+            "fn main(x: u8) -> pub () { assert(x != 0); }",
             "x = '3'",
             1,
             true,
@@ -20,23 +27,18 @@ fn entry_blob_and_return_checks_follow_the_abi() {
             true,
         ),
         (
-            "fn main(x: Field) -> pub Field { x + 1 }",
+            "fn main(x: u8) -> pub u8 { x + 1 }",
             "x = '3'\nreturn = '4'",
             1,
             true,
         ),
         (
-            "fn main(x: Field) -> pub Field { x + 1 }",
+            "fn main(x: u8) -> pub u8 { x + 1 }",
             "x = '3'\nreturn = '5'",
             1,
             false,
         ),
-        (
-            "fn main(x: Field) -> pub Field { x + 1 }",
-            "x = '3'",
-            1,
-            true,
-        ),
+        ("fn main(x: u8) -> pub u8 { x + 1 }", "x = '3'", 1, true),
     ];
     for (source, inputs, expected_fields, accepted) in cases {
         run(source, inputs, expected_fields, accepted);
@@ -49,7 +51,8 @@ fn nested_statement_tuples_preserve_projection_offsets() {
         r#"
         fn check(value: Field) { assert(value != 0); }
 
-        fn main(x: Field) {
+        fn main(x: u8) {
+            let x = x as Field;
             let t = ((x, { assert(x != 0); }), 7);
             assert_eq(t.1, 7);
             assert_eq(t.0.0, x);
@@ -75,7 +78,8 @@ fn unconstrained_unit_returns_preserve_reference_argument_lowering() {
     run(
         r#"
         unconstrained fn check(value: &Field) { assert(*value == 3); }
-        fn main(x: Field) {
+        fn main(x: u8) {
+            let x = x as Field;
             // Safety: the input is constrained to the checked value.
             let result = unsafe { check(&x) };
             assert_eq(result, ());
@@ -144,7 +148,7 @@ fn empty_array_unconstrained_returns_are_prepared() {
         run(
             &format!(
                 "unconstrained fn empty(x: Field) -> {typ} {{ assert(x != 0); {value} }}
-                fn main(x: Field) {{ let result = unsafe {{ empty(x) }}; {check} }}"
+                fn main(x: u8) {{ let x = x as Field; let result = unsafe {{ empty(x) }}; {check} }}"
             ),
             "x = '1'",
             1,
@@ -158,7 +162,7 @@ fn zero_field_entry_parameters_need_no_witness_slots() {
     for (params, inputs, fields, body) in [
         ("e: Empty", "e = {}", 0, "let _ = e;"),
         (
-            "e: Empty, x: Field",
+            "e: Empty, x: u8",
             "e = {}\nx = '3'",
             1,
             "let _ = e; assert_eq(x, 3);",
@@ -209,18 +213,19 @@ fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
 }
 
 #[test]
-fn an_unread_entry_blob_survives_bytecode_dce() {
-    // The inputs are declared but not read yet; the body only checks the hard-coded limbs.
+fn an_entry_blob_read_only_by_its_range_checks_survives_bytecode_dce() {
+    // The body reads the inputs only through their entry range checks; it checks the hard-coded
+    // limbs.
     run(
         "global LIMBS: [Field; 4] = [0x1f, 0x2e, 0x3d, 0x4c];
 
-        fn main(owner: Field, path: [Field; 3]) -> pub Field {
+        fn main(owner: u8, path: [u8; 3]) -> pub u32 {
             let mut digest = 0;
             for i in 0..4 {
                 digest = digest * 256 + LIMBS[i];
             }
             assert(digest != 0);
-            digest
+            digest as u32
         }",
         "owner = '1'\npath = ['2', '3', '4']\nreturn = '523124044'",
         4,
@@ -228,58 +233,54 @@ fn an_unread_entry_blob_survives_bytecode_dce() {
     );
 }
 
+/// An entry blob nothing reads, not even a range check, keeps its elements through bytecode DCE:
+/// the caller still passes every parameter.
 #[test]
-fn data_bus_parameters_are_private() {
-    use mavros_artifacts::ParamVisibility;
-    use mavros_compiler::abi_helpers;
+fn an_unread_entry_blob_survives_bytecode_dce() {
+    fn check<F: MavrosField>() {
+        // `main(owner: Field, path: [Field; 3]) -> pub Field { 42 }`
+        let ssa = common::hand_built_main(
+            F::CONFIG,
+            &[Type::field(), Type::field().array_of(3)],
+            Type::field(),
+            |e, _| e.field_const(42u64),
+        );
+        let mut seeded = common::compile_seeded::<F>(ssa, vec![false, false]);
+        let columns = seeded.driver.entry_columns().unwrap().clone();
+        assert_eq!(columns.params, [None, None], "{:?}", F::ID);
+        assert_eq!(
+            parse_program_header(&seeded.binary).entry_blob_field_count,
+            4,
+            "{:?}",
+            F::ID
+        );
 
-    let dir = common::noir_project(
-        "fn main(x: call_data(0) Field, y: pub Field, _unused: call_data(0) Field) -> return_data Field {
-            x * y
-        }",
-    );
-    std::fs::write(
-        dir.path().join("Prover.toml"),
-        "x = '6'\ny = '7'\n_unused = '1'\nreturn = '42'",
-    )
-    .unwrap();
-    let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
-    let manifest = driver.witness_manifest(&r1cs).unwrap();
-    let columns: Vec<_> = manifest
-        .parameters
-        .iter()
-        .map(|p| (p.name.as_str(), p.visibility, p.column_start))
-        .collect();
-    // The public `y` is pinned first; the read `x` follows unpinned; the unread one is elided.
-    assert_eq!(
-        columns,
-        vec![
-            ("x", ParamVisibility::DataBus, Some(2)),
-            ("y", ParamVisibility::Public, Some(1)),
-            ("_unused", ParamVisibility::DataBus, None),
-        ]
-    );
-    let ret = manifest.returns.unwrap();
-    assert_eq!(ret.visibility, ParamVisibility::DataBus);
-    assert!(ret.column_start.is_some(), "the return is bound to columns");
+        let field = |value: u64| InputValueOrdered::Field(F::from(value));
+        let params = [
+            field(1),
+            InputValueOrdered::Vec(vec![field(2), field(3), field(4)]),
+        ];
+        let result = api::run_witgen_from_binary(&mut seeded.binary, &seeded.r1cs, &params, None)
+            .unwrap_or_else(|error| panic!("{:?}: {error:?}", F::ID));
+        assert!(api::check_witgen(&seeded.r1cs, &result), "{:?}", F::ID);
+        assert_eq!(
+            result.out_wit_pre_comm[columns.returns.unwrap()],
+            F::from(42u64),
+            "{:?}",
+            F::ID
+        );
+    }
+    check::<Field>();
+    check::<Goldilocks>();
+}
 
-    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
-    let mut artifact = driver
-        .compile_bytecode_artifact(CodeGenOptions {
-            check_constraints: true,
-            include_debug_info: true,
-        })
-        .unwrap();
-    let result =
-        api::run_witgen_from_binary(&mut artifact.binary, &r1cs, &params, artifact.debug_info)
-            .unwrap();
-    assert!(api::check_witgen(&r1cs, &result));
-    abi_helpers::check_witness_manifest(
-        &manifest,
-        &params,
-        declared_return.as_ref(),
-        &result.out_wit_pre_comm,
-    )
-    .unwrap();
+/// The data bus has no byte encoding, so the frontend refuses it in `main`'s signature.
+#[test]
+fn data_bus_entry_points_are_refused() {
+    for source in [
+        "fn main(x: call_data(0) u8, y: pub u8) -> pub u8 { x * y }",
+        "fn main(x: u8, y: pub u8) -> return_data u8 { x * y }",
+    ] {
+        common::assert_frontend_refused(source, "the data bus is not supported");
+    }
 }

@@ -1,7 +1,12 @@
 // Pushes inside nested witness branches: the inner push's effective guard is the conjunction
 // w1 & w2, and the trailing push in the outer branch targets a tuple whose length already
 // depends on the inner world. Inputs pick the world where the inner branch is off.
-fn main(w1: Field, w2: Field, e_last: pub Field, elen: pub Field) {
+fn main(w1: u8, w2: u8, e_last: pub u8, elen: pub u8) {
+    let w1 = w1 as Field;
+    let w2 = w2 as Field;
+    let e_last = e_last as Field;
+    let elen = elen as Field;
+
     let mut s: [Field] = [1];
     if w1 == 1 {
         s = s.push_back(2);

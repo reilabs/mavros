@@ -22,7 +22,10 @@ fn length(s: Shape) -> Field {
     }
 }
 
-fn main(w: Field, h: Field) {
+fn main(w: u8, h: u8) {
+    let w = w as Field;
+    let h = h as Field;
+
     assert(is_rect(Shape::Rect(w, h)));
     assert(!is_rect(Shape::Line(w)));
     assert(!is_rect(Shape::Empty));

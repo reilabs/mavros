@@ -14,7 +14,10 @@ fn dims(s: Shape) -> (Field, Field) {
     }
 }
 
-fn main(x: u8, y: u8, w: Field, h: Field) {
+fn main(x: u8, y: u8, w: u8, h: u8) {
+    let w = w as Field;
+    let h = h as Field;
+
     let scalar = match x {
         2 => y,
         _ => 0,

@@ -15,7 +15,9 @@ fn store_through_ref(value: &mut Field, x: Field) {
     *value = y;
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     let mut value = 0;
     store_through_ref(&mut value, x);
     assert_eq(value, x);

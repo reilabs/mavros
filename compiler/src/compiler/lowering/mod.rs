@@ -20,9 +20,12 @@ mod type_converter;
 #[cfg(test)]
 mod tests;
 
-use noirc_frontend::monomorphization::ast::{
-    Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, InlineType,
-    Program,
+use noirc_frontend::monomorphization::{
+    ast::{
+        Definition, Expression, FuncId as AstFuncId, Function as AstFunction, GlobalId, InlineType,
+        Program, Type as AstType,
+    },
+    visitor::visit_expr,
 };
 
 use crate::{
@@ -65,6 +68,10 @@ pub struct SSAConverter {
     /// Maps GlobalId to its interned constant ValueId when the initializer is a constant.
     global_constants: HashMap<GlobalId, crate::compiler::ssa::ValueId>,
 
+    /// The parameter types each function is called with, its environment first when it is a
+    /// closure with captures; see [`SSAConverter::declared_parameters`].
+    declared_parameters: HashMap<AstFuncId, Vec<AstType>>,
+
     /// Utility for converting between types.
     type_converter: TypeConverter,
 
@@ -80,6 +87,7 @@ impl SSAConverter {
             natively_unconstrained: HashSet::default(),
             global_slots: HashMap::default(),
             global_constants: HashMap::default(),
+            declared_parameters: HashMap::default(),
             type_converter: TypeConverter::new(),
             diagnostics: RefCell::new(Vec::new()),
         }
@@ -94,6 +102,7 @@ impl SSAConverter {
         field: FieldConfig,
     ) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
         let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        self.declared_parameters = Self::declared_parameters(program);
 
         // Phase 1: Register all functions to handle mutual recursion.
         // For each constrained function, also register an unconstrained variant
@@ -172,6 +181,32 @@ impl SSAConverter {
             return Err(diagnostics);
         }
         Ok((ssa, main_is_unconstrained))
+    }
+
+    /// The parameter types each function is called with, read from the identifiers that name it.
+    ///
+    /// The monomorphizer expands a tuple or struct pattern parameter into one parameter per leaf,
+    /// while a caller passes one argument per declared parameter, and a closure with captures takes
+    /// its environment as an extra leading parameter.
+    fn declared_parameters(program: &Program) -> HashMap<AstFuncId, Vec<AstType>> {
+        let mut declared = HashMap::default();
+        let mut record = |expr: &Expression| {
+            if let Expression::Ident(ident) = expr
+                && let Definition::Function(id) = ident.definition
+            {
+                let signature = ExpressionConverter::function_signature(ident);
+                let (params, env) = (signature.params, signature.env);
+                let env = (*env != AstType::Unit).then(|| env.clone());
+                declared
+                    .entry(id)
+                    .or_insert_with(|| env.into_iter().chain(params.iter().cloned()).collect());
+            }
+            true
+        };
+        for function in &program.functions {
+            visit_expr(&function.body, &mut record);
+        }
+        declared
     }
 
     /// Collect all GlobalIds referenced transitively by an expression.
@@ -397,7 +432,8 @@ impl SSAConverter {
         );
 
         // The frontend rejects folding from source. Retain this defense for hand-built
-        // monomorphic programs: lowering recursive circuit calls would feed them into cost analysis.
+        // monomorphic programs: lowering recursive circuit calls would feed them into cost
+        // analysis.
         if matches!(ast_func.inline_type, InlineType::Fold) {
             expr_converter.reject_unsupported(
                 format!(
@@ -408,19 +444,27 @@ impl SSAConverter {
             );
         }
 
-        // Add function parameters as block parameters
-        for (local_id, mutable, _name, param_type, _visibility) in &ast_func.parameters {
-            let converted_type = self.type_converter.convert_type(param_type);
-            let value_id = b.block(entry_block).add_parameter(converted_type);
-
-            if *mutable {
-                // For mutable parameters, allocate a pointer and store the value. The alloc is
-                // attributed to the function body, the closest source anchor a parameter has.
-                let location = expr_converter.expression_source_location(&ast_func.body);
-                expr_converter.bind_local_mut(*local_id, value_id, &mut b, location);
-            } else {
-                expr_converter.bind_local(*local_id, value_id);
-            }
+        // One block parameter per declared parameter, and a pattern parameter's leaves bound to
+        // projections of it. Both are located at the function body, the closest source anchor a
+        // parameter has.
+        let location = expr_converter.expression_source_location(&ast_func.body);
+        for pattern in self.parameter_patterns(ast_func) {
+            let typ = match &pattern {
+                ParameterPattern::Leaf(index) => &ast_func.parameters[*index].3,
+                ParameterPattern::Tuple(typ, _) => typ,
+            };
+            let value_id = b
+                .block(entry_block)
+                .add_parameter(self.type_converter.convert_type(typ));
+            Self::bind_parameter(
+                ast_func,
+                &pattern,
+                value_id,
+                entry_block,
+                &mut expr_converter,
+                &mut b,
+                &location,
+            );
         }
 
         // Function bodies follow the same one-value contract as call expressions.
@@ -430,6 +474,108 @@ impl SSAConverter {
             .terminate_return(vec![result]);
 
         function
+    }
+}
+
+/// How the monomorphizer's parameters of a function make up one declared parameter.
+enum ParameterPattern {
+    /// The parameter at this index is the declared one.
+    Leaf(usize),
+    /// A tuple or struct pattern of this declared type, one pattern per field. A zero-sized
+    /// declared parameter whose monomorphized parameter an earlier zero-leaf pattern matched is
+    /// one with no fields.
+    Tuple(AstType, Vec<ParameterPattern>),
+}
+
+impl SSAConverter {
+    /// The declared parameters of `ast_func`.
+    ///
+    /// A function referenced by no identifier, such as `main`, keeps its parameters as they are.
+    ///
+    /// # Panics
+    ///
+    /// If its parameters do not spell the types its callers pass. The monomorphizer only expands
+    /// patterns into leaves, so they always do.
+    fn parameter_patterns(&self, ast_func: &AstFunction) -> Vec<ParameterPattern> {
+        let params = &ast_func.parameters;
+        let Some(declared) = self.declared_parameters.get(&ast_func.id) else {
+            return (0..params.len()).map(ParameterPattern::Leaf).collect();
+        };
+        let mut next = 0;
+        let patterns = declared
+            .iter()
+            .map(|typ| Self::match_pattern(typ, params, &mut next))
+            .collect::<Option<Vec<_>>>();
+        match patterns {
+            Some(patterns) if next == params.len() => patterns,
+            _ => ice!(
+                "`{}` is called with parameters {declared:?}, which its parameters {:?} do not \
+                 spell",
+                ast_func.name,
+                params.iter().map(|param| &param.3).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    /// The pattern of a declared parameter of type `typ` whose leaves start at parameter `next`.
+    fn match_pattern(
+        typ: &AstType,
+        params: &noirc_frontend::monomorphization::ast::Parameters,
+        next: &mut usize,
+    ) -> Option<ParameterPattern> {
+        if params.get(*next).is_some_and(|param| *param.3 == *typ) {
+            *next += 1;
+            return Some(ParameterPattern::Leaf(*next - 1));
+        }
+        let fields = match typ {
+            AstType::Tuple(fields) => fields.as_slice(),
+            AstType::Unit => &[],
+            _ => return None,
+        };
+        let fields = fields
+            .iter()
+            .map(|field| Self::match_pattern(field, params, next))
+            .collect::<Option<Vec<_>>>()?;
+        Some(ParameterPattern::Tuple(typ.clone(), fields))
+    }
+
+    /// Binds the leaves of `pattern`, held in `value_id`, to their locals.
+    fn bind_parameter(
+        ast_func: &AstFunction,
+        pattern: &ParameterPattern,
+        value_id: crate::compiler::ssa::ValueId,
+        entry_block: crate::compiler::ssa::BlockId,
+        expr_converter: &mut ExpressionConverter<'_>,
+        b: &mut HLFunctionBuilder<'_>,
+        location: &SourceLocation,
+    ) {
+        match pattern {
+            ParameterPattern::Leaf(index) => {
+                let (local_id, mutable, ..) = &ast_func.parameters[*index];
+                if *mutable {
+                    expr_converter.bind_local_mut(*local_id, value_id, b, location.clone());
+                } else {
+                    expr_converter.bind_local(*local_id, value_id);
+                }
+            }
+            ParameterPattern::Tuple(_, fields) => {
+                for (index, field) in fields.iter().enumerate() {
+                    let field_value = b
+                        .block(entry_block)
+                        .with_source_location(location.clone())
+                        .tuple_proj(value_id, index);
+                    Self::bind_parameter(
+                        ast_func,
+                        field,
+                        field_value,
+                        entry_block,
+                        expr_converter,
+                        b,
+                        location,
+                    );
+                }
+            }
+        }
     }
 }
 
