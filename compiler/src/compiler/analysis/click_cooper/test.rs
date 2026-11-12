@@ -302,6 +302,38 @@ fn structural_congruence_is_commutative() {
     assert_eq!(cc.congruence_class(fid, a), expected);
 }
 
+/// A checked and an unchecked cast of the same value are not congruent, while two of the same kind
+/// are. Merging the checked one into the unchecked one would drop the bit window
+/// `LowerWitnessNarrowingCast` puts in front of a witnessed narrowing.
+#[test]
+fn checked_and_unchecked_int_casts_are_not_congruent() {
+    let mut ssa = HLSSA::with_main("main".to_string());
+    let x = ssa.fresh_value();
+    let (checked, checked_again, unchecked) =
+        (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+
+    let f = ssa.get_unique_entrypoint_mut();
+    f.get_entry_mut().push_parameter(x, Type::field());
+    let entry = f.get_entry_mut();
+    for (result, target) in [
+        (checked, CastTarget::Int(8)),
+        (checked_again, CastTarget::Int(8)),
+        (unchecked, CastTarget::IntUnchecked(8)),
+    ] {
+        entry.push_test_instruction(OpCode::Cast {
+            result,
+            value: x,
+            target,
+        });
+    }
+    entry.set_terminator(Terminator::Return(vec![checked, checked_again, unchecked]));
+
+    let fid = ssa.get_unique_entrypoint_id();
+    let cc = run_in_test(&ssa);
+    assert!(cc.known_equal(fid, checked, checked_again));
+    assert!(!cc.known_equal(fid, checked, unchecked));
+}
+
 /// Pure sequence ops are value-numbered: two `ArrayGet`s of the same array at the same index
 /// are congruent (a different index is not), `MkSeq`s congruent elementwise are congruent, and
 /// the sequence shape (`seq_type`, `elem_type`) carried in the key keeps differently-shaped

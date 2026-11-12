@@ -4,8 +4,6 @@ use mavros_artifacts::FieldConfig;
 
 use crate::compiler::ssa::SSAType;
 
-// FIELD-ASSUMPTION: L6-int-representation
-//
 // This bounds the widest int a program may name, independently of the field: an integer too wide
 // for one element is carried as limbs, not refused.
 pub const MAX_SUPPORTED_INT_BITS: usize = 1 << 14;

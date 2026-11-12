@@ -27,11 +27,10 @@ use std::{
     sync::OnceLock,
 };
 
-use ark_ff::UniformRand as _;
 use mavros_artifacts::{Field, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
 use mavros_int_semantics::{IntBits, IntOp, Outcome, residue};
 use num_bigint::BigUint;
-use rand::{RngCore as _, SeedableRng as _, rngs::StdRng};
+use rand::{SeedableRng as _, rngs::StdRng};
 use tempfile::TempDir;
 
 use mavros_compiler::{
@@ -65,47 +64,25 @@ use mavros_compiler::{
 
 /// A field the harness compiles and runs programs over.
 pub trait HarnessField: MavrosField {
-    /// The field's configuration, which a program built for it carries.
-    const CONFIG: FieldConfig;
-
-    /// A random element, for the coefficients of the AD check.
-    fn random(rng: &mut StdRng) -> Self;
-
     /// `value` as an element. bn254 reduces it modulo the modulus; Goldilocks refuses a value at or
     /// above its modulus, since no entry point takes one.
     fn of_biguint(value: &BigUint) -> Self;
 }
 
 impl HarnessField for Field {
-    const CONFIG: FieldConfig = FieldConfig::bn254();
-
-    fn random(rng: &mut StdRng) -> Self {
-        Field::rand(rng)
-    }
-
     fn of_biguint(value: &BigUint) -> Self {
         Field::from(value.clone())
     }
 }
 
 impl HarnessField for Goldilocks {
-    const CONFIG: FieldConfig = FieldConfig::goldilocks();
-
-    // A uniform 128-bit integer reduced modulo `p < 2^64` is within `2^-64` of uniform.
-    fn random(rng: &mut StdRng) -> Self {
-        Goldilocks::from(u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64()))
-    }
-
     fn of_biguint(value: &BigUint) -> Self {
-        u64::try_from(value)
-            .ok()
-            .and_then(Goldilocks::from_canonical)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the input {value} is not below the Goldilocks modulus, so no entry point \
+        Goldilocks::try_from_canonical_limbs(&value.to_u64_digits()).unwrap_or_else(|| {
+            panic!(
+                "the input {value} is not below the Goldilocks modulus, so no entry point \
                      takes it"
-                )
-            })
+            )
+        })
     }
 }
 
@@ -504,9 +481,7 @@ impl<F: HarnessField> Compiled<F> {
             Err(_) => rand::random(),
         };
         let mut rng = StdRng::seed_from_u64(seed);
-        let coeffs: Vec<F> = (0..self.r1cs.constraints.len())
-            .map(|_| F::random(&mut rng))
-            .collect();
+        let coeffs: Vec<F> = api::random_ad_coeffs_with(&self.r1cs, &mut rng);
         let replay = format!("replay with {AD_SEED_ENV}={seed}");
 
         let mut binary = self.binary.clone();

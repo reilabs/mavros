@@ -2235,6 +2235,14 @@ pub enum CastTarget {
     /// An integer of `bits` raw two's-complement bits.
     Int(usize),
 
+    /// [`CastTarget::Int`], from an emitter that bounds the value below `2^bits`.
+    ///
+    /// It differs only on a witnessed narrowing of a value one field element carries: it gets no
+    /// bit window, so it relabels the element. A pure one truncates, and a wide one is lowered as a
+    /// checked one. `LowerWitnessNarrowingCast` rewrites every one into `Int`, so none reaches a
+    /// backend.
+    IntUnchecked(usize),
+
     WitnessOf,
 
     /// Strips one `WitnessOf` wrapper.
@@ -2341,7 +2349,7 @@ impl CastTarget {
                     Type::field()
                 }
             }
-            CastTarget::Int(size) => {
+            CastTarget::Int(size) | CastTarget::IntUnchecked(size) => {
                 if value_type.is_witness_of() {
                     Type::witness_of(Type::int(*size))
                 } else {
@@ -2376,6 +2384,7 @@ impl CastTarget {
             CastTarget::Field
             | CastTarget::FieldLimbs
             | CastTarget::Int(_)
+            | CastTarget::IntUnchecked(_)
             | CastTarget::Nop
             | CastTarget::ArrayToSlice => false,
         }
@@ -2391,6 +2400,7 @@ impl CastTarget {
             CastTarget::Field
             | CastTarget::FieldLimbs
             | CastTarget::Int(_)
+            | CastTarget::IntUnchecked(_)
             | CastTarget::WitnessOf
             | CastTarget::Nop
             | CastTarget::ArrayToSlice => false,
@@ -2403,6 +2413,7 @@ impl Display for CastTarget {
         match self {
             CastTarget::Field => write!(f, "Field"),
             CastTarget::Int(size) => write!(f, "int{}", size),
+            CastTarget::IntUnchecked(size) => write!(f, "unchecked_int{}", size),
             CastTarget::WitnessOf => write!(f, "WitnessOf"),
             CastTarget::ValueOf => write!(f, "ValueOf"),
             CastTarget::Nop => write!(f, "Nop"),
@@ -2482,7 +2493,6 @@ pub enum Constant {
     ///
     /// [`TypeExpr::Int`]: crate::compiler::ssa::hlssa::TypeExpr::Int
     Int(IntBits),
-    // FIELD-ASSUMPTION: L2-ir-const
     Field(crate::compiler::Field),
     FnPtr(FunctionId),
     Blob(Blob),
@@ -2543,12 +2553,11 @@ pub enum DMatrix {
 /// A **ceiling on the representation**, not the safety bound: every backend indexes its table cache
 /// by size (see the assert below). It is `7` because bn254 needs exactly that.
 ///
-/// FIELD-ASSUMPTION: L4-decompose. The safety bound is per field: a size-`s` table's widest row is
-/// `2^(2^s - 1)`, and a row at or past the modulus wraps identically in every evaluator, so
-/// `factor == 2^amount`, and with it `witness_bitwise::wrap_shifted_product`'s
-/// `factor <= 2^(bits-1)` premise, silently fails. `passes::shared::limbs::max_pow2_table_size`
-/// derives it, clamped to this ceiling: `7` on bn254 (widest row `2^127`), `6` on goldilocks. The
-/// same `L4-decompose` debt as `two_pow(bits)` in the shift lowering, discharged with it.
+/// The safety bound is per field: a size-`s` table's widest row is `2^(2^s - 1)`, and a row at or
+/// past the modulus wraps identically in every evaluator, so `factor == 2^amount`, and with it
+/// `witness_bitwise::wrap_shifted_product`'s `factor <= 2^(bits-1)` premise, silently fails.
+/// `passes::shared::limbs::max_pow2_table_size` derives it, clamped to this ceiling: `7` on bn254
+/// (widest row `2^127`), `6` on goldilocks.
 pub const MAX_POW2_TABLE_SIZE: usize = 7;
 
 /// A `Pow2` table is indexed into the backends' fixed-size table caches (`vm::VM::pow2_tables`, and

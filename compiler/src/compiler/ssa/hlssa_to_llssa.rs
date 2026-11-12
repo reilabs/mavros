@@ -1276,6 +1276,9 @@ fn lower_instruction(
                     );
                 }
                 CastTarget::FieldLimbs => ice_unreachable!("refused above"),
+                CastTarget::IntUnchecked(_) => {
+                    ice_unreachable!("LowerWitnessNarrowingCast rewrites every unchecked cast")
+                }
             }
         }
 

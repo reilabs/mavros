@@ -5,8 +5,6 @@ mavros_debug
 Cargo.lock
 .idea/
 settings.local.json
-dist
-node_modules
 .cargo
 .claude/
 tmp/

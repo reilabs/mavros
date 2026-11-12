@@ -1,5 +1,6 @@
 mod common;
 
+use mavros_artifacts::FieldConfig;
 use mavros_compiler::{Project, driver::Driver};
 
 #[test]
@@ -30,7 +31,7 @@ fn source_checks_survive_unused_results_and_respect_inactive_branches() {
             "fn index() -> u32 {{ 10 }} fn main() {{ {body} }}"
         ));
         let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-        driver.run_noir_compiler().unwrap();
+        driver.run_noir_compiler(FieldConfig::bn254()).unwrap();
         let result = driver
             .make_struct_access_static()
             .and_then(|_| driver.monomorphize())
@@ -65,7 +66,7 @@ fn nonreturning_recursion_reports_the_source_call_and_keeps_debug_dumps() {
             std::fs::copy(fixture.join(file), dir.path().join(file)).unwrap();
         }
         let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-        driver.run_noir_compiler().unwrap();
+        driver.run_noir_compiler(FieldConfig::bn254()).unwrap();
         let error = driver.make_struct_access_static().unwrap_err();
         let mavros_compiler::driver::Error::UnsatisfiableProgram(diagnostics) = &error else {
             panic!("expected a non-returning diagnostic, got {error:?}");

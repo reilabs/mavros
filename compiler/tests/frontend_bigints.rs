@@ -1,5 +1,6 @@
 mod common;
 
+use mavros_artifacts::{Field, FieldConfig};
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions, driver::Error};
 
 /// Exercise source parsing, monomorphization, input decoding, witness generation and R1CS.
@@ -15,7 +16,7 @@ fn check(source: &str, inputs: &str) {
         )
         .unwrap();
     }
-    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false)
+    let (mut driver, r1cs) = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false)
         .unwrap_or_else(|error| panic!("{source}: {error:?}"));
     let mut binary = api::compile_bytecode(
         &mut driver,
@@ -231,7 +232,7 @@ fn field_cast_differential(
 /// generation or the constraints otherwise.
 fn assert_cast_refused(lane: CastLane, source: &str, inputs: &str) {
     let dir = common::noir_project(source);
-    let compiled = api::compile_to_r1cs(dir.path().to_path_buf(), false);
+    let compiled = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false);
     if let CastLane::Constant = lane {
         let error = compiled.err().unwrap_or_else(|| panic!("{source}"));
         assert!(
@@ -357,7 +358,8 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
                 [result as u128, (result >> 128) as u128, (result >> 256) as u128]
             }}"
         ));
-        let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+        let (mut driver, r1cs) =
+            api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
         let binary = api::compile_bytecode(
             &mut driver,
             CodeGenOptions {
@@ -402,7 +404,8 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
 #[test]
 fn wide_abi_checks_input_ranges_and_declared_returns() {
     let dir = common::noir_project(include_str!("../../noir_tests/bigint_abi/src/main.nr"));
-    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {
@@ -455,7 +458,7 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         format!("a = ['{out_of_range}', 0]\nb = [0, 0]\nreturn = [0, 0]"),
     )
     .unwrap();
-    assert!(api::read_prover_inputs(dir.path(), driver.abi()).is_err());
+    assert!(api::read_prover_inputs::<Field>(dir.path(), driver.abi()).is_err());
 }
 
 /// Each refusal is matched by the diagnostic the rule under test emits, so that a program that
@@ -537,7 +540,7 @@ fn frontend_refuses_a_cast_into_field_past_the_modulus() {
         mavros_compiler::Project::new(dir.path().to_path_buf()).unwrap(),
         false,
     );
-    driver.run_noir_compiler().unwrap();
+    driver.run_noir_compiler(FieldConfig::bn254()).unwrap();
 }
 
 /// Returned errors keep all source diagnostics even after the project and its files are gone.
@@ -550,7 +553,7 @@ fn frontend_errors_render_all_source_diagnostics() {
 
     let dir = common::noir_project("fn main() {\n    let a: bool = 1;\n    let b: bool = 2;\n}");
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let error = driver.run_noir_compiler().unwrap_err();
+    let error = driver.run_noir_compiler(FieldConfig::bn254()).unwrap_err();
     let Error::NoirCompilerError { diagnostics, .. } = &error else {
         panic!("expected Noir diagnostics: {error}");
     };

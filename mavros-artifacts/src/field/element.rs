@@ -9,8 +9,8 @@
 //! panics.
 //!
 //! The middle-end mints its constants through `FieldConfig` (`zero`, `one`, `constant`, `two_pow`,
-//! `from_bigint`), which knows the field. `FieldElement` itself has no field-less constructor
-//! besides the `From` conversions out of each field's raw type.
+//! `from_canonical_limbs`), which knows the field. `FieldElement` itself has no field-less
+//! constructor besides the `From` conversions out of each field's raw type.
 //!
 //! The witgen VM reinterprets raw frame memory as the raw field type via pointer casts, so it
 //! computes on the raw type and never sees a `FieldElement`. Compiler code translates at the
@@ -24,7 +24,7 @@ use std::{
     ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use ark_ff::{BigInt, Field as _, PrimeField};
+use ark_ff::{Field as _, PrimeField};
 
 use crate::field::{goldilocks::Goldilocks, mavros_field::FieldId};
 
@@ -307,14 +307,14 @@ impl FieldElement {
         }
     }
 
-    /// The canonical integer this element denotes, zero-extended to four little-endian 64-bit
+    /// The canonical integer this element denotes, as its field's canonical little-endian 64-bit
     /// limbs.
     #[inline]
     #[must_use]
-    pub fn into_bigint(&self) -> BigInt<4> {
+    pub fn canonical_limbs(&self) -> Vec<u64> {
         match self {
-            FieldElement::Bn254(value) => value.into_bigint(),
-            FieldElement::Goldilocks(value) => BigInt([value.value(), 0, 0, 0]),
+            FieldElement::Bn254(value) => value.into_bigint().0.to_vec(),
+            FieldElement::Goldilocks(value) => vec![value.value()],
         }
     }
 
@@ -322,7 +322,7 @@ impl FieldElement {
     /// `MavrosField::STORAGE_CELLS`.
     ///
     /// This is the representation the backends emit into bytecode words and the LLVM field struct.
-    /// The canonical integer is [`FieldElement::into_bigint`].
+    /// The canonical integer is [`FieldElement::canonical_limbs`].
     #[inline]
     #[must_use]
     pub fn storage_cells(&self) -> &[u64] {
@@ -380,13 +380,12 @@ mod tests {
     }
 
     #[test]
-    fn canonical_bigint_is_the_integer() {
+    fn canonical_limbs_are_the_integer() {
         for f in samples() {
-            assert_eq!(FieldElement::from(f).into_bigint(), f.into_bigint());
+            assert_eq!(FieldElement::from(f).canonical_limbs(), f.into_bigint().0);
         }
         for g in goldilocks_samples() {
-            let limbs = FieldElement::from(g).into_bigint().0;
-            assert_eq!(limbs, [g.to_canonical_limbs()[0], 0, 0, 0]);
+            assert_eq!(FieldElement::from(g).canonical_limbs(), [g.value()]);
         }
     }
 

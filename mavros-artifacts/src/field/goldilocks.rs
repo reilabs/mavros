@@ -311,6 +311,15 @@ unsafe impl MavrosField for Goldilocks {
         Goldilocks::from_canonical(limbs.first().copied().unwrap_or(0))
     }
 
+    /// Rejection sampling: a draw of `p` or more is redrawn, which keeps the rest uniform.
+    fn random<R: rand::Rng + ?Sized>(rng: &mut R) -> Self {
+        loop {
+            if let Some(value) = Goldilocks::from_canonical(rng.next_u64()) {
+                return value;
+            }
+        }
+    }
+
     fn canonical_cmp(self, other: Self) -> Ordering {
         self.cmp(&other)
     }
@@ -530,5 +539,24 @@ mod tests {
         assert_eq!(Goldilocks::from(1u128 << 96), -Goldilocks::ONE);
         assert_eq!(-Goldilocks::ONE + Goldilocks::ONE, Goldilocks::ZERO);
         assert_eq!(<Oracle as Field>::ONE, oracle(Goldilocks::ONE));
+    }
+
+    #[test]
+    fn random_redraws_a_non_canonical_draw() {
+        // `u64::MAX` is past the modulus, and the next draw wraps to `0`.
+        let mut rng = rand::rngs::mock::StepRng::new(u64::MAX, 1);
+        assert_eq!(
+            <Goldilocks as MavrosField>::random(&mut rng),
+            Goldilocks::ZERO
+        );
+    }
+
+    #[test]
+    fn try_from_canonical_limbs_refuses_without_panicking() {
+        let from = <Goldilocks as MavrosField>::try_from_canonical_limbs;
+        assert_eq!(from(&[MODULUS - 1]), Some(-Goldilocks::ONE));
+        assert_eq!(from(&[MODULUS]), None);
+        assert_eq!(from(&[0, 1]), None);
+        assert_eq!(from(&[5, 0, 0]), Some(Goldilocks::from(5u64)));
     }
 }

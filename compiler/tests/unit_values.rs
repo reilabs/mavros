@@ -1,3 +1,4 @@
+use mavros_artifacts::Field;
 use mavros_compiler::{api, compiler::codegen::CodeGenOptions, vm::bytecode::parse_program_header};
 
 mod common;
@@ -176,7 +177,8 @@ fn zero_field_entry_parameters_need_no_witness_slots() {
 fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
     let dir = common::noir_project(source);
     std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
-    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
     let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
     let mut artifact = driver
         .compile_bytecode_artifact(CodeGenOptions {
@@ -241,7 +243,8 @@ fn data_bus_parameters_are_private() {
         "x = '6'\ny = '7'\n_unused = '1'\nreturn = '42'",
     )
     .unwrap();
-    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
     let manifest = driver.witness_manifest(&r1cs).unwrap();
     let columns: Vec<_> = manifest
         .parameters

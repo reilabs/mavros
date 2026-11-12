@@ -1,11 +1,13 @@
 mod common;
 
+use mavros_artifacts::Field;
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions};
 
 /// Check actual execution and the declared return, not just successful SSA construction.
 fn check(source: &str, inputs: &[&str]) {
     let dir = common::noir_project(source);
-    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {

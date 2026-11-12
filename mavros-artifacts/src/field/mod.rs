@@ -9,4 +9,4 @@ mod mavros_field;
 pub use config::{FieldConfig, IntoFieldElement};
 pub use element::FieldElement;
 pub use goldilocks::Goldilocks;
-pub use mavros_field::{FieldId, MavrosField};
+pub use mavros_field::{FieldId, MavrosField, UnknownField};

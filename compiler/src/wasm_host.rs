@@ -75,8 +75,8 @@ fn check_module_field<F: MavrosField>(
     let module = FieldId::from_code(tag as u64);
     if module != Some(F::ID) {
         return Err(ModuleFieldMismatch(format!(
-            "a WASM module over {} cannot run over {:?}",
-            module.map_or_else(|| format!("field code {tag}"), |id| format!("{id:?}")),
+            "a WASM module over {} cannot run over {}",
+            module.map_or_else(|| format!("field code {tag}"), |id| id.to_string()),
             F::ID
         ))
         .into());

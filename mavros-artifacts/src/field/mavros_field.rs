@@ -23,12 +23,13 @@ use std::{
     cmp::Ordering,
     fmt::{Debug, Display},
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    str::FromStr,
 };
 
 use ark_ff::{AdditiveGroup, BigInt, PrimeField};
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::field::element::FieldElement;
+use crate::field::{config::FieldConfig, element::FieldElement};
 
 // FIELD IDENTIFIER
 // ================================================================================================
@@ -46,6 +47,18 @@ pub enum FieldId {
 }
 
 impl FieldId {
+    /// Every supported field, in [`FieldId::code`] order.
+    pub const ALL: [FieldId; 2] = [FieldId::Bn254, FieldId::Goldilocks];
+
+    /// The field's name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            FieldId::Bn254 => "bn254",
+            FieldId::Goldilocks => "goldilocks",
+        }
+    }
+
     /// The word naming this field in a VM program header. No field is `0`, so a zeroed word names
     /// none.
     #[must_use]
@@ -64,6 +77,28 @@ impl FieldId {
             2 => Some(FieldId::Goldilocks),
             _ => None,
         }
+    }
+}
+
+impl Display for FieldId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The error for a string that names no supported field.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("unknown field `{0}`; expected one of: {names}", names = FieldId::ALL.map(FieldId::name).join(", "))]
+pub struct UnknownField(pub String);
+
+impl FromStr for FieldId {
+    type Err = UnknownField;
+
+    fn from_str(name: &str) -> Result<FieldId, UnknownField> {
+        FieldId::ALL
+            .into_iter()
+            .find(|field| field.name() == name)
+            .ok_or_else(|| UnknownField(name.to_string()))
     }
 }
 
@@ -109,6 +144,9 @@ pub unsafe trait MavrosField:
 {
     /// The field this type implements.
     const ID: FieldId;
+
+    /// The configuration of [`MavrosField::ID`]'s field. Implementations keep this default.
+    const CONFIG: FieldConfig = FieldConfig::of(Self::ID);
 
     /// Number of 64-bit storage cells one element occupies.
     const STORAGE_CELLS: usize;
@@ -166,6 +204,20 @@ pub unsafe trait MavrosField:
     ///
     /// If `limbs` holds more than [`MavrosField::CANONICAL_LIMBS`] limbs.
     fn from_canonical_limbs(limbs: &[u64]) -> Option<Self>;
+
+    /// The element denoting the little-endian integer `limbs`, or `None` if it is not below the
+    /// modulus. Unlike [`MavrosField::from_canonical_limbs`], any number of limbs is accepted: high
+    /// zero limbs are ignored, and a nonzero limb past [`MavrosField::CANONICAL_LIMBS`] refuses.
+    fn try_from_canonical_limbs(limbs: &[u64]) -> Option<Self> {
+        let significant = limbs.len() - limbs.iter().rev().take_while(|&&limb| limb == 0).count();
+        let limbs = &limbs[..significant];
+        (limbs.len() <= Self::CANONICAL_LIMBS)
+            .then(|| Self::from_canonical_limbs(limbs))
+            .flatten()
+    }
+
+    /// A uniformly random element drawn from `rng`.
+    fn random<R: rand::Rng + ?Sized>(rng: &mut R) -> Self;
 
     /// Orders two elements by the integers they denote.
     fn canonical_cmp(self, other: Self) -> Ordering {
@@ -255,6 +307,11 @@ unsafe impl MavrosField for ark_bn254::Fr {
         let mut padded = [0u64; 4];
         padded[..limbs.len()].copy_from_slice(limbs);
         ark_bn254::Fr::from_bigint(BigInt(padded))
+    }
+
+    /// Arkworks' sampler, so a seeded `rng` reproduces the elements that `Fr::rand` would draw.
+    fn random<R: rand::Rng + ?Sized>(rng: &mut R) -> Self {
+        <ark_bn254::Fr as ark_ff::UniformRand>::rand(rng)
     }
 }
 
@@ -369,6 +426,66 @@ mod tests {
     #[should_panic(expected = "do not fit")]
     fn bn254_from_canonical_limbs_rejects_too_many_limbs() {
         let _ = <Fr as MavrosField>::from_canonical_limbs(&[0; 5]);
+    }
+
+    #[test]
+    fn bn254_try_from_canonical_limbs_refuses_without_panicking() {
+        assert_eq!(
+            <Fr as MavrosField>::try_from_canonical_limbs(&[]),
+            Some(<Fr as MavrosField>::ZERO)
+        );
+        assert_eq!(
+            <Fr as MavrosField>::try_from_canonical_limbs(&[7]),
+            Some(Fr::from(7u64))
+        );
+        assert_eq!(
+            <Fr as MavrosField>::try_from_canonical_limbs(&[7, 0, 0, 0, 0, 0]),
+            Some(Fr::from(7u64))
+        );
+        assert_eq!(
+            <Fr as MavrosField>::try_from_canonical_limbs(&[0, 0, 0, 0, 1]),
+            None
+        );
+        let modulus = <Fr as PrimeField>::MODULUS.0;
+        assert_eq!(
+            <Fr as MavrosField>::try_from_canonical_limbs(&modulus),
+            None
+        );
+    }
+
+    #[test]
+    fn bn254_random_is_the_arkworks_sampler() {
+        use rand::SeedableRng;
+
+        let mut ours = rand::rngs::StdRng::seed_from_u64(42);
+        let mut theirs = rand::rngs::StdRng::seed_from_u64(42);
+        for _ in 0..16 {
+            assert_eq!(
+                <Fr as MavrosField>::random(&mut ours),
+                Fr::rand(&mut theirs)
+            );
+        }
+    }
+
+    #[test]
+    fn field_ids_are_every_header_code() {
+        let decoded: Vec<_> = (0..=u64::from(u8::MAX))
+            .filter_map(FieldId::from_code)
+            .collect();
+        assert_eq!(decoded, FieldId::ALL);
+    }
+
+    #[test]
+    fn field_names_parse_back() {
+        for field in FieldId::ALL {
+            assert_eq!(field.name().parse(), Ok(field));
+            assert_eq!(field.to_string(), field.name());
+        }
+        let error = "babybear".parse::<FieldId>().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "unknown field `babybear`; expected one of: bn254, goldilocks"
+        );
     }
 
     #[test]

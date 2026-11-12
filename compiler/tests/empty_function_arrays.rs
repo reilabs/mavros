@@ -1,5 +1,6 @@
 mod common;
 
+use mavros_artifacts::Field;
 use mavros_compiler::{api, compiler::codegen::CodeGenOptions, driver::Error};
 
 #[test]
@@ -13,7 +14,7 @@ fn calling_an_empty_function_array_is_rejected_without_a_compiler_panic() {
             }}"
         );
         let dir = common::noir_project(&source);
-        match api::compile_to_r1cs(dir.path().to_path_buf(), false) {
+        match api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false) {
             Err(error) => {
                 let Some(Error::UnsatisfiableProgram(diagnostics)) = error.downcast_ref::<Error>()
                 else {
@@ -45,7 +46,7 @@ fn empty_calls_after_break_and_continue_are_removed() {
                 assert(x == 1);
             }}"
         ));
-        api::compile_to_r1cs(dir.path().to_path_buf(), false)
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false)
             .unwrap_or_else(|error| panic!("{exit}: {error:?}"));
     }
 }
@@ -62,7 +63,8 @@ fn empty_function_calls_only_fail_when_their_branch_is_taken() {
             }}"
         );
         let dir = common::noir_project(&source);
-        let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+        let (mut driver, r1cs) =
+            api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
         let mut binary = api::compile_bytecode(
             &mut driver,
             CodeGenOptions {
@@ -105,7 +107,7 @@ fn unreachable_empty_calls_preserve_aggregate_return_types() {
                 assert(x == 1);
             }}"
         ));
-        api::compile_to_r1cs(dir.path().to_path_buf(), false)
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false)
             .unwrap_or_else(|error| panic!("{returns}: {error}"));
     }
 }

@@ -265,7 +265,6 @@ impl LowerWitnessBitwiseOps {
             "a complement subtracts from an all-ones mask in one field element, so int{bits} is past what this field carries"
         );
 
-        // FIELD-ASSUMPTION: L4-decompose
         let ones = b.field_const(b.field().two_pow(bits) - b.field().one());
         let value_field = b.cast_to_field(value);
         let not_value = b.usub(ones, value_field);
@@ -318,7 +317,6 @@ impl LowerWitnessBitwiseOps {
             b.cast_to_field(sign_bits)
         };
         let value_field = b.cast_to_field(value);
-        // FIELD-ASSUMPTION: L4-decompose
         let extension = b.field_const(b.field().two_pow(to_bits) - b.field().two_pow(from_bits));
         let offset = b.umul(sign, extension);
         let extended = b.uadd(value_field, offset);
@@ -665,7 +663,6 @@ impl LowerWitnessBitwiseOps {
                     CofactorSource::Pure(factor) => pure_cofactor(b, *factor, bits),
                 };
 
-                // FIELD-ASSUMPTION: L4-decompose
                 let two_pow_bits = b.field_const(b.field().two_pow(bits));
                 let fill = b.usub(two_pow_bits, power);
                 let offset = b.umul(sign, fill);
@@ -787,8 +784,6 @@ fn emit_pow2_cofactor(b: &mut HLBlockEmitter<'_>, factor: ValueId, bits: usize) 
     // Only the signed `>>` correction needs a cofactor, at a width `single_cell_shift_fits`
     // limits it to. The pure side divides at any width, so the double-width hint below needs no
     // separate bound.
-    //
-    // FIELD-ASSUMPTION: L4-decompose
     let two_pow_bits = b.field_const(b.field().two_pow(bits));
 
     let factor_pure = b.value_of(factor);
@@ -861,10 +856,9 @@ fn sign_bit_of(
 /// `discarded` is bounded at the amount's width, not `bits`, since at most `n` bits are pushed out;
 /// a small constant shift pays a small check, and a provably zero amount none.
 ///
-/// FIELD-ASSUMPTION: L4-decompose. This needs `lhs * 2^n` not to wrap mod `p`, which is
-/// [`assert_product_headroom`], and it reads the discarded half through an `Int(2 * bits)`
-/// intermediate on the pure side. A shift whose product could wrap is lowered limb-wise by
-/// `WideWitnessInts` first.
+/// This needs `lhs * 2^n` not to wrap mod `p`, which is [`assert_product_headroom`], and it reads
+/// the discarded half through an `Int(2 * bits)` intermediate on the pure side. A shift whose
+/// product could wrap is lowered limb-wise by `WideWitnessInts` first.
 fn wrap_shifted_product(
     b: &mut HLBlockEmitter<'_>,
     context: &LoweringContext<'_>,
@@ -895,7 +889,6 @@ fn wrap_shifted_product(
     // in-range hint, as a guarded spread or limbed division does.
     b.rangecheck(discarded, discarded_bits);
 
-    // FIELD-ASSUMPTION: L4-decompose
     let two_pow_bits = b.field_const(b.field().two_pow(bits));
     let overflow = b.umul(discarded, two_pow_bits);
     let wrapped = b.usub(product, overflow);
@@ -910,8 +903,6 @@ fn wrap_shifted_product(
 /// `2^(bits + n) <= p`. Past that, `wrapped` is the low bits of a residue, a wrong answer rather
 /// than a rejection. The routing already ensures it ([`single_cell_shift_fits`]; `WideWitnessInts`
 /// takes every other shift), so this states the coupling and refuses nothing.
-///
-/// FIELD-ASSUMPTION: L4-modulus-query. Read off the configured field rather than a fixed prime.
 fn assert_product_headroom(bits: usize, discarded_bits: usize, field: FieldConfig) {
     assert!(
         product_fits_field(bits, discarded_bits, field),
@@ -1007,7 +998,6 @@ fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: usize) -> Value
 /// `lower_limb_bitwise` arrives at [`witness_half_limb_bits`], while the direct arm of
 /// [`LowerWitnessBitwiseOps::lower_binary_bitwise`] arrives at the operand's **type** width, which
 /// that arm caps at [`SPREAD_MAX_BITS`].
-// FIELD-ASSUMPTION: L6-int-op-strategy
 // Bitwise via spread-then-add: the spread of a `bits`-wide value occupies ~2*bits bits (cast to
 // `U(bits*2)`), so on a ~64-bit field even a 32-bit spread nearly saturates p. A half-limb operand
 // satisfies `2*bits <= h` by construction, which is why every width past the whole-width arm goes

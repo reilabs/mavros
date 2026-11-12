@@ -1,5 +1,6 @@
 mod common;
 
+use mavros_artifacts::{Field, FieldConfig};
 use mavros_compiler::{
     Project,
     driver::{Driver, Error},
@@ -54,7 +55,7 @@ fn oracle_calls_and_function_values_are_refused() {
 fn print_oracles_remain_ignored() {
     let dir = common::noir_project("fn main(x: Field) { print(x); println(x); assert(x == 1); }");
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    driver.run_noir_compiler().unwrap();
+    driver.run_noir_compiler(FieldConfig::bn254()).unwrap();
     driver.make_struct_access_static().unwrap();
 }
 
@@ -62,7 +63,7 @@ fn print_oracles_remain_ignored() {
 fn assert_lowering_refused(source: &str, messages: &[&str]) -> String {
     let dir = common::noir_project(source);
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let error = match driver.run_noir_compiler() {
+    let error = match driver.run_noir_compiler(FieldConfig::bn254()) {
         Err(error @ Error::LoweringRefused(_)) => error,
         Err(error) => panic!("expected a lowering refusal, got: {error}"),
         Ok(()) => panic!("expected a lowering refusal"),
@@ -123,24 +124,14 @@ fn every_refusal_in_a_program_is_reported_together() {
     assert_eq!(rendered.matches("error:").count(), 2, "{rendered}");
 }
 
-/// `unsafe_cast` handles scalars only
-#[test]
-fn unsafe_casts_to_non_scalars_are_refused() {
-    let rendered = assert_lowering_refused(
-        "use std::mavros::unsafe_cast;\n\
-         fn main(x: Field) -> pub [Field; 2] { unsafe_cast::<[Field; 2]>(x) }\n",
-        &["unsafe_cast: unsupported target type Array(2, Field)"],
-    );
-    assert!(rendered.contains("src/main.nr:2:"), "{rendered}");
-}
-
 /// Compiles `source`, whose `main` takes `x: u32`, and runs it on each value, answering whether its
 /// witness satisfies the constraints.
 fn witness_holds_for_each(source: &str, values: &[u32]) -> Vec<bool> {
     use mavros_compiler::{api, compiler::codegen::CodeGenOptions};
 
     let dir = common::noir_project(source);
-    let (mut driver, r1cs) = api::compile_to_r1cs(dir.path().to_path_buf(), false).unwrap();
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {

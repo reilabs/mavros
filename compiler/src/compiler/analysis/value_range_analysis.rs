@@ -1272,7 +1272,6 @@ impl Interval {
 
     /// `[0, p − 1]` — the integer range of a Field element.
     pub fn field_top(field: FieldConfig) -> Self {
-        // FIELD-ASSUMPTION: L4-modulus-query
         Self::closed(BigInt::zero(), field_modulus(field) - BigInt::one())
     }
 
@@ -1495,7 +1494,6 @@ impl Interval {
 
     /// Reduce modulo `p` into `[0, p)`.
     pub fn wrap_to_field(&self, field: FieldConfig) -> Self {
-        // FIELD-ASSUMPTION: L4-modulus-query
         self.wrap_into(&BigInt::zero(), &field_modulus(field))
     }
 
@@ -2144,7 +2142,6 @@ fn signed_const_to_bigint(bits: usize, encoded: u128) -> BigInt {
     if value < half { value } else { value - two_n }
 }
 
-// FIELD-ASSUMPTION: L4-modulus-query
 /// The modulus of the configured field as a `BigInt`, read through the [`FieldConfig`] instance API
 /// so that no concrete prime is named. Shared with the integer-lowering width gates.
 pub fn field_modulus(field: FieldConfig) -> BigInt {
@@ -2155,7 +2152,7 @@ pub fn field_modulus(field: FieldConfig) -> BigInt {
 
 /// Convert a Field element to a `BigInt` (always non-negative, in `[0, p)`).
 fn field_to_bigint(f: &Field) -> BigInt {
-    let limbs = f.into_bigint().0; // [u64; 4]
+    let limbs = f.canonical_limbs();
     let bytes_le: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
     BigInt::from_bytes_le(Sign::Plus, &bytes_le)
 }
@@ -2221,7 +2218,7 @@ fn cast_range(target: &CastTarget, in_r: ValueRange, field: FieldConfig) -> Valu
         // One element per limb, under one `Field` type, so no single range holds it.
         CastTarget::FieldLimbs => ValueRange::full(Width::Field(field)),
 
-        CastTarget::Int(n) => in_r.reinterpret_to(Width::Bits(*n)),
+        CastTarget::Int(n) | CastTarget::IntUnchecked(n) => in_r.reinterpret_to(Width::Bits(*n)),
 
         // ValueOf strips the WitnessOf wrapper: payload unchanged.
         CastTarget::Nop | CastTarget::WitnessOf | CastTarget::ValueOf => in_r,
@@ -2546,6 +2543,7 @@ mod tests {
         let wide = ValueRange::from_unsigned(Width::Bits(16), iv(0, 200));
         let narrowed = wide.constrain_to(Width::Bits(8));
         assert_eq!(narrowed.unsigned(), &iv(0, 200));
+
         // Both readings survive, and at the new width 128..=200 is what makes the signed one
         // straddle zero.
         assert_eq!(narrowed.signed(), &iv(-128, 127));
@@ -2568,6 +2566,7 @@ mod tests {
         let widened = negative.constrain_to(Width::Bits(16));
         assert!(!widened.is_empty());
         assert_eq!(widened.unsigned(), &iv(200, 255));
+
         // And at the new width those patterns are simply positive.
         assert_eq!(widened.signed(), &iv(200, 255));
     }
@@ -2617,8 +2616,9 @@ mod tests {
         let wide = ValueRange::from_unsigned(Width::Bits(32), iv(200, 200));
         assert!(wide.signed().is_non_negative(), "the trap this rules out");
         assert!(!wide.is_non_negative_at_width(8));
-        // It still answers at its own width, and still answers at a narrower one when the
-        // unsigned reading actually settles it.
+
+        // It still answers at its width, and still answers at a narrower one when the unsigned
+        // reading actually settles it.
         assert!(wide.is_non_negative_at_width(32));
         assert!(wide.is_non_negative_at_width(9));
         let small = ValueRange::from_unsigned(Width::Bits(32), iv(0, 100));

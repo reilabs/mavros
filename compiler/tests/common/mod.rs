@@ -1,3 +1,4 @@
+use mavros_artifacts::FieldConfig;
 use mavros_compiler::{
     Project,
     driver::{Driver, Error},
@@ -29,7 +30,7 @@ pub fn assert_frontend_refused(source: &str, expected: &str) {
     let Err(Error::NoirCompilerError {
         diagnostics,
         rendered,
-    }) = driver.run_noir_compiler()
+    }) = driver.run_noir_compiler(FieldConfig::bn254())
     else {
         panic!("expected a frontend diagnostic for {source}");
     };

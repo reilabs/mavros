@@ -354,13 +354,12 @@ pub fn extract_limb(
 /// decomposition whose top limb is narrower than the others reaches only `2^value_bits`, not
 /// `2^(count · limb_bits)`, so the span question would refuse representable widths: an `int253`
 /// on bn254 splits into four 64-bit limbs spanning 256 bits, yet the value is one field element.
-// FIELD-ASSUMPTION: L6-int-representation
-// The result is one field element, so this is sound only while the recombined value fits one;
-// this is the _representation_ half of the assumption, which field-derived limb widths do not
-// discharge. The fit is checked, not assumed, so a narrow field refuses here instead of returning
-// a residue. The refusal cannot fire: `passes::wide_witness_ints` holds any value wider than one
-// cell carries injectively as limbs before a caller recombines it.
-// FIELD-ASSUMPTION: L4-decompose
+// The result is one field element, so this is sound only while the recombined value fits one,
+// which field-derived limb widths do not guarantee. The fit is checked, not assumed, so a narrow
+// field refuses here instead of returning a residue. The refusal cannot fire:
+// `passes::wide_witness_ints` holds any value wider than one cell carries injectively as limbs
+// before a caller recombines it.
+//
 // The place values are minted as `two_pow`, so they are the intended powers only while they have
 // not wrapped the modulus.
 pub fn combine_limbs_of_value(
@@ -387,7 +386,6 @@ pub fn combine_limbs_of_value(
 ///
 /// Private because the bound is the whole question: every caller must have asked it, and which
 /// form of the question is right depends on whether the top limb is full.
-// FIELD-ASSUMPTION: L4-decompose
 // The place values are minted as `two_pow`; see `combine_limbs_of_value`.
 fn accumulate_limbs(b: &mut impl HLEmitter, limbs: &WitnessLimbs) -> ValueId {
     let mut fields = Vec::with_capacity(limbs.limbs.len());
@@ -559,7 +557,7 @@ mod tests {
     #[test]
     fn the_pow2_ceiling_is_the_widest_row_the_modulus_can_hold() {
         assert_eq!(max_pow2_table_size(FieldConfig::bn254()), 7);
-        assert_eq!(max_pow2_table_size_for_modulus(&goldilocks()), 6);
+        assert_eq!(max_pow2_table_size(FieldConfig::goldilocks()), 6);
 
         // Each answer and the size past it, so the boundary is pinned rather than a number.
         for modulus in [field_modulus(FieldConfig::bn254()), goldilocks()] {
@@ -850,8 +848,7 @@ mod tests {
     fn field_to_bigint_via_bytes(f: &crate::compiler::Field) -> BigInt {
         use num_bigint::Sign;
         let bytes: Vec<u8> = f
-            .into_bigint()
-            .0
+            .canonical_limbs()
             .iter()
             .flat_map(|limb| limb.to_le_bytes())
             .collect();

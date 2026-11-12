@@ -702,9 +702,12 @@ pub(crate) fn op_signature(instr: &OpCode) -> Option<(OpKey, Vec<ValueId>, bool)
         },
         ScalarFold::MulConst { const_val, var } => (OpKey::MulConst, vec![const_val, var], true),
         ScalarFold::Cast { target, value } => match target {
-            CastTarget::Nop | CastTarget::Field | CastTarget::Int(_) => {
-                (OpKey::Cast(target.clone()), vec![value], false)
-            }
+            // `Int` and `IntUnchecked` are distinct keys: merging one into the other would drop or
+            // add the bit window `LowerWitnessNarrowingCast` puts in front of a witnessed `Int`.
+            CastTarget::Nop
+            | CastTarget::Field
+            | CastTarget::Int(_)
+            | CastTarget::IntUnchecked(_) => (OpKey::Cast(target.clone()), vec![value], false),
             // Foldable scalar ops, but never value-numbered: a witness cast is opaque.
             CastTarget::WitnessOf
             | CastTarget::ValueOf

@@ -211,7 +211,6 @@ macro_rules! field_runtime {
         }
 
         /// `a / b`, and zero when `b` is zero.
-        // FIELD-ASSUMPTION: L4-inverse
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $div(
             result_ptr: *mut u64,
@@ -225,6 +224,7 @@ macro_rules! field_runtime {
             b3: i64,
         ) {
             use ark_ff::AdditiveGroup;
+
             let a = limbs_to_fr(a0, a1, a2, a3);
             let b = limbs_to_fr(b0, b1, b2, b3);
             let result = if b == <$field>::ZERO {

@@ -10,15 +10,23 @@ use mavros_artifacts::FieldConfig;
 
 use crate::compiler::passes::shared::limbs::witness_limb_bits;
 
+/// What the configured field provides.
+#[must_use]
+pub fn field_offers(field: FieldConfig) -> String {
+    format!(
+        "The configured field has a {}-bit modulus and a {}-bit witness limb.",
+        field.field_bit_size(),
+        witness_limb_bits(field),
+    )
+}
+
 /// Refuse a lowering that the configured field is too narrow to carry, naming the field.
 ///
 /// `attempted` says what did not fit; the message adds what the field offers.
 pub fn unreachable_on_this_field(attempted: fmt::Arguments<'_>, field: FieldConfig) -> ! {
     ice_unreachable!(
-        "{attempted}. The configured field has a {}-bit modulus and a {}-bit witness limb — see \
-         docs/field-agnosticism.md, Layer 6.",
-        field.field_bit_size(),
-        witness_limb_bits(field),
+        "{attempted}. {} See docs/field-agnosticism.md, Layer 6.",
+        field_offers(field),
     )
 }
 

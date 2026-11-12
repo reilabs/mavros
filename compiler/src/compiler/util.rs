@@ -19,17 +19,33 @@ pub fn bit_mask(bits: usize) -> u128 {
     mavros_int_semantics::mask(bits)
 }
 
-// Checks the claim `FIELD_LIMB_BITS` rests on: arkworks' `BigInt<N>` limbs are 64 bits, the model's
-// width. Each caller passes `into_bigint().0` to `IntBits::from_field_limbs`, and nothing else
-// checks the two agree; if they differed, every field-sourced constant would be recombined at the
-// wrong place values, silently.
-//
-// This is the lowest crate that sees both: `mavros-int-semantics` cannot (and must not) see
-// `BigInt`.
+// Checks the claim `FIELD_LIMB_BITS` rests on: an element's canonical limbs are 64 bits. Each
+// caller passes `canonical_limbs()` to `IntBits::from_field_limbs`, and nothing else checks that
+// the two agree; if they differed, every field-sourced constant would be silently recombined at the
+// wrong place values.
 const _: () = assert!(
-    size_of::<ark_ff::BigInt<1>>() * 8 == mavros_int_semantics::int_bits::FIELD_LIMB_BITS,
+    u64::BITS as usize == mavros_int_semantics::int_bits::FIELD_LIMB_BITS,
     "a canonical field limb is no longer FIELD_LIMB_BITS wide"
 );
+
+/// Bit `index` of the little-endian integer `limbs`, zero past its last limb.
+#[must_use]
+pub fn limb_bit(limbs: &[u64], index: usize) -> bool {
+    limbs
+        .get(index / u64::BITS as usize)
+        .is_some_and(|limb| (limb >> (index % u64::BITS as usize)) & 1 == 1)
+}
+
+/// The `width` bits of the little-endian integer `limbs` from bit `offset` up, as little-endian
+/// limbs.
+#[must_use]
+pub fn limb_bit_window(limbs: &[u64], offset: usize, width: usize) -> Vec<u64> {
+    let mut window = vec![0u64; width.div_ceil(u64::BITS as usize)];
+    for bit in (0..width).filter(|&bit| limb_bit(limbs, offset + bit)) {
+        window[bit / u64::BITS as usize] |= 1 << (bit % u64::BITS as usize);
+    }
+    window
+}
 
 /// The host word an integer pattern carries, panicking above the host word.
 ///
@@ -65,21 +81,15 @@ pub fn host_word(pattern: &IntBits) -> u128 {
 /// apart. A caller that cannot handle a refusal must bound its inputs itself.
 #[must_use]
 pub fn field_constant(field: FieldConfig, pattern: &IntBits) -> Option<Field> {
-    // A literal four, because `FieldConfig::from_bigint` takes an `ark_ff::BigInt<4>`: the
-    // signature fixes the count, not the field. Reading it off `modulus_limbs` would look
-    // field-derived without being so.
-    // FIELD-ASSUMPTION: L3-felt-limbs
-    let mut canonical = [0u64; 4];
+    field.from_canonical_limbs(pattern.limbs())
+}
 
-    let limbs = pattern.limbs();
-    if limbs.len() > canonical.len() && limbs[canonical.len()..].iter().any(|&limb| limb != 0) {
-        return None;
-    }
-    for (slot, limb) in canonical.iter_mut().zip(limbs) {
-        *slot = *limb;
-    }
-
-    field.from_bigint(ark_ff::BigInt::new(canonical))
+/// The unsigned integer whose little-endian 64-bit limbs are `limbs`, such as an element's
+/// [`Field::canonical_limbs`] or the field's [`FieldConfig::modulus_limbs`].
+#[must_use]
+pub fn biguint_of_limbs(limbs: &[u64]) -> num_bigint::BigUint {
+    let bytes_le: Vec<u8> = limbs.iter().flat_map(|limb| limb.to_le_bytes()).collect();
+    num_bigint::BigUint::from_bytes_le(&bytes_le)
 }
 
 /// The `Int -> Field` cast of an integer pattern: its unsigned reading reduced modulo the field's
@@ -135,12 +145,12 @@ pub mod test {
 
     /// The field's modulus as a magnitude, the form the reference model takes it in.
     pub fn modulus_of(field: FieldConfig) -> num_bigint::BigUint {
-        field.modulus().into()
+        super::biguint_of_limbs(field.modulus_limbs())
     }
 
     /// An element's canonical representative.
     pub fn canonical_of(element: &Field) -> num_bigint::BigUint {
-        element.into_bigint().into()
+        super::biguint_of_limbs(&element.canonical_limbs())
     }
 
     /// The element whose canonical representative is `canonical`.
@@ -150,7 +160,7 @@ pub mod test {
     /// If `canonical` is not below the modulus.
     pub fn element_of(field: FieldConfig, canonical: &num_bigint::BigUint) -> Field {
         field
-            .from_bigint(canonical.clone().try_into().unwrap())
+            .from_canonical_limbs(&canonical.to_u64_digits())
             .unwrap_or_else(|| panic!("{canonical} is not below the modulus"))
     }
 
@@ -290,7 +300,7 @@ mod tests {
             // Read back through the canonical decomposition `Field -> Int` uses, so the round
             // trip pins the place values, not just the acceptance.
             assert_eq!(
-                IntBits::from_field_limbs(&element.into_bigint().0, bits),
+                IntBits::from_field_limbs(&element.canonical_limbs(), bits),
                 pattern,
                 "u{bits}"
             );
@@ -321,7 +331,7 @@ mod tests {
                         );
                         assert_eq!(
                             num_bigint::BigUint::from(&IntBits::from_field_limbs(
-                                &element.into_bigint().0,
+                                &element.canonical_limbs(),
                                 bits.max(254)
                             )),
                             magnitude,

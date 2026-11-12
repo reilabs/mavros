@@ -5,7 +5,6 @@
 //! in defunctionalization wherever needed. In some cases, we can call the specialized version
 //! directly instead.
 
-use ark_ff::BigInteger;
 use tracing::{info, instrument};
 
 use mavros_artifacts::FieldConfig;
@@ -32,7 +31,7 @@ use crate::{
                 builder::{HLEmitter, HLFunctionBuilder},
             },
         },
-        util::field_constant,
+        util::{field_constant, limb_bit},
     },
 };
 
@@ -100,7 +99,6 @@ pub struct Specializer {
 }
 
 #[derive(Debug, Clone)]
-// FIELD-ASSUMPTION: L4-eval
 enum ConstVal {
     /// A raw two's-complement pattern that carries its width, as [`Constant::Int`] does and for the
     /// same reason: a separate width beside the payload is a second copy that can drift.
@@ -201,7 +199,6 @@ impl HLEmitter for SpecializationState<'_> {
     }
 }
 
-// FIELD-ASSUMPTION: L4-eval
 impl symbolic_executor::Value<SpecializationState<'_>> for Val {
     /// `bits` is the caller's view of the operand width, and the fold reads its own off the
     /// `ConstVal::Int`s instead — the lattice needs a width from the constants anyway, and it folds
@@ -397,19 +394,18 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
             (Some(ConstVal::Array(_) | ConstVal::Blob(_)), Some(ConstVal::Int(_))) => {
                 Self(HLEmitter::array_get(ctx, self.0, index.0))
             }
-            // FIELD-ASSUMPTION: L4-decompose
             (Some(ConstVal::BitsOf(v, size, endianness)), Some(ConstVal::Int(index)))
                 if usize::try_from(&index).is_ok_and(|index| index < size) =>
             {
                 let v_const = ctx.const_vals.get(v.as_ref()).cloned();
                 match v_const {
                     Some(ConstVal::Field(f)) => {
-                        let r = f.into_bigint().to_bits_le();
                         let ix = match endianness {
                             Endianness::Little => const_index(&index),
                             Endianness::Big => size - const_index(&index) - 1,
                         };
-                        let bit = IntBits::from_u128(1, u128::from(r[ix]));
+                        let bit =
+                            IntBits::from_u128(1, u128::from(limb_bit(&f.canonical_limbs(), ix)));
                         let res_v = ctx.emit_constant(Constant::Int(bit.clone()));
                         ctx.const_vals.insert(res_v, ConstVal::Int(bit));
                         Self(res_v)
@@ -518,7 +514,6 @@ impl symbolic_executor::Value<SpecializationState<'_>> for Val {
         Ok(())
     }
 
-    // FIELD-ASSUMPTION: L4-decompose
     fn to_bits(
         &self,
         endianness: Endianness,
