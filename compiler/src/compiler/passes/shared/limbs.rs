@@ -154,7 +154,15 @@ pub fn limb_bits_for_modulus(modulus: &BigInt) -> usize {
 /// many bits, so an odd `h` would leave a bit unconstrained. [`limb_bits_for_modulus`] admits only
 /// powers of two.
 pub fn witness_half_limb_bits(field: FieldConfig) -> usize {
-    let limb_bits = witness_limb_bits(field);
+    half_limb_bits(witness_limb_bits(field))
+}
+
+/// Half a limb of `limb_bits` bits.
+///
+/// # Panics
+///
+/// If the limb has no exact half.
+pub fn half_limb_bits(limb_bits: usize) -> usize {
     assert!(
         limb_bits >= 2 && limb_bits.is_power_of_two(),
         "a {limb_bits}-bit limb has no exact half, so two half-limbs would not cover it"
