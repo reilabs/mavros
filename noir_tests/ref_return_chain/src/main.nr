@@ -8,7 +8,9 @@ fn mid() -> &mut Field {
     inner()
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     let z = mid();
     *z = x;
     assert_eq(*z, x);

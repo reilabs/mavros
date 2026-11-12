@@ -10,7 +10,11 @@ use crate::compiler::{
         types::{FunctionTypeInfo, TypeInfo},
         value_range_analysis::field_modulus,
     },
-    passes::shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+    located::synthetic_file,
+    passes::{
+        prepare_entry_point::ENTRY_RETURN_ORIGIN,
+        shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+    },
     ssa::{
         BlockId, FunctionId, Located, Terminator, ValueId,
         hlssa::{
@@ -56,12 +60,13 @@ struct Rewriter<'a> {
     /// divisor, guard and reading.
     divisions: &'a mut HashMap<Division, (Answer, Answer)>,
 
-    /// The limbs a pure integer read in this block was recombined from, by the read's result.
+    /// The limbs a pure integer was recombined from, where it was read from a sequence or stripped
+    /// from a witness in this block, keyed by the read's or the strip's result.
     ///
     /// A user that wants the limbs back, as the field image a witness-indexed lookup moves through
-    /// does, takes these rather than splitting what was just joined. The split uses a logical
+    /// does, takes these, so what was just joined is not split again. The split uses a logical
     /// right shift (except at offset zero) and a narrowing per limb at the value's full width,
-    /// undoing the recombination the read just performed.
+    /// undoing the recombination the read or strip just performed.
     read_limbs: &'a mut HashMap<ValueId, Vec<ValueId>>,
 
     /// The values this function's rewrite has minted whose pattern is known at compile time but
@@ -70,6 +75,11 @@ struct Rewriter<'a> {
 
     /// Where each global's slots moved to.
     globals: &'a Globals,
+
+    /// Whether the instruction being rewritten binds the entry point's return, the one place a
+    /// pinned wide write is sound: `bind_return_deep` follows it with the equality that bounds
+    /// its limbs.
+    at_entry_return: bool,
 
     out: Vec<OpCode>,
 }
@@ -117,6 +127,7 @@ pub(super) fn rewrite_function(
         let mut read_limbs = HashMap::default();
         for instr in &old_instructions {
             let location = instr.location().clone();
+            let at_entry_return = *location.file == *synthetic_file(ENTRY_RETURN_ORIGIN);
             let mut rewriter = Rewriter {
                 ssa,
                 value_map,
@@ -128,6 +139,7 @@ pub(super) fn rewrite_function(
                 read_limbs: &mut read_limbs,
                 known: &mut known,
                 globals,
+                at_entry_return,
                 out: Vec::new(),
             };
             rewriter.lower(instr.as_ref());
@@ -165,7 +177,8 @@ impl Rewriter<'_> {
     /// `check_widths` makes both operands of a non-shift the same width, and a mixed pure/witness
     /// pair is legal, so one witnessed operand is sufficient to require a witness lowering. A
     /// constant is split at compile time, so its limbs are constants too. A pure value that a
-    /// sequence read in this block recombined hands back the limbs it was recombined from.
+    /// sequence read or a witness strip in this block recombined hands back the limbs it was
+    /// recombined from.
     fn operand_limbs(&mut self, value: ValueId, expected: usize) -> Vec<ValueId> {
         let mapped = self.limbs(value);
         if mapped.len() == expected {
@@ -391,6 +404,13 @@ impl Rewriter<'_> {
         }
     }
 
+    /// Limb `index` of a pure `bits`-wide `value`, at `width`, as a pure field element.
+    fn limb_hint(&mut self, value: ValueId, bits: usize, index: usize, width: usize) -> ValueId {
+        let hint = self.shifted_down(value, bits, index * self.limb_bits());
+        let narrowed = self.cast(hint, CastTarget::Int(width));
+        self.cast(narrowed, CastTarget::Field)
+    }
+
     /// Limb `index` of a pure `bits`-wide `value`, at `width`, written to a witness column and
     /// range-checked at `checked` bits. Returns the limb and its field element.
     ///
@@ -404,10 +424,8 @@ impl Rewriter<'_> {
         width: usize,
         checked: usize,
     ) -> (ValueId, ValueId) {
-        let hint = self.shifted_down(value, bits, index * self.limb_bits());
-        let narrowed = self.cast(hint, CastTarget::Int(width));
-        let hint_field = self.cast(narrowed, CastTarget::Field);
-        let written = self.write_witness(hint_field);
+        let hint = self.limb_hint(value, bits, index, width);
+        let written = self.write_witness(hint);
         let limb = self.relabel(written, width);
         let limb_field = self.cast(limb, CastTarget::Field);
         self.push(OpCode::Rangecheck {

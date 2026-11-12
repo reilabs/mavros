@@ -4,7 +4,10 @@
 // post-untaint sites strand the chain's tail in the loop, paying its rows per unrolled
 // iteration. The pre-untaint site hoists one link before untaint, pulling the whole chain out
 // within the sites that remain and converting those per-iteration rows into per-entry rows.
-fn main(x: Field, y: Field) {
+fn main(x: u8, y: u8) {
+    let x = x as Field;
+    let y = y as Field;
+
     let mut acc: Field = 0;
     for _i in 0..20 {
         acc += x * y * y * y * y * y * y * y * y * y * y;

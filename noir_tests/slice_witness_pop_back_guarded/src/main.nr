@@ -3,7 +3,11 @@
 // underflows; the circuit stays satisfiable because the subtraction's rangecheck is guarded
 // and its result is zeroed under a false guard. Expected values are public inputs so the same
 // circuit checks the different guard worlds.
-fn main(w1: Field, w2: Field, expected_len: pub Field) {
+fn main(w1: u8, w2: u8, expected_len: pub u8) {
+    let w1 = w1 as Field;
+    let w2 = w2 as Field;
+    let expected_len = expected_len as Field;
+
     let mut s: [Field] = [];
     if w1 == 1 {
         s = s.push_back(10);

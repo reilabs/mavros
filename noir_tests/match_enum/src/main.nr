@@ -26,7 +26,10 @@ fn unwrap(o: Only) -> u32 {
     }
 }
 
-fn main(w: Field, h: Field, n: u32) {
+fn main(w: u8, h: u8, n: u32) {
+    let w = w as Field;
+    let h = h as Field;
+
     assert_eq(area(Shape::Empty), 0);
     assert_eq(area(Shape::Line(w)), w);
     assert_eq(area(Shape::Rect(w, h)), w * h);

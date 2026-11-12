@@ -421,13 +421,13 @@ impl<F: HarnessField> Compiled<F> {
         let param_widths: Vec<usize> = entry
             .get_param_types()
             .iter()
-            .map(PrepareEntryPoint::flattened_field_count)
+            .map(|typ| PrepareEntryPoint::flattened_field_count(typ, ssa.field()))
             .collect();
         let param_width = param_widths.iter().sum::<usize>();
         let return_width = entry
             .get_returns()
             .iter()
-            .map(PrepareEntryPoint::flattened_field_count)
+            .map(|typ| PrepareEntryPoint::flattened_field_count(typ, ssa.field()))
             .sum::<usize>();
 
         let mut driver = Driver::from_ssa(ssa, debug_output_dir.clone(), false);
@@ -557,7 +557,7 @@ impl<F: HarnessField> Compiled<F> {
     }
 
     /// The witness column of each parameter field, in blob order.
-    fn param_columns(&self) -> Vec<usize> {
+    pub fn param_columns(&self) -> Vec<usize> {
         self.entry_columns
             .params
             .iter()

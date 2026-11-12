@@ -1,4 +1,8 @@
-fn main(flag: Field, x: Field, y: Field) {
+fn main(flag: u8, x: u8, y: u8) {
+    let flag = flag as Field;
+    let x = x as Field;
+    let y = y as Field;
+
     // Witness-dependent branch where both sides produce an array
     let arr: [Field; 3] = if flag == 1 {
         [x, x + 1, x + 2]

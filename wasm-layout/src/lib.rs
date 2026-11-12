@@ -1,9 +1,9 @@
 //! Shared layout constants for the WASM VM structs.
 //!
 //! Two consumers must agree on these byte offsets:
-//!   - the test harness in `src/bin/test_runner.rs` that populates the struct
+//!   - the WASM host in `compiler/src/wasm_host.rs`, which populates the struct
 //!     in WASM linear memory before invoking `mavros_main`;
-//!   - `src/compiler/codegen/llssa_llvm_codegen.rs`, which emits GEP/load/store ops
+//!   - `compiler/src/compiler/codegen/llssa_to_llvm.rs`, which emits GEP/load/store ops
 //!     into `vm_ptr` for the generated forward-pass writes and AD helpers.
 //!
 //! All offsets are in bytes. wasm32: pointers are 4 bytes, usize/i32 is 4 bytes.

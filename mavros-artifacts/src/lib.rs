@@ -889,26 +889,8 @@ impl<F: MavrosField> R1CS<F> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputValueOrdered<F = Field> {
     Field(F),
-    String(String),
     Vec(Vec<InputValueOrdered<F>>),
     Struct(Vec<(String, InputValueOrdered<F>)>),
-}
-
-impl<F: MavrosField> InputValueOrdered<F> {
-    pub fn field_sizes(&self) -> Vec<usize> {
-        match self {
-            InputValueOrdered::Field(_) => vec![F::STORAGE_CELLS],
-            InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
-            InputValueOrdered::Vec(_) => vec![1],
-            InputValueOrdered::Struct(fields) => {
-                let mut total_size = vec![];
-                for (_field_name, field_value) in fields {
-                    total_size.extend(field_value.field_sizes());
-                }
-                total_size
-            }
-        }
-    }
 }
 
 #[cfg(test)]

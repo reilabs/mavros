@@ -454,6 +454,7 @@ impl DCE {
             | OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::IntFromLimbs { .. }
             | OpCode::Cast { .. }
             | OpCode::SExt { .. }
             | OpCode::BitRange { .. }

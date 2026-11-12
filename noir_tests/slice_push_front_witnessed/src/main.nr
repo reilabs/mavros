@@ -2,7 +2,10 @@
 // conditional back-push, then a front-push prepends to it: under the `(physical, log_len, start)`
 // purified representation, the physical slice grows at the front, the pushed value lands at
 // `start`, and the logical length must track the witness.
-fn main(w: Field, expected_len: pub Field) {
+fn main(w: u8, expected_len: pub u8) {
+    let w = w as Field;
+    let expected_len = expected_len as Field;
+
     let mut s: [Field] = [10];
     if w == 1 {
         s = s.push_back(20);

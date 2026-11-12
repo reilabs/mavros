@@ -10,7 +10,10 @@ use crate::{
             types::{FunctionTypeInfo, Types},
         },
         pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
-        passes::shared::limbs::{narrow_int_bits, widest_injective_int_bits},
+        passes::shared::{
+            MIN_LOOPED_RUN,
+            limbs::{narrow_int_bits, widest_injective_int_bits},
+        },
         ssa::{
             FunctionId, SourceLocation, ValueId,
             hlssa::{
@@ -393,30 +396,125 @@ impl LookupSpilling {
 
         let offsets = cumulative_offsets(&plan);
 
-        // Extract every chunk above the lowest and accumulate `rest`; the lowest chunk (offset 0) is
-        // derived below as `value - rest`, a linear combination needing no reconstruction
-        // constraint. Always unrolled — a counted-loop fast path for uniform runs is future work.
+        // Extract every chunk above the lowest and accumulate `rest`; the lowest chunk (offset 0)
+        // is derived below as `value - rest`, a linear combination needing no reconstruction
+        // constraint. A run of at least `MIN_LOOPED_RUN` equal chunks is checked in a counted loop
+        // after its first chunk; the loop emits the witnesses and constraints of the unrolled run,
+        // in the same order.
         let mut rest = b.field_const(b.field().zero());
-        for i in 1..plan.len() {
+        let mut i = 1;
+        while i < plan.len() {
             let chunk = plan[i];
-            let raw_u =
-                extract_low_chunk(b, pure_u, extract_bits, offsets[i], chunk.width as usize);
-            let key_field = b.cast_to_field(raw_u);
-            let key = if is_witness {
-                b.write_witness(key_field)
-            } else {
-                key_field
-            };
-            self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
-
-            let shift = b.field_const(b.field().two_pow(offsets[i]));
-            let shifted = b.umul(key, shift);
-            rest = b.uadd(rest, shifted);
+            let run = plan[i..].iter().take_while(|c| **c == chunk).count();
+            let unrolled = if run >= MIN_LOOPED_RUN { 1 } else { run };
+            for &offset in &offsets[i..i + unrolled] {
+                let key = extract_low_chunk(b, pure_u, extract_bits, offset, chunk.width as usize);
+                let place = b.field_const(b.field().two_pow(offset));
+                rest =
+                    self.accumulate_rangecheck_chunk(b, chunk, key, place, rest, flag, is_witness);
+            }
+            if run > unrolled {
+                rest = self.spill_rangecheck_run(
+                    b,
+                    pure_u,
+                    extract_bits,
+                    chunk,
+                    offsets[i + 1],
+                    run - 1,
+                    rest,
+                    flag,
+                    is_witness,
+                );
+            }
+            i += run;
         }
 
         let low_chunk = plan[0];
         let low = b.usub(value, rest);
         self.emit_rangecheck_chunk(b, low_chunk, low, flag, is_witness);
+    }
+
+    /// Check the extracted chunk `raw_u` and return `rest` with the chunk added at `place`, its
+    /// place value.
+    #[allow(clippy::too_many_arguments)]
+    fn accumulate_rangecheck_chunk(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        chunk: Chunk,
+        raw_u: ValueId,
+        place: ValueId,
+        rest: ValueId,
+        flag: ValueId,
+        is_witness: bool,
+    ) -> ValueId {
+        let key = self.witnessed_chunk_key(b, raw_u, is_witness);
+        self.emit_rangecheck_chunk(b, chunk, key, flag, is_witness);
+        let shifted = b.umul(key, place);
+        b.uadd(rest, shifted)
+    }
+
+    /// The chunk `raw_u` as the key its lookup reads: a field element, written to a witness column
+    /// when the surrounding values are witnesses.
+    fn witnessed_chunk_key(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        raw_u: ValueId,
+        is_witness: bool,
+    ) -> ValueId {
+        let key_field = b.cast_to_field(raw_u);
+        if is_witness {
+            b.write_witness(key_field)
+        } else {
+            key_field
+        }
+    }
+
+    /// Check `count` further chunks equal to `chunk`, the first at `offset`, in a counted loop, and
+    /// return `rest` with each added at its place value. `rest` already holds a checked chunk, so
+    /// it has the type every iteration leaves it with.
+    #[allow(clippy::too_many_arguments)]
+    fn spill_rangecheck_run(
+        &self,
+        b: &mut HLBlockEmitter<'_>,
+        pure_u: ValueId,
+        extract_bits: usize,
+        chunk: Chunk,
+        offset: usize,
+        count: usize,
+        rest: ValueId,
+        flag: ValueId,
+        is_witness: bool,
+    ) -> ValueId {
+        let width = chunk.width as usize;
+        let divisor = b.two_pow_const(extract_bits, offset);
+        let remaining = b.udiv(pure_u, divisor);
+        let chunk_modulus = b.two_pow_const(extract_bits, width);
+        let place = b.field_const(b.field().two_pow(offset));
+        let step = b.field_const(b.field().two_pow(width));
+        let rest_type = if is_witness {
+            Type::witness_of(Type::field())
+        } else {
+            Type::field()
+        };
+        let results = b.build_counted_loop(
+            count,
+            vec![
+                (remaining, Type::int(extract_bits)),
+                (place, Type::field()),
+                (rest, rest_type),
+            ],
+            |b, _, state| {
+                let (remaining, place, rest) = (state[0], state[1], state[2]);
+                let raw = b.urem(remaining, chunk_modulus);
+                let raw_u = b.cast_to(CastTarget::Int(width), raw);
+                let rest = self
+                    .accumulate_rangecheck_chunk(b, chunk, raw_u, place, rest, flag, is_witness);
+                let place = b.umul(place, step);
+                let remaining = b.udiv(remaining, chunk_modulus);
+                vec![remaining, place, rest]
+            },
+        );
+        results[2]
     }
 
     /// 1-bit rangecheck, lowered algebraically as `b·(b-1) = 0` rather than a table lookup.
@@ -695,4 +793,222 @@ fn extract_low_chunk(
     let modulus = b.two_pow_const(value_bits, chunk_bits);
     let chunk = b.urem(shifted, modulus);
     b.cast_to(CastTarget::Int(chunk_bits), chunk)
+}
+
+#[cfg(test)]
+mod tests {
+    use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+
+    use super::*;
+    use crate::{
+        compiler::ssa::{
+            Located, SourceLocation, Terminator,
+            hlssa::{BinaryArithOpKind, CmpKind, Type, builder::HLSSABuilder},
+        },
+        driver::Driver,
+        forgery::accepts_the_forgery,
+    };
+
+    /// Each chunk the loop of a spilled range check reads is held to its width. Moving `2^w` into
+    /// one looped chunk from the chunk above it keeps the value the chunks spell, so only that
+    /// chunk's lookup refuses it. That holds on both fields, and under a witnessed branch, whose
+    /// guard gates every lookup.
+    fn check_looped_chunks<F: MavrosField>(bits: usize, guarded: bool) {
+        let field = F::CONFIG;
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let main_id = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
+            let entry = b.function.get_entry_id();
+            if !guarded {
+                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let x = e.add_parameter(Type::field());
+                e.rangecheck(x, bits);
+                e.terminate_return(vec![]);
+                return;
+            }
+            let (taken, after) = (b.function.add_block(), b.function.add_block());
+            let x = {
+                let mut e = b.block(entry).with_source_location(SourceLocation::test());
+                let x = e.add_parameter(Type::field());
+                let condition = e.add_parameter(Type::bool());
+                e.terminate_jmp_if(condition, taken, after);
+                x
+            };
+            {
+                let mut e = b.block(taken).with_source_location(SourceLocation::test());
+                e.rangecheck(x, bits);
+                e.terminate_jmp(after, vec![]);
+            }
+            b.block(after)
+                .with_source_location(SourceLocation::test())
+                .terminate_return(vec![]);
+        });
+
+        // Whether `x` is accepted with the chunks the loop checks on its second and third
+        // iterations, which lie `start + w` and `start + 2w` bits up, written as `forged`.
+        let accepts = |x: &dyn Fn(usize, usize) -> crate::compiler::Field,
+                       forged: &dyn Fn(usize) -> [u64; 2]| {
+            let dumps = tempfile::TempDir::new().unwrap();
+            let mut driver = Driver::from_ssa(ssa.clone(), dumps.path().to_path_buf(), false);
+            driver.make_struct_access_static().unwrap();
+            driver.monomorphize().unwrap();
+            driver.spill_witness().unwrap();
+            let (start, width) = forge_loop_chunks(driver.witness_spilled_ssa_mut(), bits, None);
+            let mut inputs = vec![InputValueOrdered::Field(F::from_element(x(start, width)))];
+            if guarded {
+                inputs.push(InputValueOrdered::Field(F::ONE));
+            }
+            let forged = forged(width);
+            accepts_the_forgery::<F>(ssa.clone(), &inputs, |ssa| {
+                forge_loop_chunks(ssa, bits, Some(forged));
+            })
+        };
+        let at = format!("{:?} {bits} bits guarded {guarded}", F::ID);
+        // The chunk `start + 2w` bits up is 1, every other chunk 0.
+        let value = |start: usize, width: usize| field.two_pow(start + 2 * width);
+        assert!(
+            accepts(&value, &|_| [0, 1]),
+            "{at}: the honest chunks, written as elements, are refused"
+        );
+        assert!(
+            !accepts(&value, &|width| [1 << width, 0]),
+            "{at}: a looped chunk of 2^w is accepted"
+        );
+    }
+
+    #[test]
+    fn a_looped_chunk_of_a_spilled_range_check_is_held_to_its_width() {
+        for guarded in [false, true] {
+            check_looped_chunks::<Field>(128, guarded);
+            check_looped_chunks::<Goldilocks>(60, guarded);
+        }
+    }
+
+    /// The offset of the first chunk the loop of the helper of a `bits`-wide range check checks and
+    /// the loop's chunk width, after writing the chunks of its second and third iterations as
+    /// `forged`, if given.
+    fn forge_loop_chunks(ssa: &mut HLSSA, bits: usize, forged: Option<[u64; 2]>) -> (usize, usize) {
+        let field = ssa.field();
+        let forged =
+            forged.map(|values| values.map(|v| ssa.add_const(Constant::Field(field.constant(v)))));
+        let iterations = [1u128, 2].map(|k| ssa.add_const(Constant::int(32, k)));
+        let fresh = ssa.fresh_values(4);
+        let consts = ssa.const_snapshot();
+        let place_of = |value: ValueId| {
+            let Some(Constant::Field(place)) = consts.get(&value).map(|c| c.as_ref()) else {
+                panic!("the loop starts at a constant place");
+            };
+            (0..field.field_bit_size() as usize)
+                .find(|&bits| field.two_pow(bits) == *place)
+                .expect("a place is a power of two")
+        };
+        let width_of = |value: ValueId| {
+            let Some(Constant::Int(modulus)) = consts.get(&value).map(|c| c.as_ref()) else {
+                panic!("the chunk modulus is a constant");
+            };
+            let modulus = usize::try_from(modulus).expect("a chunk modulus fits a host word");
+            assert!(
+                modulus.is_power_of_two(),
+                "a chunk modulus is a power of two"
+            );
+            modulus.trailing_zeros() as usize
+        };
+
+        let mut found = None;
+        for (_, function) in ssa.iter_functions_mut() {
+            if !function
+                .get_name()
+                .starts_with(&format!("__rangecheck_spill_{bits}_"))
+            {
+                continue;
+            }
+            // The loop header is the block whose parameters the entry's jump starts at
+            // `(0, remaining, place, rest)`; its first parameter counts the iterations.
+            let header_and_body =
+                function
+                    .get_blocks()
+                    .find_map(|(_, block)| match block.get_terminator() {
+                        Some(Terminator::JmpIf(_, body, _)) => {
+                            Some((block.get_parameter_values().next().copied()?, *body))
+                        }
+                        _ => None,
+                    });
+            let (index, body) = header_and_body.expect("the helper loops over its chunks");
+            let start = function
+                .get_blocks()
+                .find_map(|(_, block)| match block.get_terminator() {
+                    Some(Terminator::Jmp(_, args))
+                        if args.len() == 4 && consts.contains_key(&args[2]) =>
+                    {
+                        Some(place_of(args[2]))
+                    }
+                    _ => None,
+                });
+            let block = function.get_block_mut(body);
+            let width = block
+                .get_instructions()
+                .find_map(|op| match op {
+                    OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::URem,
+                        rhs,
+                        ..
+                    } => Some(width_of(*rhs)),
+                    _ => None,
+                })
+                .expect("the loop cuts each chunk off with a remainder");
+            found = Some((start.expect("the loop starts at a constant place"), width));
+
+            let Some(forged) = forged else { continue };
+            let mut rewritten = Vec::new();
+            for instruction in block.take_instructions() {
+                let location = instruction.location().clone();
+                let OpCode::WriteWitness {
+                    result,
+                    value,
+                    pinned,
+                } = *instruction
+                else {
+                    rewritten.push(instruction);
+                    continue;
+                };
+                let [first_hit, first_pick, second_hit, second_pick] =
+                    [fresh[0], fresh[1], fresh[2], fresh[3]];
+                for op in [
+                    OpCode::Cmp {
+                        kind: CmpKind::Eq,
+                        result: first_hit,
+                        lhs: index,
+                        rhs: iterations[0],
+                    },
+                    OpCode::Select {
+                        result: first_pick,
+                        cond: first_hit,
+                        if_t: forged[0],
+                        if_f: value,
+                    },
+                    OpCode::Cmp {
+                        kind: CmpKind::Eq,
+                        result: second_hit,
+                        lhs: index,
+                        rhs: iterations[1],
+                    },
+                    OpCode::Select {
+                        result: second_pick,
+                        cond: second_hit,
+                        if_t: forged[1],
+                        if_f: first_pick,
+                    },
+                    OpCode::WriteWitness {
+                        result,
+                        value: second_pick,
+                        pinned,
+                    },
+                ] {
+                    rewritten.push(Located::new(op, location.clone()));
+                }
+            }
+            block.put_instructions(rewritten);
+        }
+        found.unwrap_or_else(|| panic!("a {bits}-bit range check is spilled into a helper"))
+    }
 }

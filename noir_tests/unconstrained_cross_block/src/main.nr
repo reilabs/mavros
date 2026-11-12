@@ -2,7 +2,9 @@ unconstrained fn add_one(x: Field) -> Field {
     x + 1
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     let y = unsafe { add_one(x) };
 
     // Keep the use of y in a successor block.

@@ -1,7 +1,12 @@
 // insert at a witness index into a witness-length slice: purify emits a physical-level
 // SliceInsert at `start + index`, lowered into a grow-at-back plus a shift-right select scan
 // against the witness index.
-fn main(w: u32, expected0: pub Field, expected1: pub Field, expected2: pub Field, expected_len: pub Field) {
+fn main(w: u32, expected0: pub u8, expected1: pub u8, expected2: pub u8, expected_len: pub u8) {
+    let expected0 = expected0 as Field;
+    let expected1 = expected1 as Field;
+    let expected2 = expected2 as Field;
+    let expected_len = expected_len as Field;
+
     let mut s: [Field] = [10];
     if w == 1 {
         s = s.push_back(20);

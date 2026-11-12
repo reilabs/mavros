@@ -8,7 +8,11 @@ fn fib(a: Field, b: Field, n: u32) -> Field {
     }
 }
 
-fn main(a: Field, b: Field, result: pub Field) {
+fn main(a: u8, b: u8, result: pub u8) {
+    let a = a as Field;
+    let b = b as Field;
+    let result = result as Field;
+
     let r = fib(a, b, 10);
     assert_eq(r, result);
 }

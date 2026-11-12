@@ -303,12 +303,13 @@ fn check_at(
 fn algebraic_constraints_and_shared_linear_combinations() {
     let (verifier_heap, ad_heap) = check(
         r#"
-        fn main(x: Field, y: pub Field) -> pub Field {
-            let z = 3 * x - y + 7;
+        fn main(x: u8, y: pub u8) -> pub u8 {
+            let (a, b) = (x as Field, y as Field);
+            let z = 3 * a - b + 7;
             let mut result = z * z;
             for i in 0..4 { result = result * z + i as Field; }
             assert(result != 0);
-            result
+            x
         }
     "#,
     );
@@ -450,7 +451,7 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
         api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
-    let other = common::noir_project("fn main(x: Field) { assert(x == 1); }");
+    let other = common::noir_project("fn main(x: u8) { assert(x == 1); }");
     let (_, other_r1cs) = api::compile_to_r1cs::<Field>(other.path().to_path_buf(), false).unwrap();
     let mut shifted_witness = r1cs.witness_layout;
     shifted_witness.algebraic_size -= 1;
@@ -504,7 +505,7 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
 
 #[test]
 fn vector_lengths_are_checked_before_execution() {
-    let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
+    let project = common::noir_project("fn main(x: u8) { assert(x * x == 9); }");
     let (mut driver, r1cs) =
         api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
@@ -542,7 +543,8 @@ fn vector_lengths_are_checked_before_execution() {
 
 #[test]
 fn cli_verifies_without_prover_inputs_and_prints_json() {
-    let project = common::noir_project("fn main(x: Field, y: pub Field) { assert(x * x == y); }");
+    let project =
+        common::noir_project("fn main(x: u8, y: pub u16) { assert(x as u16 * x as u16 == y); }");
     let (_, r1cs) = api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let r = vec![Field::from(3u64); r1cs.constraints.len()];
     let w = vec![Field::from(7u64); r1cs.witness_layout.size()];
@@ -594,7 +596,7 @@ fn cli_requires_one_workspace_binary_and_honors_member_selection() {
         .unwrap();
         std::fs::write(
             root.join("src/main.nr"),
-            "fn main(x: Field) { assert(x * x == 9); }",
+            "fn main(x: u8) { assert(x * x == 9); }",
         )
         .unwrap();
     }
@@ -708,7 +710,7 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
 
 #[test]
 fn verifier_artifact_cannot_run_as_a_prover() {
-    let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
+    let project = common::noir_project("fn main(x: u8) { assert(x * x == 9); }");
     let (mut driver, r1cs) =
         api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let mut binary =
@@ -728,7 +730,7 @@ fn verifier_artifact_cannot_run_as_a_prover() {
 fn a_verifier_binary_is_not_a_prover_artifact() {
     use mavros_artifacts::ArtifactError;
     use mavros_compiler::driver::Error;
-    let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
+    let project = common::noir_project("fn main(x: u8) { assert(x * x == 9); }");
     let (mut driver, r1cs) =
         api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
     let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
@@ -745,7 +747,7 @@ fn a_verifier_binary_is_not_a_prover_artifact() {
 
 #[test]
 fn cli_exports_verifier_separately_without_changing_prover_binary() {
-    let project = common::noir_project("fn main(x: Field) -> pub Field { x * x + 3 }");
+    let project = common::noir_project("fn main(x: u8) -> pub u16 { x as u16 * x as u16 + 3 }");
     let invoke = |extra: &[&str]| {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_mavros"))
             .current_dir(project.path())

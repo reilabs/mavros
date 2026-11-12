@@ -13,7 +13,9 @@ fn add_i8(a: i8, b: i8) -> i8 {
     a + b
 }
 
-fn main(w: Field) {
+fn main(w: u8) {
+    let w = w as Field;
+
     // Keeps `main` from folding away entirely; the addition below is what is under test.
     assert(w != 0);
     // 120 + 10 is 130, one past `i8`'s 127. `-126` is the wrapped answer.

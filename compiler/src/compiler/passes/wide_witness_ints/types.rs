@@ -1,7 +1,7 @@
 use crate::{
     collections::HashMap,
     compiler::{
-        passes::{shared::limbs::witness_limb_bits, wide_witness_ints::utils::multi_cell_int_bits},
+        passes::shared::limbs::{multi_cell_int_bits, witness_limb_bits},
         ssa::{
             ValueId,
             hlssa::{Type, TypeExpr},
@@ -10,17 +10,7 @@ use crate::{
 };
 use mavros_artifacts::FieldConfig;
 
-/// The widths a `bits`-wide integer splits into, little-endian, with the top limb carrying the
-/// remainder rather than a full limb's width.
-pub(super) fn limb_widths(bits: usize, limb_bits: usize) -> Vec<usize> {
-    let count = bits.div_ceil(limb_bits);
-    (0..count)
-        .map(|index| {
-            let low = index * limb_bits;
-            (bits - low).min(limb_bits)
-        })
-        .collect()
-}
+pub(super) use crate::compiler::passes::shared::limbs::limb_widths;
 
 /// The types a type expands into: one per limb for a witnessed wide integer, itself otherwise.
 pub(super) fn limb_types(ty: &Type, field: FieldConfig) -> Vec<Type> {

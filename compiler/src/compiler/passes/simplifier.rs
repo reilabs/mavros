@@ -201,6 +201,37 @@ impl Simplifier {
                         if *lhs == *rhs {
                             return materialize_zero(types, *result, fb);
                         }
+                        // `a - (a - x)` is `x` in a field. An integer `a - x` can trap, which the
+                        // fold would drop, so only a field subtraction folds. A pure `x` under a
+                        // witnessed result is cast to a witness, as `materialize_const` does.
+                        if types.get_value_type(*result).strip_witness().is_field()
+                            && let Some(ValueDefinition::Instruction(
+                                _,
+                                _,
+                                OpCode::BinaryArithOp {
+                                    kind: inner,
+                                    lhs: inner_lhs,
+                                    rhs: x,
+                                    ..
+                                },
+                            )) = defs.get_definition(*rhs)
+                            && inner.group() == ArithGroup::Sub
+                            && *inner_lhs == *lhs
+                        {
+                            if types.get_value_type(*result).is_witness_of()
+                                && !types.get_value_type(*x).is_witness_of()
+                            {
+                                return Some(Rewrite::Replace(vec![OpCode::Cast {
+                                    result: *result,
+                                    value: *x,
+                                    target: CastTarget::WitnessOf,
+                                }]));
+                            }
+                            return Some(Rewrite::Alias {
+                                result: *result,
+                                target: *x,
+                            });
+                        }
                     }
                     ArithGroup::Mul => {
                         if is_zero(fb.ssa, *lhs) {
@@ -656,5 +687,104 @@ mod tests {
             matches!(entry.get_terminator(), Some(Terminator::Return(values)) if values == &vec![zero]),
             "the strip is the zero it strips"
         );
+    }
+
+    /// `main(x: WitnessOf<typ>) -> (0 - (0 - x))` after simplification: what it returns, and how
+    /// many instructions are left.
+    fn double_subtraction_of(typ: Type, zero: Constant) -> (ValueId, ValueId, usize) {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (x, inner, outer) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let zero = ssa.add_const(zero);
+        HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            fb.function.add_return_type(Type::witness_of(typ.clone()));
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(x, Type::witness_of(typ));
+            let mut block = fb.test_block(entry);
+            for (result, rhs) in [(inner, x), (outer, inner)] {
+                block.emit(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::USub,
+                    result,
+                    lhs: zero,
+                    rhs,
+                });
+            }
+            block.terminate_return(vec![outer]);
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        Simplifier::new().do_run(&mut ssa, &flow);
+
+        let function = ssa.get_function(main);
+        let entry = function.get_block(function.get_entry_id());
+        let Some(Terminator::Return(values)) = entry.get_terminator() else {
+            panic!("main returns");
+        };
+        (x, values[0], entry.get_instructions().count())
+    }
+
+    /// A field's `0 - (0 - x)` is `x`. The outer subtraction folds away, and the inner one is left
+    /// unused for DCE.
+    #[test]
+    fn a_double_negation_of_an_element_is_the_element() {
+        let field = HLSSA::with_main("main".to_string()).field();
+        let (x, returned, left) =
+            double_subtraction_of(Type::field(), Constant::Field(field.zero()));
+        assert_eq!(returned, x);
+        assert_eq!(left, 1);
+    }
+
+    /// `w - (w - c)` folds to a pure constant `c` under a witnessed result, so the result stays a
+    /// witness, the cast of `c` to one.
+    #[test]
+    fn a_fold_to_a_pure_value_keeps_a_witnessed_result_witnessed() {
+        let mut ssa = HLSSA::with_main("main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (w, inner, outer) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
+        let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
+        HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            fb.function.add_return_type(Type::witness_of(Type::field()));
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(w, Type::witness_of(Type::field()));
+            let mut block = fb.test_block(entry);
+            for (result, rhs) in [(inner, five), (outer, inner)] {
+                block.emit(OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::USub,
+                    result,
+                    lhs: w,
+                    rhs,
+                });
+            }
+            block.terminate_return(vec![outer]);
+        });
+
+        let flow = FlowAnalysis::run(&ssa);
+        Simplifier::new().do_run(&mut ssa, &flow);
+
+        let function = ssa.get_function(main);
+        let entry = function.get_block(function.get_entry_id());
+        assert!(
+            entry.get_instructions().any(|op| matches!(
+                op,
+                OpCode::Cast { result, value, target: CastTarget::WitnessOf }
+                    if *result == outer && *value == five
+            )),
+            "the result is `c` cast to a witness"
+        );
+        assert!(
+            matches!(entry.get_terminator(), Some(Terminator::Return(values)) if values == &vec![outer])
+        );
+    }
+
+    /// An integer's `0 - x` traps for any `x` but zero, so `0 - (0 - x)` keeps both subtractions.
+    #[test]
+    fn a_double_negation_of_an_integer_keeps_its_trap() {
+        let (x, returned, left) = double_subtraction_of(Type::int(8), Constant::int(8, 0));
+        assert_ne!(returned, x);
+        assert_eq!(left, 2);
     }
 }

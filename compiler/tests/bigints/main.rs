@@ -10,12 +10,15 @@ use harness::{
 use mavros_artifacts::{Field, FieldConfig, FieldElement, FieldId, InputValueOrdered};
 use mavros_compiler::{
     compiler::{
-        passes::shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+        passes::{
+            shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+            wide_witness_ints::{int_limb_widths, multi_cell_int_bits},
+        },
         ssa::{
             SourceLocation, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLSSA, OpCode,
-                Radix, SequenceTargetType, SliceOpDir, Type,
+                Radix, SequenceTargetType, SliceOpDir, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter as _, HLSSABuilder},
             },
         },
@@ -374,9 +377,9 @@ fn every_witness_column_of_an_unsigned_ordering_is_pinned() {
 
 /// The mutation test past the width one field element carries, where the operands are **limbs**.
 ///
-/// No parameter or declared return can be wider than one element, so a limbed operand is built
-/// inside the program: a widened narrow parameter beside a constant reaching the top limb. The sum
-/// and the difference leave through their low limb, the ordering as one bit.
+/// A limbed operand is built inside the program here: a widened narrow parameter beside a constant
+/// reaching the top limb. The sum and the difference leave through their low limb, the ordering as
+/// one bit.
 ///
 /// Nothing is read back with an equality: its inverse hint is free when the sides are equal, so it
 /// always leaves a column unpinned.
@@ -5135,7 +5138,6 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an int256 shifted by an int32",
             shift,
-            // An int256 cannot cross the entry point, so it is widened inside.
             main_program(
                 &[Type::int(32), Type::int(32)],
                 &[Type::int(32)],
@@ -5178,7 +5180,6 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an array of wide integers mapped to a wider integer",
             "a Map cast only adds or strips WitnessOf",
-            // An int256 cannot cross the entry point, so the array is built inside.
             main_program(&[Type::int(32)], &[Type::int(32)], |e, params| {
                 let wide = e.cast_to(CastTarget::Int(256), params[0]);
                 let array = e.mk_seq(
@@ -5207,49 +5208,6 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
             message.starts_with("ICE: ") && message.contains(reason),
             "{what}: {message}"
         );
-    }
-}
-
-/// A return past the field's width publishes its residue, so `x` and `x + p` publish the same value
-/// and a declared return cannot tell them apart. This is the known limitation of
-/// `bind_return_deep` in `docs/field-agnosticism.md`; lifting it has to change this test.
-#[test]
-fn a_return_past_the_field_publishes_its_residue() {
-    check_a_return_past_the_field::<Field>(first_width_past_the_field());
-    check_a_return_past_the_field::<mavros_artifacts::Goldilocks>(64);
-}
-
-fn check_a_return_past_the_field<F: HarnessField>(bits: usize) {
-    let field = F::CONFIG;
-    let modulus = biguint_of_limbs(field.modulus_limbs());
-    for offset in [BigUint::ZERO, modulus] {
-        let compiled = Compiled::<F>::compile(main_program_in(
-            field,
-            &[Type::int(32)],
-            &[Type::int(bits)],
-            |e, params| {
-                let wide = e.cast_to(CastTarget::Int(bits), params[0]);
-                let offset = e.int_const(IntBits::from_biguint(bits, &offset));
-                vec![e.uadd(wide, offset)]
-            },
-        ))
-        .unwrap_or_else(|error| panic!("{:?}: the return does not compile: {error}", field.id()));
-        for x in [0u32, 5, 0xdead_beef] {
-            let element = |value: u64| InputValueOrdered::Field(F::of_biguint(&value.into()));
-            let input = element(x.into());
-            let verdict = compiled.run(&[input.clone(), element(x.into())]);
-            assert!(
-                verdict.is_accepted(),
-                "{:?}: x = {x} + {offset}: {verdict:?}",
-                field.id()
-            );
-            let verdict = compiled.run(&[input, element(u64::from(x) + 1)]);
-            assert!(
-                matches!(verdict, Verdict::ReturnMismatch { .. }),
-                "{:?}: x = {x} + {offset} declared as the next element: {verdict:?}",
-                field.id()
-            );
-        }
     }
 }
 
@@ -5731,9 +5689,8 @@ fn assembled(e: &mut HLBlockEmitter<'_>, windows: &[ValueId], bits: usize) -> Va
 /// `main` taking an `int(bits)` as 64-bit windows, assembling it, and returning the windows of
 /// `spread(x, spread_read)` and of both streams of `unspread(x, unspread_read)`.
 ///
-/// An entry point takes and returns only what one field element holds, so a value past the field
-/// is assembled and taken apart inside the program, with the representation's `Or`, shifts and
-/// narrowing casts.
+/// The windows are assembled and taken apart inside the program, so the representation's `Or`,
+/// shifts and narrowing casts run alongside the spread.
 fn program_spreading_witnessed(bits: usize, spread_read: usize, unspread_read: usize) -> HLSSA {
     let params: Vec<Type> = window_widths(bits).into_iter().map(Type::int).collect();
     let returns: Vec<Type> = [2 * bits, bits / 2, bits.div_ceil(2)]
@@ -6067,30 +6024,237 @@ fn the_widest_injective_width_is_an_entry_point_parameter() {
     }
 }
 
-/// An integer wider than one input element carries cannot cross this ABI directly. The frontend
-/// rejects such parameters; a hand-built SSA that bypasses it is refused with an error, wherever
-/// the integer sits in the parameter.
-#[test]
-fn a_main_parameter_wider_than_the_field_is_a_compiler_error() {
-    let width = first_width_past_the_field();
+/// The limbs of `value` as an `int{width}` on `field`, little-endian.
+fn limbs_in(field: FieldConfig, width: usize, value: &BigUint) -> Vec<IntBits> {
+    let pattern = IntBits::from_biguint(width, value);
+    let mut low = 0;
+    int_limb_widths(width, field)
+        .into_iter()
+        .map(|limb_width| {
+            let limb = pattern.bit_range(low, limb_width);
+            low += limb_width;
+            limb
+        })
+        .collect()
+}
+
+/// Where the wide integer a test's `main` returns comes from.
+#[derive(Clone, Copy, Debug)]
+enum ReturnSource {
+    /// The witnessed parameter itself.
+    Parameter,
+    /// A constant.
+    Constant,
+    /// The parameter plus one, through the carry chain.
+    Sum,
+    /// An unconstrained function's answer, given the parameter.
+    Hint,
+}
+
+/// `main` over `field` returning a `typ` that holds `source`'s `int{width}` in its last slot: the
+/// value itself, `[0, value]`, or `(3, value)`. Every source but a constant reads one `int{width}`
+/// parameter.
+fn wide_return_program(
+    field: FieldConfig,
+    width: usize,
+    source: ReturnSource,
+    typ: &Type,
+    value: &BigUint,
+) -> HLSSA {
     let wide = Type::int(width);
-    for param in [
-        wide.clone(),
-        wide.clone().array_of(2),
-        Type::tuple_of(vec![Type::field(), wide]),
-    ] {
-        let ssa = main_program(&[param.clone()], &[Type::field()], |e, _| {
-            vec![e.field_const(e.field().zero())]
-        });
-        let Err(error) = Compiled::new(ssa) else {
-            panic!("main({param:?}) compiled");
+    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let mut builder = HLSSABuilder::new(&mut ssa);
+    let hint_type = wide.clone();
+    let (hint, ()) = builder.add_function("hint".to_string(), move |b| {
+        b.function.add_return_type(hint_type.clone());
+        let entry = b.function.get_entry_id();
+        let mut e = b
+            .block(entry)
+            .with_source_location(SourceLocation::synthetic("hint"));
+        let input = e.add_parameter(hint_type);
+        e.terminate_return(vec![input]);
+    });
+    builder.modify_function(main_id, |b| {
+        b.function.add_return_type(typ.clone());
+        let entry = b.function.get_entry_id();
+        let mut e = b
+            .block(entry)
+            .with_source_location(SourceLocation::synthetic("main"));
+        let x = match source {
+            ReturnSource::Constant => e.int_const(IntBits::from_biguint(width, value)),
+            ReturnSource::Parameter => e.add_parameter(wide.clone()),
+            ReturnSource::Sum => {
+                let x = e.add_parameter(wide.clone());
+                let one = e.int_const(IntBits::one(width));
+                e.bin(BinaryArithOpKind::UAdd, x, one)
+            }
+            ReturnSource::Hint => {
+                let x = e.add_parameter(wide.clone());
+                e.call_unconstrained(hint, vec![x], 1)[0]
+            }
         };
-        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
-        let message = error.to_string();
-        assert!(
-            message.contains(&format!("an int{width} crosses the entry point")),
-            "{message}"
-        );
+        let returned = match &typ.expr {
+            TypeExpr::Int(_) => x,
+            TypeExpr::Array(..) => {
+                let zero = e.int_const(IntBits::zero(width));
+                e.mk_seq(vec![zero, x], SequenceTargetType::Array(2), wide.clone())
+            }
+            _ => {
+                let byte = e.int_const(IntBits::from_u128(8, 3));
+                e.mk_tuple(vec![byte, x], vec![Type::int(8), wide.clone()])
+            }
+        };
+        e.terminate_return(vec![returned]);
+    });
+    ssa
+}
+
+/// A `main` return wider than one element carries is published as its limbs, one column each,
+/// wherever the integer sits in the type and wherever it comes from.
+///
+/// Each column is bound: moving one alone breaks a constraint, and so does moving `2^w` into a limb
+/// from the one above it, which keeps the value the limbs spell. One column holding the whole
+/// integer would publish its residue, `v` and `v + p` alike.
+#[test]
+fn a_main_return_wider_than_an_element_is_published_as_its_limbs() {
+    check_a_wide_main_return::<Field>();
+    check_a_wide_main_return::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_a_wide_main_return<F: HarnessField>() {
+    let field = F::CONFIG;
+    for width in [multi_cell_int_bits(field) + 1, 300] {
+        let wide = Type::int(width);
+        // The top bit and the low limb are set, every limb between is zero.
+        let value = (BigUint::from(1u8) << (width - 1)) + 5u8;
+        let limbs = limbs_in(field, width, &value);
+        let zeros = limbs_in(field, width, &BigUint::ZERO);
+        let count = limbs.len();
+        for source in [
+            ReturnSource::Parameter,
+            ReturnSource::Constant,
+            ReturnSource::Sum,
+            ReturnSource::Hint,
+        ] {
+            // The return's elements, and where each wide integer's limbs start among them.
+            for (typ, elements, starts) in [
+                (wide.clone(), limbs.clone(), vec![0]),
+                (
+                    wide.clone().array_of(2),
+                    [zeros.clone(), limbs.clone()].concat(),
+                    vec![0, count],
+                ),
+                (
+                    Type::tuple_of(vec![Type::int(8), wide.clone()]),
+                    [vec![IntBits::from_u128(8, 3)], limbs.clone()].concat(),
+                    vec![1],
+                ),
+            ] {
+                let ssa = wide_return_program(field, width, source, &typ, &value);
+                let what = format!("{:?}: {source:?} -> {typ:?}", field.id());
+                let compiled =
+                    Compiled::<F>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+                let param = match source {
+                    ReturnSource::Constant => vec![],
+                    ReturnSource::Sum => limbs_in(field, width, &(&value - 1u8)),
+                    ReturnSource::Parameter | ReturnSource::Hint => limbs.clone(),
+                };
+                let block: Vec<&IntBits> = param.iter().chain(&elements).collect();
+                let inputs = input_block_in::<F>(&block);
+                let verdict = compiled.run(&inputs);
+                assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+                if let Some(verdict) = compiled.run_wasm(&inputs) {
+                    assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
+                }
+
+                let witness = verdict.witness().unwrap();
+                let columns = compiled.return_columns();
+                assert_eq!(columns.len(), elements.len(), "{what}");
+                for column in columns.clone() {
+                    let mut moved = witness.to_vec();
+                    moved[column] = moved[column] + F::ONE;
+                    assert!(
+                        compiled.first_unsatisfied_constraint(&moved).is_some(),
+                        "{what}: return column {column} moves alone"
+                    );
+                }
+                for start in starts {
+                    for (index, limb) in limbs.iter().enumerate().take(count - 1) {
+                        let column = columns.start + start + index;
+                        let mut traded = witness.to_vec();
+                        traded[column] = traded[column] + F::from(1u128 << limb.bits());
+                        traded[column + 1] = traded[column + 1] - F::ONE;
+                        assert!(
+                            compiled.first_unsatisfied_constraint(&traded).is_some(),
+                            "{what}: limb {index} at element {start} trades its place value with \
+                             the next"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A `main` parameter wider than one element carries crosses as its limbs, one input element and
+/// one column each, wherever the integer sits in the type.
+#[test]
+fn a_main_parameter_wider_than_an_element_crosses_as_its_limbs() {
+    check_a_wide_main_parameter::<Field>();
+    check_a_wide_main_parameter::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_a_wide_main_parameter<F: HarnessField>() {
+    let field = F::CONFIG;
+    for width in [multi_cell_int_bits(field) + 1, 300] {
+        let wide = Type::int(width);
+        // The top 32 bits are `2^31`, the low ones `5`: every limb but the low and the top is zero.
+        let value = (BigUint::from(1u8) << (width - 1)) + 5u8;
+        let limbs = limbs_in(field, width, &value);
+        let zeros = limbs_in(field, width, &BigUint::ZERO);
+        let byte = IntBits::from_u128(8, 3);
+        for (typ, elements) in [
+            (wide.clone(), limbs.clone()),
+            (
+                wide.clone().array_of(2),
+                [zeros.clone(), limbs.clone()].concat(),
+            ),
+            (
+                Type::tuple_of(vec![Type::int(8), wide.clone()]),
+                [vec![byte.clone()], limbs.clone()].concat(),
+            ),
+        ] {
+            let ssa = main_program_in(field, &[typ.clone()], &[Type::int(32)], |e, params| {
+                let x = match &typ.expr {
+                    TypeExpr::Int(_) => params[0],
+                    TypeExpr::Array(..) => {
+                        let one = e.int_const(IntBits::from_u128(32, 1));
+                        e.array_get(params[0], one)
+                    }
+                    _ => e.tuple_proj(params[0], 1),
+                };
+                let amount = e.int_const(IntBits::from_u128(width, (width - 32) as u128));
+                let top = e.ushr(x, amount);
+                vec![e.cast_to(CastTarget::Int(32), top)]
+            });
+            let what = format!("{:?}: main({typ:?})", field.id());
+            let compiled =
+                Compiled::<F>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(
+                compiled.param_columns().len(),
+                elements.len(),
+                "{what}: one column per input element"
+            );
+            let answer = IntBits::from_u128(32, 1 << 31);
+            let block: Vec<&IntBits> = elements.iter().chain([&answer]).collect();
+            let inputs = input_block_in::<F>(&block);
+            let verdict = compiled.run(&inputs);
+            assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+            if let Some(verdict) = compiled.run_wasm(&inputs) {
+                assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
+            }
+        }
     }
 }
 

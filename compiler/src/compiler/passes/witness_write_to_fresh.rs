@@ -6,7 +6,10 @@ use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     ssa::hlssa::{HLSSA, OpCode},
-    util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+    util::{
+        ice_int_from_limbs_after_wide_witness_ints, ice_non_elided_tuple,
+        ice_unvalidated_assert_constant,
+    },
 };
 
 pub struct WitnessWriteToFresh {}
@@ -102,6 +105,7 @@ impl WitnessWriteToFresh {
                         OpCode::TupleProj { .. }
                         | OpCode::TupleRefProj { .. }
                         | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                        OpCode::IntFromLimbs { .. } => ice_int_from_limbs_after_wide_witness_ints(),
                     };
                     *instruction = new_instruction;
                 }

@@ -115,9 +115,17 @@ return = ["16", "4503603922337792"]"#,
 
 #[test]
 fn field_identity_casts_preserve_the_top_field_bit() {
+    let top: num_bigint::BigUint =
+        "21888242871839275222246405745257275088548364400416034343698204186575808495616"
+            .parse()
+            .unwrap();
+    let bytes = common::le_bytes(&top, 32);
     check_both_modes(
-        "fn main(x: Field) -> pub Field { x as Field }",
-        "x = '21888242871839275222246405745257275088548364400416034343698204186575808495616'\nreturn = '21888242871839275222246405745257275088548364400416034343698204186575808495616'",
+        "fn main(x: [u8; 32]) -> pub [u8; 32] {
+            let x = Field::from_le_bytes_checked(x);
+            (x as Field).to_le_bytes()
+        }",
+        &format!("x = {bytes}\nreturn = {bytes}"),
     );
 }
 
@@ -151,12 +159,15 @@ fn field_casts_to_wide_integers_preserve_the_canonical_value() {
             let high = &value >> 128;
             check_both_modes(
                 &format!(
-                    "fn main(x: Field) -> pub [u128; 2] {{
-                        let wide = x as {target};
+                    "fn main(x: [u8; 32]) -> pub [u128; 2] {{
+                        let wide = Field::from_le_bytes_checked(x) as {target};
                         [wide as u128, (wide >> 128) as u128]
                     }}"
                 ),
-                &format!("x = '{decimal}'\nreturn = ['{low}', '{high}']"),
+                &format!(
+                    "x = {}\nreturn = ['{low}', '{high}']",
+                    common::le_bytes(&value, 32)
+                ),
             );
         }
     }
@@ -214,7 +225,8 @@ fn field_cast_differential(
     let source = format!(
         "comptime fn interpreted(x: Field) -> {ty} {{ ({offset} + x) as {ty} }}
         unconstrained fn unconstrained_cast(x: Field) -> {ty} {{ x as {ty} }}
-        fn main(xs: [Field; {count}]) -> pub Field {{
+        fn main(xs: [[u8; 32]; {count}]) -> pub u8 {{
+            let xs = xs.map(|x| Field::from_le_bytes_checked(x));
             let wants: [{ty}; {count}] = comptime {{ [{interpreted}] }};
             {body}
             1
@@ -222,7 +234,7 @@ fn field_cast_differential(
     );
     let inputs = values
         .iter()
-        .map(|value| format!("'{value}'"))
+        .map(|value| common::le_bytes(value, 32))
         .collect::<Vec<_>>()
         .join(", ");
     (source, format!("xs = [{inputs}]\nreturn = '1'"))
@@ -308,7 +320,8 @@ fn field_casts_agree_with_noirs_comptime_interpreter() {
 #[test]
 fn wide_match_literals_and_signed_literals_keep_their_value() {
     check(
-        r#"fn main(x: Field, n: i64) -> pub [u64; 2] {
+        r#"fn main(x: [u8; 32], n: i64) -> pub [u64; 2] {
+            let x = Field::from_le_bytes_checked(x);
             let tag = match x as u200 {
                 0x1000000000000000000000000000000000000000000000 => 7,
                 _ => 9,
@@ -317,7 +330,10 @@ fn wide_match_literals_and_signed_literals_keep_their_value() {
             assert((-7 as Field) + 7 == 0);
             [tag, (n as u64)]
         }"#,
-        "x = '0x1000000000000000000000000000000000000000000000'\nn = '-42'\nreturn = [7, '18446744073709551574']",
+        &format!(
+            "x = {}\nn = '-42'\nreturn = [7, '18446744073709551574']",
+            common::le_bytes(&(num_bigint::BigUint::from(1u8) << 180u32), 32)
+        ),
     );
 }
 
@@ -464,44 +480,78 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
 /// Each refusal is matched by the diagnostic the rule under test emits, so that a program that
 /// fails for some other reason, a typo say, does not pass for the rule.
 #[test]
-fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
-    const NOT_LOWERABLE: &str =
-        "Integers the circuit backend does not lower are not valid entry point types. Found: ";
+fn frontend_rejects_widths_outside_the_language() {
     for (source, expected) in [
-        ("fn main(x: u24) {}", format!("{NOT_LOWERABLE}u24")),
-        ("fn main(x: u200) {}", format!("{NOT_LOWERABLE}u200")),
-        ("fn main(x: u253) {}", format!("{NOT_LOWERABLE}u253")),
-        ("fn main(x: i33) {}", format!("{NOT_LOWERABLE}i33")),
-        ("fn main(x: i65) {}", format!("{NOT_LOWERABLE}i65")),
-        ("fn main(x: [u200; 2]) {}", format!("{NOT_LOWERABLE}u200")),
-        (
-            "fn main() -> pub u200 { 0 }",
-            format!("{NOT_LOWERABLE}u200"),
-        ),
-        ("fn main(x: u256) {}", format!("{NOT_LOWERABLE}u256")),
-        (
-            "fn main() -> pub u256 { 0 }",
-            format!("{NOT_LOWERABLE}u256"),
-        ),
         (
             "fn main(x: u64) { let _: u16385 = x as u16385; }",
-            "`u16385` is not a supported integer type".to_string(),
+            "`u16385` is not a supported integer type",
         ),
         (
             "fn main(x: u64) { let _: u1 = x as u1; }",
-            "`u1` has been removed, use `bool` instead".to_string(),
+            "`u1` has been removed, use `bool` instead",
         ),
         // These errors arise only after the generic width is bound in monomorphization.
         (
             "fn bad<let N: u32>() -> u<N> { 0 } fn main() { assert(bad::<16385>() == 0); }",
-            "`u16385` is not a supported integer type".to_string(),
+            "`u16385` is not a supported integer type",
         ),
         (
             "fn bad<let N: u32>() -> u<N> { 256 } fn main() { assert(bad::<8>() == 0); }",
-            "Integer literal does not fit its type".to_string(),
+            "Integer literal does not fit its type",
         ),
     ] {
-        common::assert_frontend_refused(source, &expected);
+        common::assert_frontend_refused(source, expected);
+    }
+}
+
+/// An entry-point integer of any width up to `widest_injective_int_bits` crosses in one element on
+/// bn254, whether or not the circuit backend lowers that width.
+#[test]
+fn entry_integers_of_any_width_up_to_the_field_cross() {
+    let source = "fn main(x: u24, y: i33, z: [u200; 2], w: pub u253) -> pub u200 {
+            assert(x + 1 == 16777215);
+            assert(y - 1 == -4294967296);
+            assert(w != 0);
+            z[0] + z[1]
+        }";
+    check_both_modes(
+        source,
+        "x = 16777214\ny = -4294967295\nw = 3\n\
+         z = ['0x80000000000000000000000000000000000000000000000000', 1]\n\
+         return = '0x80000000000000000000000000000000000000000000000001'",
+    );
+    let compiled = common::compile::<Field>(source);
+    let manifest = compiled.driver.witness_manifest(&compiled.r1cs).unwrap();
+    let widths: Vec<_> = manifest
+        .parameters
+        .iter()
+        .map(|param| param.width)
+        .collect();
+    assert_eq!(widths, [1, 1, 2, 1], "one element per integer");
+    assert_eq!(manifest.returns.unwrap().len, 1);
+}
+
+/// An entry-point return wider than one element carries is published as its limbs, computed from a
+/// parameter or built from constants, and is checked against the `return` the inputs declare.
+#[test]
+fn entry_returns_wider_than_an_element_cross_as_limbs() {
+    // Past the modulus, with limbs that differ, so a limb out of place shows.
+    let past_the_modulus = "0x8000000000000000000000000000000400000000000000000000000000000005";
+    for (source, inputs) in [
+        (
+            "fn main(x: u256) -> pub u256 { x }".to_string(),
+            format!("x = '{past_the_modulus}'\nreturn = '{past_the_modulus}'"),
+        ),
+        (
+            format!("fn main() -> pub u256 {{ {past_the_modulus} }}"),
+            format!("return = '{past_the_modulus}'"),
+        ),
+        (
+            "fn main(x: i300) -> pub (u8, [i300; 2]) { (7, [x, -x]) }".to_string(),
+            "x = -5\nreturn = [7, [-5, 5]]".to_string(),
+        ),
+    ] {
+        check_both_modes(&source, &inputs);
     }
 }
 

@@ -25,7 +25,9 @@ unconstrained fn ordinary_calls(x: Field) -> Field {
     read_ref(&value)
 }
 
-fn main(x: Field, xs: [u8; 3]) {
+fn main(x: u8, xs: [u8; 3]) {
+    let x = x as Field;
+
     // Safety: each unconstrained result is checked against the constrained input.
     assert_eq(unsafe { read_ref(&x) }, x);
     let y = x + 1;

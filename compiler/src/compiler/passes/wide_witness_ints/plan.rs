@@ -1,6 +1,6 @@
 use super::{
+    multi_cell_int_bits,
     types::{limb_types, limb_widths},
-    utils::multi_cell_int_bits,
 };
 use crate::{
     collections::HashMap,

@@ -1020,6 +1020,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA, types: Option<&TypeInfo>) -> ReachingFn
                         // These source operations cannot produce or transfer function values.
                         OpCode::Cmp { .. }
                         | OpCode::BinaryArithOp { .. }
+                        | OpCode::IntFromLimbs { .. }
                         | OpCode::Cast {
                             target:
                                 CastTarget::Field
