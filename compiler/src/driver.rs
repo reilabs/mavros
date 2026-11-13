@@ -145,11 +145,9 @@ pub enum Error {
     /// not retain their spans.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
-    /// A pass cannot compile part of the program, such as a width of the configured field is too
-    /// narrow.
-    PassFailed(Vec<Diagnostic>),
-
-    /// The program uses a Noir feature Mavros cannot lower, or a value that does not fit the field.
+    /// The program uses a Noir feature Mavros cannot lower, or a value that does not fit the field:
+    /// an entry parameter wider than one field element carries, or a witness decomposed into more
+    /// bits or bytes than a field element has inside a witness condition.
     LoweringRefused(Vec<Diagnostic>),
 
     /// The `--logup-soundness` target is out of reach: the field is too small for any number of
@@ -210,7 +208,6 @@ impl std::fmt::Display for Error {
             }
             Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
             Error::Toolchain(error) => write!(f, "{error}"),
-            Error::PassFailed(diagnostics) => write!(f, "{}", diagnostic::render_all(diagnostics)),
         }
     }
 }
@@ -524,10 +521,7 @@ impl Driver {
             PassFailure::Unsatisfiable(failures) => {
                 Error::UnsatisfiableProgram(with_sources(failures))
             }
-            PassFailure::Unsupported(failures) => Error::PassFailed(with_sources(failures)),
-            PassFailure::LoweringRefused(failures) => {
-                Error::LoweringRefused(with_sources(failures))
-            }
+            PassFailure::Unsupported(failures) => Error::LoweringRefused(with_sources(failures)),
         }
     }
 

@@ -423,9 +423,10 @@ impl InstructionLowering {
         }
         match failure {
             None => Ok(changed),
-            Some((function_id, failure)) => Err(failure.map_diagnostics(|diagnostics| {
-                at_user_calls(ssa, function_id, diagnostics)
-            })),
+            Some((function_id, failure)) => {
+                Err(failure
+                    .map_diagnostics(|diagnostics| at_user_calls(ssa, function_id, diagnostics)))
+            }
         }
     }
 

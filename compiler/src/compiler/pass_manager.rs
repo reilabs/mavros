@@ -186,7 +186,6 @@ impl AnalysisStore {
 pub enum PassFailure {
     Unsatisfiable(Vec<Diagnostic>),
     Unsupported(Vec<Diagnostic>),
-    LoweringRefused(Vec<Diagnostic>),
 }
 
 impl PassFailure {
@@ -195,7 +194,6 @@ impl PassFailure {
         match self {
             Self::Unsatisfiable(diagnostics) => Self::Unsatisfiable(f(diagnostics)),
             Self::Unsupported(diagnostics) => Self::Unsupported(f(diagnostics)),
-            Self::LoweringRefused(diagnostics) => Self::LoweringRefused(f(diagnostics)),
         }
     }
 }

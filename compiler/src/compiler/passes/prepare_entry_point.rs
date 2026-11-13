@@ -160,7 +160,7 @@ impl Pass for PrepareEntryPoint {
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         let refusals = Self::param_refusals(ssa);
         if !refusals.is_empty() {
-            return Err(PassFailure::LoweringRefused(refusals));
+            return Err(PassFailure::Unsupported(refusals));
         }
 
         let layout = Self::wrap_main(
