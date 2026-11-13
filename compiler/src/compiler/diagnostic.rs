@@ -71,6 +71,13 @@ impl Diagnostic {
         self
     }
 
+    #[must_use]
+    pub fn relocated(mut self, location: SourceLocation) -> Self {
+        self.location = location;
+        self.source = None;
+        self
+    }
+
     /// Where the diagnostic points.
     pub fn location(&self) -> &SourceLocation {
         &self.location

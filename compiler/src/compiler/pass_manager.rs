@@ -189,6 +189,17 @@ pub enum PassFailure {
     LoweringRefused(Vec<Diagnostic>),
 }
 
+impl PassFailure {
+    #[must_use]
+    pub fn map_diagnostics(self, f: impl FnOnce(Vec<Diagnostic>) -> Vec<Diagnostic>) -> Self {
+        match self {
+            Self::Unsatisfiable(diagnostics) => Self::Unsatisfiable(f(diagnostics)),
+            Self::Unsupported(diagnostics) => Self::Unsupported(f(diagnostics)),
+            Self::LoweringRefused(diagnostics) => Self::LoweringRefused(f(diagnostics)),
+        }
+    }
+}
+
 pub type PassResult = Result<(), PassFailure>;
 
 pub trait Pass<

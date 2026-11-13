@@ -20,6 +20,8 @@ mod witness_integer_arith;
 mod witness_memory;
 mod witness_spread;
 
+use std::collections::BTreeSet;
+
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
@@ -28,11 +30,12 @@ use crate::compiler::{
             FunctionValueRanges, Interval, ValueRange, ValueRangeAnalysis, Width,
         },
     },
+    diagnostic::Diagnostic,
     pass_manager::{AnalysisId, AnalysisStore, Pass, PassFailure, PassResult},
     ssa::{
-        BlockId, ValueId,
+        BlockId, FunctionId, ValueId,
         hlssa::{
-            HLSSA, OpCode, Type, TypeExpr,
+            CallTarget, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
         },
     },
@@ -154,6 +157,67 @@ pub(super) fn integer_bits(ty: &Type) -> Option<usize> {
 
 /// What a rule reports for one instruction
 pub(super) type LoweringResult = Result<bool, PassFailure>;
+
+fn at_user_calls(
+    ssa: &HLSSA,
+    function_id: FunctionId,
+    diagnostics: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    if !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.location().is_stdlib())
+    {
+        return diagnostics;
+    }
+
+    // Walk up through stdlib callers, since one wrapper may reach the builtin through another.
+    let mut call_sites = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = vec![function_id];
+    while let Some(callee) = pending.pop() {
+        if !visited.insert(callee) {
+            continue;
+        }
+        for (caller, function) in ssa.iter_functions() {
+            for (_, block) in function.get_blocks() {
+                for (op, location) in block.get_instructions_with_source_locations() {
+                    let OpCode::Call {
+                        function: CallTarget::Static(target),
+                        ..
+                    } = op
+                    else {
+                        continue;
+                    };
+                    if *target != callee {
+                        continue;
+                    }
+                    if location.is_stdlib() {
+                        pending.push(*caller);
+                    } else {
+                        call_sites.insert(location.clone());
+                    }
+                }
+            }
+        }
+    }
+    if call_sites.is_empty() {
+        return diagnostics;
+    }
+
+    diagnostics
+        .into_iter()
+        .flat_map(|diagnostic| {
+            if diagnostic.location().is_stdlib() {
+                call_sites
+                    .iter()
+                    .map(|site| diagnostic.clone().relocated(site.clone()))
+                    .collect()
+            } else {
+                vec![diagnostic]
+            }
+        })
+        .collect()
+}
 
 pub(super) trait InstructionLoweringRule {
     /// Whether this rule reads the [`LoweringContext`]'s value ranges.
@@ -340,17 +404,29 @@ impl InstructionLowering {
 
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         let mut changed = false;
+        let mut failure = None;
         let mut sb = HLSSABuilder::new(ssa);
         for function_id in function_ids {
             let function_type_info = types.get_function(function_id);
             let function_value_ranges = value_ranges
                 .as_ref()
                 .map(|ranges| ranges.get_function(function_id));
-            changed |= sb.modify_function(function_id, |fb| {
+            match sb.modify_function(function_id, |fb| {
                 self.run_on_function(fb, function_type_info, function_value_ranges)
-            })?;
+            }) {
+                Ok(lowered) => changed |= lowered,
+                Err(refused) => {
+                    failure = Some((function_id, refused));
+                    break;
+                }
+            }
         }
-        Ok(changed)
+        match failure {
+            None => Ok(changed),
+            Some((function_id, failure)) => Err(failure.map_diagnostics(|diagnostics| {
+                at_user_calls(ssa, function_id, diagnostics)
+            })),
+        }
     }
 
     fn run_on_function(
