@@ -1,8 +1,9 @@
 //! Backstop for the widths the configured field cannot carry.
 //!
 //! Witness lowerings pack values into field elements, so each has a precondition on the field's
-//! width. All hold on bn254. Each call site says why it cannot fail there.
-//! Routing them through one check registers what a narrower field would need.
+//! width. Every call site has a comment naming the earlier lowering or check that keeps its
+//! precondition true, so reaching one is a compiler bug. Routing them through one check registers
+//! what a narrower field would need.
 
 use std::fmt;
 

@@ -2208,6 +2208,9 @@ impl Rewriter<'_> {
         let evaluate = lhs.witnessed
             && rhs.witnessed
             && witnessed_partial_products(lhs, rhs) > 2 * widths.len() - 1;
+        // Cannot fail: a partial product plus a reduced column fits the field, because
+        // `witness_limb_bits` keeps two limbs' worth of bits injective. Tested on bn254 by
+        // `bn254_holds_a_product_at_every_width`.
         let plan = plan_product(
             &lhs.bounds,
             &rhs.bounds,
