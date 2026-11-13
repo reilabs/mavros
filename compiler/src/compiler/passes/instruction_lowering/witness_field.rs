@@ -20,9 +20,8 @@ use mavros_int_semantics::IntBits;
 /// Why a witnessed `to_bits` of `count` bits is refused on `field`, or `None` where it lowers.
 ///
 /// This refuses rather than pads: a wider decomposition needs a decision on how its leading zeroes
-/// fit the field-agnostic lowering contract. `DecompositionWidthValidation` asks it before the
-/// lowering runs, so the driver reports the refusal as an error.
-pub(crate) fn witness_to_bits_refusal(count: usize, field: FieldConfig) -> Option<String> {
+/// fit the field-agnostic lowering contract.
+fn witness_to_bits_refusal(count: usize, field: FieldConfig) -> Option<String> {
     (count > field.field_bit_size() as usize).then(|| {
         format!("a witness `to_bits` of {count} bits asks for more bits than a field element has")
     })
@@ -31,9 +30,8 @@ pub(crate) fn witness_to_bits_refusal(count: usize, field: FieldConfig) -> Optio
 /// Why a witnessed `to_radix` of `count` bytes is refused on `field`, or `None` where it lowers.
 ///
 /// Unlike bits, the top byte may be only partially occupied (BN254 needs 32 bytes). Wider
-/// zero-padded decompositions need an explicit field-agnostic contract. Asked first as
-/// [`witness_to_bits_refusal`] is.
-pub(crate) fn witness_to_radix_refusal(count: usize, field: FieldConfig) -> Option<String> {
+/// zero-padded decompositions need an explicit field-agnostic contract.
+fn witness_to_radix_refusal(count: usize, field: FieldConfig) -> Option<String> {
     let max_bytes = (field.field_bit_size() as usize).div_ceil(8);
     (count > max_bytes).then(|| {
         format!(

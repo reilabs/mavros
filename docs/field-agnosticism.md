@@ -762,19 +762,17 @@ back on, refuses through one funnel, `compiler/src/compiler/passes/shared/unreac
 names the field's modulus and witness limb widths. Its call sites **are** the machine-readable half
 of this register.
 
-Two of them a program can reach, and the driver asks their question first, so the program gets
-`Error::LoweringRefused` with a diagnostic rather than a panic: `witness_field`'s `to_bits` and
-`to_radix` (`DecompositionWidthValidation`, run between the two witness phases of
-`Driver::spill_witness`), and `prepare_entry_point`'s integer entry parameter
-(`PrepareEntryPoint::param_refusals`, before the pass). The others cannot fire, since an earlier
-lowering routes every operation past them, and stay as backstops.
+None of them can fire, since an earlier lowering or check routes every operation past them, so
+reaching one is a compiler bug. Two refusals a program can reach are reported by their pass as an
+error with a diagnostic instead: `witness_field`'s `to_bits` and `to_radix` (from
+`LowerWitnessFieldOps`), and an integer entry parameter wider than the injective width (from
+`PrepareEntryPoint`, before it wraps `main`; the funnel stays behind it as a backstop).
 
 The call sites: `witness_bitwise`'s `lower_word_bitwise` (spread width); `witness_integer_arith`'s
 `lower_unsigned_mul` (both the single-field product and the two-limb packing, the latter covering
 the limb _count_ as well as the packing); `shared/limbs.rs`'s `combine_limbs_of_value` (the
-recombination); `witness_field`'s `to_bits` and `to_radix`; `wide_witness_ints`' `schoolbook` (the
-product and the division); and `prepare_entry_point`'s integer entry parameter wider than the
-injective width.
+recombination); `wide_witness_ints`' `schoolbook` (the product and the division); and
+`prepare_entry_point`'s integer entry parameter wider than the injective width.
 
 One kind of neighboring check deliberately stays out: an internal invariant no field choice can
 violate (`bit_range`'s "a field `BitRange` cannot exceed a field element").

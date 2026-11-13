@@ -38,7 +38,6 @@ use crate::compiler::{
     },
 };
 
-pub(crate) use self::witness_field::{witness_to_bits_refusal, witness_to_radix_refusal};
 use self::{
     bit_range::LowerBitRangeOps,
     bit_windows::WideBitWindows,

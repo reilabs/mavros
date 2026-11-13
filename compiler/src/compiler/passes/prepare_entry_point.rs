@@ -44,7 +44,7 @@ use crate::{
     collections::HashMap,
     compiler::{
         diagnostic::Diagnostic,
-        pass_manager::{AnalysisStore, Pass, PassResult},
+        pass_manager::{AnalysisStore, Pass, PassFailure, PassResult},
         passes::{
             shared::{
                 limbs::widest_injective_int_bits,
@@ -158,6 +158,11 @@ impl Pass for PrepareEntryPoint {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
+        let refusals = Self::param_refusals(ssa);
+        if !refusals.is_empty() {
+            return Err(PassFailure::LoweringRefused(refusals));
+        }
+
         let layout = Self::wrap_main(
             ssa,
             self.main_is_unconstrained,
@@ -186,9 +191,8 @@ impl PrepareEntryPoint {
     }
 
     /// A diagnostic for every entry-point parameter whose integers the configured field cannot
-    /// carry. The driver asks before this pass runs, so it reports them as errors; the pass refuses
-    /// them too.
-    pub fn param_refusals(ssa: &HLSSA) -> Vec<Diagnostic> {
+    /// carry. The pass asks before it wraps `main`, so it reports them as errors.
+    fn param_refusals(ssa: &HLSSA) -> Vec<Diagnostic> {
         fn refusals(typ: &Type, field: FieldConfig, found: &mut BTreeSet<String>) {
             match &typ.expr {
                 TypeExpr::Int(size) => {
@@ -845,7 +849,7 @@ impl PrepareEntryPoint {
             }
             TypeExpr::Int(size) => {
                 // The Noir frontend rejects wider entry point integers with a located error, and
-                // the driver asks `param_refusals` before this pass runs.
+                // `run` asks `param_refusals` before wrapping `main`.
                 if let Some(refusal) = Self::int_param_refusal(*size, e.field()) {
                     unreachable_on_this_field(format_args!("{refusal}"), e.field());
                 }

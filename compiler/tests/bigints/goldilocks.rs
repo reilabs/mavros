@@ -557,7 +557,8 @@ fn an_integer_decomposes_into_its_pattern_past_one_element() {
 }
 
 /// A Goldilocks element has 64 bits in 8 bytes, so a witnessed decomposition into 65 bits or 9
-/// bytes is refused, as an error that names it and what the field offers.
+/// bytes is refused. Outside any witness condition it always fails, so the program is unsatisfiable,
+/// with an error that names it and what the field offers.
 #[test]
 fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
     let bits = main_program_in(
@@ -585,7 +586,10 @@ fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
         let Err(error) = Compiled::<Goldilocks>::compile(ssa) else {
             panic!("compiled although {refusal}");
         };
-        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
+        assert!(
+            matches!(error, DriverError::UnsatisfiableProgram(_)),
+            "{error}"
+        );
         let message = error.to_string();
         assert!(message.contains(refusal), "{message}");
         assert!(

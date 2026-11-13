@@ -186,6 +186,7 @@ impl AnalysisStore {
 pub enum PassFailure {
     Unsatisfiable(Vec<Diagnostic>),
     Unsupported(Vec<Diagnostic>),
+    LoweringRefused(Vec<Diagnostic>),
 }
 
 pub type PassResult = Result<(), PassFailure>;
