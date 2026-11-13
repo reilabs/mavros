@@ -138,10 +138,11 @@ pub enum Error {
         rendered: String,
     },
 
-    /// The program has no returning entry path (checked before optimization), or contains an
-    /// impossible assertion/range/equality constraint found during R1CS generation. Static return
-    /// validation carries source locations; R1CS failures use a synthetic location because symbolic
-    /// assertion failures do not retain their spans.
+    /// The program has no returning entry path (checked before optimization), decomposes a witness
+    /// into more bits or bytes than a field element has, or contains an impossible assertion/range/equality constraint found
+    /// during R1CS generation. Static return validation and witness lowering carry source
+    /// locations; R1CS failures use a synthetic location because symbolic assertion failures do
+    /// not retain their spans.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
     /// A pass cannot compile part of the program, such as a width of the configured field is too
