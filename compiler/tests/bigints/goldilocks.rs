@@ -557,10 +557,10 @@ fn an_integer_decomposes_into_its_pattern_past_one_element() {
 }
 
 /// A Goldilocks element has 64 bits in 8 bytes, so a witnessed decomposition into 65 bits or 9
-/// bytes is refused. Outside any witness condition it always fails, so the program is unsatisfiable,
-/// with an error that names it and what the field offers.
+/// bytes does not fit. Outside any witness condition it always fails, so the program is
+/// unsatisfiable, with an error that names it and what the field offers.
 #[test]
-fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
+fn a_decomposition_wider_than_the_element_is_unsatisfiable_on_goldilocks() {
     let bits = main_program_in(
         FieldConfig::goldilocks(),
         &[Type::field()],
@@ -573,7 +573,7 @@ fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
         &[Type::int(8).array_of(9)],
         |e, p| vec![e.to_radix(p[0], Radix::Bytes, Endianness::Little, 9)],
     );
-    for (ssa, refusal) in [
+    for (ssa, expected) in [
         (
             bits,
             "a witness `to_bits` of 65 bits asks for more bits than a field element has",
@@ -584,14 +584,14 @@ fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
         ),
     ] {
         let Err(error) = Compiled::<Goldilocks>::compile(ssa) else {
-            panic!("compiled although {refusal}");
+            panic!("compiled although {expected}");
         };
         assert!(
             matches!(error, DriverError::UnsatisfiableProgram(_)),
             "{error}"
         );
         let message = error.to_string();
-        assert!(message.contains(refusal), "{message}");
+        assert!(message.contains(expected), "{message}");
         assert!(
             message.contains("64-bit modulus and a 16-bit witness limb"),
             "{message}"

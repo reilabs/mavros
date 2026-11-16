@@ -182,7 +182,7 @@ impl AnalysisStore {
 // Pass trait — parametric
 // ---------------------------------------------------------------------------
 
-/// Why a pass stopped compilation, with a diagnostic for each part of the program it refused.
+/// Why a pass stopped compilation, with a diagnostic for each part of the program at fault.
 #[derive(Debug)]
 pub enum PassFailure {
     /// The program fails on every input, so no proof of it can exist. The driver reports this as

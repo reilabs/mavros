@@ -415,8 +415,8 @@ impl InstructionLowering {
                 self.run_on_function(fb, function_type_info, function_value_ranges)
             }) {
                 Ok(lowered) => changed |= lowered,
-                Err(refused) => {
-                    failure = Some((function_id, refused));
+                Err(failed) => {
+                    failure = Some((function_id, failed));
                     break;
                 }
             }

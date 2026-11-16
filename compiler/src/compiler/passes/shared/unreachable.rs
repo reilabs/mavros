@@ -21,7 +21,8 @@ pub fn field_offers(field: FieldConfig) -> String {
     )
 }
 
-/// Refuse a lowering that the configured field is too narrow to carry, naming the field.
+/// Report a lowering that the configured field is too narrow to carry as a compiler bug, naming
+/// the field.
 ///
 /// `attempted` says what did not fit; the message adds what the field offers.
 pub fn unreachable_on_this_field(attempted: fmt::Arguments<'_>, field: FieldConfig) -> ! {

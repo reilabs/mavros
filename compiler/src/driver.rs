@@ -1487,16 +1487,16 @@ mod tests {
     /// an `Error` and nothing asks it for a renderer.
     #[test]
     fn an_unsatisfiable_program_displays_as_its_rendered_diagnostics() {
-        let refusal = Error::UnsatisfiableProgram(vec![
-            Diagnostic::error("first refusal", SourceLocation::synthetic("a_pass"))
+        let error = Error::UnsatisfiableProgram(vec![
+            Diagnostic::error("first failure", SourceLocation::synthetic("a_pass"))
                 .with_note("a standing fact"),
-            Diagnostic::error("second refusal", SourceLocation::synthetic("a_pass")),
+            Diagnostic::error("second failure", SourceLocation::synthetic("a_pass")),
         ]);
 
         assert_eq!(
-            refusal.to_string(),
-            "error: first refusal\n  --> <a_pass>:1:1\n  = note: a standing fact\n\n\
-             error: second refusal\n  --> <a_pass>:1:1\n"
+            error.to_string(),
+            "error: first failure\n  --> <a_pass>:1:1\n  = note: a standing fact\n\n\
+             error: second failure\n  --> <a_pass>:1:1\n"
         );
     }
 
