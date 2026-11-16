@@ -420,31 +420,18 @@ impl Driver {
     pub fn make_struct_access_static(&mut self) -> Result<(), Error> {
         let mut ssa = self.initial_ssa.clone().unwrap();
 
-        let failures = Rc::new(RefCell::new(None));
         let mut validation = PassManager::new(
             "validate_return_reachability".to_string(),
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(ReturnReachabilityValidation::new(Rc::clone(&failures))),
+                Box::new(ReturnReachabilityValidation::new()),
             ],
         );
         validation.set_debug_output_dir(self.get_debug_output_dir().clone());
         validation
             .run(&mut ssa)
             .map_err(|failures| self.pass_failed(failures))?;
-        let failures = failures
-            .borrow_mut()
-            .take()
-            .expect("return reachability validation did not record a result");
-        if !failures.is_empty() {
-            return Err(Error::UnsatisfiableProgram(
-                failures
-                    .into_iter()
-                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
-                    .collect(),
-            ));
-        }
 
         let entry_blob_layout = Rc::new(RefCell::new(None));
         let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained)

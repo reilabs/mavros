@@ -1,21 +1,16 @@
 //! Reject entry points with no returning path before optimizations can erase their calls.
 
-use std::{cell::RefCell, rc::Rc};
-
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, return_reachability::non_returning_entries},
-    diagnostic::Diagnostic,
-    pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassFailure, PassResult},
     ssa::hlssa::HLSSA,
 };
 
-pub(crate) struct ReturnReachabilityValidation {
-    failures: Rc<RefCell<Option<Vec<Diagnostic>>>>,
-}
+pub(crate) struct ReturnReachabilityValidation;
 
 impl ReturnReachabilityValidation {
-    pub(crate) fn new(failures: Rc<RefCell<Option<Vec<Diagnostic>>>>) -> Self {
-        Self { failures }
+    pub(crate) fn new() -> Self {
+        Self
     }
 }
 
@@ -29,7 +24,11 @@ impl Pass for ReturnReachabilityValidation {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
-        *self.failures.borrow_mut() = Some(non_returning_entries(ssa, store.get::<FlowAnalysis>()));
-        Ok(())
+        let failures = non_returning_entries(ssa, store.get::<FlowAnalysis>());
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(PassFailure::Unsatisfiable(failures))
+        }
     }
 }
