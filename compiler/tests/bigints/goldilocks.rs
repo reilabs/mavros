@@ -27,7 +27,7 @@ use crate::{
     check_limbed_grid_in, check_limbed_pairs_on, corner_pairs, dedup, few_shift_amounts,
     half_width_corners,
     harness::{BinaryOpOracle, Compiled, Verdict, input_block_in, main_program_in},
-    limb_reaching_values, limb_shift_amounts, signed_limb_corners_at,
+    limb_reaching_values, limb_shift_amounts, loop_count, signed_limb_corners_at,
 };
 
 // HELPERS
@@ -557,8 +557,8 @@ fn an_integer_decomposes_into_its_pattern_past_one_element() {
 }
 
 /// A Goldilocks element has 64 bits in 8 bytes, so a witnessed decomposition into 65 bits or 9
-/// bytes does not fit. Outside any witness condition it always fails, so the program is
-/// unsatisfiable, with an error that names it and what the field offers.
+/// bytes does not fit. With no branch around it, every run reaches it and fails, so the program is
+/// unsatisfiable.
 #[test]
 fn a_decomposition_wider_than_the_element_is_unsatisfiable_on_goldilocks() {
     let bits = main_program_in(
@@ -573,82 +573,91 @@ fn a_decomposition_wider_than_the_element_is_unsatisfiable_on_goldilocks() {
         &[Type::int(8).array_of(9)],
         |e, p| vec![e.to_radix(p[0], Radix::Bytes, Endianness::Little, 9)],
     );
-    for (ssa, expected) in [
-        (
-            bits,
-            "a witness `to_bits` of 65 bits asks for more bits than a field element has",
-        ),
-        (
-            bytes,
-            "a witness `to_radix` of 9 bytes asks for more than the 8 bytes a field element occupies",
-        ),
-    ] {
+    for (ssa, what) in [(bits, "65 bits"), (bytes, "9 bytes")] {
         let Err(error) = Compiled::<Goldilocks>::compile(ssa) else {
-            panic!("compiled although {expected}");
+            panic!("a decomposition into {what} compiled");
         };
         assert!(
             matches!(error, DriverError::UnsatisfiableProgram(_)),
-            "{error}"
-        );
-        let message = error.to_string();
-        assert!(message.contains(expected), "{message}");
-        assert!(
-            message.contains("64-bit modulus and a 16-bit witness limb"),
-            "{message}"
+            "{what}: {error}"
         );
     }
 }
 
-/// The same decomposition fails only on a witness branch, so the program is satisfiable. Mavros
-/// cannot compile that yet, so it is refused as unsupported, saying why, rather than reported
-/// as unsatisfiable.
+/// The same decomposition fails only on a witness branch, so the program is satisfiable: a run
+/// that takes the branch is refused, and one that does not is accepted.
 #[test]
-fn a_guarded_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
-    let bits = guarded_decomposition(1, |e, value| e.to_bits(value, Endianness::Little, 65));
-    let bytes = guarded_decomposition(8, |e, value| {
+fn a_guarded_decomposition_wider_than_the_element_fails_only_where_its_guard_holds() {
+    fn taken(_: &mut HLBlockEmitter<'_>, p: &[ValueId]) -> ValueId {
+        p[0]
+    }
+    let params = [Type::int(1), Type::field()];
+    let bits = decomposition_behind(&params, taken, 1, |e, value| {
+        e.to_bits(value, Endianness::Little, 65)
+    });
+    let bytes = decomposition_behind(&params, taken, 8, |e, value| {
         e.to_radix(value, Radix::Bytes, Endianness::Little, 9)
     });
-    for (ssa, expected) in [
-        (
-            bits,
-            "a witness `to_bits` of 65 bits asks for more bits than a field element has",
-        ),
-        (
-            bytes,
-            "a witness `to_radix` of 9 bytes asks for more than the 8 bytes a field element occupies",
-        ),
-    ] {
-        let Err(error) = Compiled::<Goldilocks>::compile(ssa) else {
-            panic!("compiled although {expected} under a witness condition");
+    for (ssa, what) in [(bits, "65 bits"), (bytes, "9 bytes")] {
+        let compiled = Compiled::<Goldilocks>::compile(ssa)
+            .unwrap_or_else(|error| panic!("a guarded decomposition into {what}: {error}"));
+        let run = |taken: bool| {
+            compiled.run(&[
+                input(Goldilocks::from(taken)),
+                input(element(5)),
+                input(element(0)),
+            ])
         };
-        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
-        let message = error.to_string();
-        assert!(message.contains(expected), "{message}");
-        assert!(
-            message.contains("under a witness condition this fails only when the branch runs"),
-            "{message}"
-        );
-        assert!(
-            message.contains("64-bit modulus and a 16-bit witness limb"),
-            "{message}"
-        );
+        let verdict = run(false);
+        assert!(verdict.is_accepted(), "{what}, not taken: {verdict:?}");
+        let verdict = run(true);
+        assert!(verdict.rejects(), "{what}, taken: {verdict:?}");
     }
 }
 
-fn guarded_decomposition(
+/// No guard does not mean the decomposition runs: a branch on a pure condition decided only once
+/// a loop has run carries none either. Here the branch is never taken, so the program compiles
+/// and is accepted.
+#[test]
+fn a_decomposition_wider_than_the_element_on_a_pure_branch_never_taken_is_accepted() {
+    fn never(e: &mut HLBlockEmitter<'_>, _: &[ValueId]) -> ValueId {
+        let count = loop_count(e);
+        let five = e.int_const(IntBits::from_u128(32, 5));
+        e.cmp(count, five, CmpKind::Eq)
+    }
+    let params = [Type::field()];
+    let bits = decomposition_behind(&params, never, 1, |e, value| {
+        e.to_bits(value, Endianness::Little, 65)
+    });
+    let bytes = decomposition_behind(&params, never, 8, |e, value| {
+        e.to_radix(value, Radix::Bytes, Endianness::Little, 9)
+    });
+    for (ssa, what) in [(bits, "65 bits"), (bytes, "9 bytes")] {
+        let compiled = Compiled::<Goldilocks>::compile(ssa).unwrap_or_else(|error| {
+            panic!("a decomposition into {what} on a branch never taken: {error}")
+        });
+        let verdict = compiled.run(&[input(element(5)), input(element(0))]);
+        assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+    }
+}
+
+fn decomposition_behind(
+    params: &[Type],
+    condition: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> ValueId,
     digit_bits: usize,
     decompose: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId) -> ValueId,
 ) -> HLSSA {
     main_program_in(
         FieldConfig::goldilocks(),
-        &[Type::int(1), Type::field()],
+        params,
         &[Type::int(digit_bits)],
         |e, p| {
+            let condition = condition(e, p);
             let (then_id, _) = e.add_block();
             let (else_id, _) = e.add_block();
             let (merge_id, _) = e.add_block();
-            e.seal_and_switch(Terminator::JmpIf(p[0], then_id, else_id), then_id);
-            let decomposed = decompose(e, p[1]);
+            e.seal_and_switch(Terminator::JmpIf(condition, then_id, else_id), then_id);
+            let decomposed = decompose(e, p[p.len() - 1]);
             let index = e.int_const(IntBits::zero(32));
             let digit = e.array_get(decomposed, index);
             e.seal_and_switch(Terminator::Jmp(merge_id, vec![digit]), else_id);

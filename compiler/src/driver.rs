@@ -138,16 +138,14 @@ pub enum Error {
         rendered: String,
     },
 
-    /// The program has no returning entry path (checked before optimization), decomposes a witness
-    /// into more bits or bytes than a field element has, or contains an impossible assertion/range/equality constraint found
-    /// during R1CS generation. Static return validation and witness lowering carry source
-    /// locations; R1CS failures use a synthetic location because symbolic assertion failures do
-    /// not retain their spans.
+    /// The program has no returning entry path (checked before optimization), or contains an
+    /// impossible assertion/range/equality constraint found during R1CS generation. Static return
+    /// validation carries source locations; R1CS failures use a synthetic location because
+    /// symbolic assertion failures do not retain their spans.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
-    /// The program uses a Noir feature Mavros cannot lower, or a value that does not fit the field:
-    /// an entry parameter wider than one field element carries, or a witness decomposed into more
-    /// bits or bytes than a field element has inside a witness condition.
+    /// The program uses a Noir feature Mavros cannot lower, or an entry parameter wider than one
+    /// field element carries.
     LoweringRefused(Vec<Diagnostic>),
 
     /// The `--logup-soundness` target is out of reach: the field is too small for any number of

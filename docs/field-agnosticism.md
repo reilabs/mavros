@@ -763,10 +763,12 @@ names the field's modulus and witness limb widths. Its call sites **are** the ma
 of this register.
 
 None of them can fire, since an earlier lowering or check routes every operation past them, so
-reaching one is a compiler bug. Two refusals a program can reach are reported by their pass as an
-error with a diagnostic instead: `witness_field`'s `to_bits` and `to_radix` (from
-`LowerWitnessFieldOps`), and an integer entry parameter wider than the injective width (from
-`PrepareEntryPoint`, before it wraps `main`; the funnel stays behind it as a backstop).
+reaching one is a compiler bug. One refusal a program can reach is reported by its pass as an error
+with a diagnostic instead: an integer entry parameter wider than the injective width (from
+`PrepareEntryPoint`, before it wraps `main`; the funnel stays behind it as a backstop). A witnessed
+`to_bits` or `to_radix` wider than a field element is not refused: `LowerWitnessFieldOps` lowers it
+to a failing assertion, under the decomposition's guard if it has one, and a dummy result, so R1CS
+generation rejects exactly the runs that reach it.
 
 The call sites: `witness_bitwise`'s `lower_word_bitwise` (spread width); `witness_integer_arith`'s
 `lower_unsigned_mul` (both the single-field product and the two-limb packing, the latter covering
