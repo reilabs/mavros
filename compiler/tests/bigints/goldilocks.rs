@@ -10,9 +10,9 @@ use mavros_compiler::{
     compiler::{
         passes::shared::limbs::witness_limb_bits,
         ssa::{
-            ValueId,
+            Terminator, ValueId,
             hlssa::{
-                BinaryArithOpKind, CastTarget, CmpKind, Endianness, Radix, Type,
+                BinaryArithOpKind, CastTarget, CmpKind, Endianness, HLSSA, Radix, Type,
                 builder::{HLBlockEmitter, HLEmitter as _},
             },
         },
@@ -597,6 +597,66 @@ fn a_decomposition_wider_than_the_element_is_unsatisfiable_on_goldilocks() {
             "{message}"
         );
     }
+}
+
+/// The same decomposition fails only on a witness branch, so the program is satisfiable. Mavros
+/// cannot compile that yet, so it is refused as unsupported, saying why, rather than reported
+/// as unsatisfiable.
+#[test]
+fn a_guarded_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
+    let bits = guarded_decomposition(1, |e, value| e.to_bits(value, Endianness::Little, 65));
+    let bytes = guarded_decomposition(8, |e, value| {
+        e.to_radix(value, Radix::Bytes, Endianness::Little, 9)
+    });
+    for (ssa, expected) in [
+        (
+            bits,
+            "a witness `to_bits` of 65 bits asks for more bits than a field element has",
+        ),
+        (
+            bytes,
+            "a witness `to_radix` of 9 bytes asks for more than the 8 bytes a field element occupies",
+        ),
+    ] {
+        let Err(error) = Compiled::<Goldilocks>::compile(ssa) else {
+            panic!("compiled although {expected} under a witness condition");
+        };
+        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
+        let message = error.to_string();
+        assert!(message.contains(expected), "{message}");
+        assert!(
+            message.contains("under a witness condition this fails only when the branch runs"),
+            "{message}"
+        );
+        assert!(
+            message.contains("64-bit modulus and a 16-bit witness limb"),
+            "{message}"
+        );
+    }
+}
+
+fn guarded_decomposition(
+    digit_bits: usize,
+    decompose: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId) -> ValueId,
+) -> HLSSA {
+    main_program_in(
+        FieldConfig::goldilocks(),
+        &[Type::int(1), Type::field()],
+        &[Type::int(digit_bits)],
+        |e, p| {
+            let (then_id, _) = e.add_block();
+            let (else_id, _) = e.add_block();
+            let (merge_id, _) = e.add_block();
+            e.seal_and_switch(Terminator::JmpIf(p[0], then_id, else_id), then_id);
+            let decomposed = decompose(e, p[1]);
+            let index = e.int_const(IntBits::zero(32));
+            let digit = e.array_get(decomposed, index);
+            e.seal_and_switch(Terminator::Jmp(merge_id, vec![digit]), else_id);
+            let zero = e.int_const(IntBits::zero(digit_bits));
+            e.seal_and_switch(Terminator::Jmp(merge_id, vec![zero]), merge_id);
+            vec![e.add_parameter(Type::int(digit_bits))]
+        },
+    )
 }
 
 /// No witness column of an accepted run can move alone, and no two can trade a limb's place value,
