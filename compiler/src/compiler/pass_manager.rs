@@ -182,9 +182,15 @@ impl AnalysisStore {
 // Pass trait — parametric
 // ---------------------------------------------------------------------------
 
+/// Why a pass stopped compilation, with a diagnostic for each part of the program it refused.
 #[derive(Debug)]
 pub enum PassFailure {
+    /// The program fails on every input, so no proof of it can exist. The driver reports this as
+    /// [`Error::UnsatisfiableProgram`](crate::driver::Error::UnsatisfiableProgram).
     Unsatisfiable(Vec<Diagnostic>),
+
+    /// Mavros cannot compile it on the configured field. The driver reports this as
+    /// [`Error::LoweringRefused`](crate::driver::Error::LoweringRefused).
     Unsupported(Vec<Diagnostic>),
 }
 
@@ -198,6 +204,7 @@ impl PassFailure {
     }
 }
 
+/// What a pass returns: `Ok` to continue to the next pass, `Err` to stop compilation.
 pub type PassResult = Result<(), PassFailure>;
 
 pub trait Pass<
