@@ -22,20 +22,15 @@ use crate::compiler::{
 use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
-use plan::{Block, ProductPlan, Step, plan_product, witnessed_partial_products};
-pub(super) use plan::{Factor, Limb, full_bounds};
+use num_traits::One;
+pub(super) use plan::{
+    Answer, FPolynomial, Factor, Limb, Polarity, Term, build_f_polynomial, full_bounds,
+};
 #[cfg(test)]
 pub(crate) use tests::division_carries;
 mod plan;
 #[cfg(test)]
 mod tests;
-/// A column being accumulated: its field element and its mirror on the pure side, or nothing while
-/// it is still zero.
-#[derive(Clone, Copy)]
-struct Accumulator {
-    sum: Option<(ValueId, ValueId)>,
-}
-
 /// One schoolbook: `lhs · rhs`, plus `addend` where there is one, either range-checked into limbs
 /// or `pinned` to a target's.
 #[derive(Clone, Copy)]
@@ -44,8 +39,8 @@ pub(super) struct Schoolbook<'a> {
     pub(super) rhs: &'a Factor,
     pub(super) addend: Option<&'a Factor>,
 
-    /// The target's limbs as field elements, each already bounded at its width.
-    pub(super) pinned: Option<&'a [ValueId]>,
+    /// The target, each limb already bounded at its width.
+    pub(super) target: Option<&'a Factor>,
 
     /// The answer's limb widths, which are the operands' too.
     pub(super) widths: &'a [usize],
@@ -58,25 +53,35 @@ pub(super) struct Schoolbook<'a> {
 
     pub(super) guard: Option<ValueId>,
 }
-
 #[derive(Clone, Copy)]
-struct Guards {
-    /// The range and overflow checks.
-    check: Option<ValueId>,
-    /// The equalities to a pinned target.
-    pin: Option<ValueId>,
+struct IdentityFlags {
+    range_check_flag: Option<ValueId>,
+
+    answer_flag: Option<ValueId>,
 }
 
-impl Schoolbook<'_> {
-    fn guards(&self) -> Guards {
-        Guards {
-            check: if self.pinned.is_some() {
-                None
-            } else {
-                self.guard
-            },
-            pin: self.guard,
+impl IdentityFlags {
+    fn new(
+        rewriter: &mut Rewriter<'_>,
+        guard: Option<ValueId>,
+        answer: Option<Answer<'_>>,
+    ) -> Self {
+        Self {
+            range_check_flag: guard.filter(|_| !matches!(answer, Some(Answer::Given(_)))),
+            answer_flag: guard.map(|condition| rewriter.cast(condition, CastTarget::Field)),
         }
+    }
+
+    /// The range check guard on the pure side at `hint`.
+    fn pure_range_check_guard(
+        &self,
+        rewriter: &mut Rewriter<'_>,
+        hint: CastTarget,
+    ) -> Option<ValueId> {
+        self.range_check_flag.map(|condition| {
+            let pure = rewriter.pure_of(condition, rewriter.is_witness(condition));
+            rewriter.cast(pure, hint)
+        })
     }
 }
 
@@ -84,9 +89,7 @@ impl Rewriter<'_> {
     /// An unsigned product the single cell cannot hold. Returns whether `op` was one and was
     /// lowered.
     ///
-    /// A schoolbook at the witness limb, following [`plan_product`], which states the soundness
-    /// argument. Under a guard the range and overflow checks are off where the guard is off, and
-    /// the answer is zero there; the carries are written either way.
+    /// A schoolbook at the witness limb, checked by the polynomial identity.
     pub(super) fn lower_product(&mut self, op: &OpCode) -> bool {
         let Some(Operands { bits, lhs, rhs }) = multiplied(op, self.types, self.field()) else {
             return false;
@@ -107,7 +110,7 @@ impl Rewriter<'_> {
             lhs: &lhs,
             rhs: &rhs,
             addend: None,
-            pinned: None,
+            target: None,
             widths: &widths,
             bits,
             operation: "multiplication",
@@ -117,46 +120,53 @@ impl Rewriter<'_> {
         true
     }
 
-    /// `lhs · rhs (+ addend)` at `widths`, following [`plan_product`], as the field element of each
-    /// answer limb.
+    /// `lhs · rhs (+ addend)` at `widths`, as the field element of each answer limb.
     pub(super) fn schoolbook(&mut self, product: Schoolbook<'_>) -> Vec<ValueId> {
         let Schoolbook {
             lhs,
             rhs,
             addend,
+            target,
             widths,
             bits,
             operation,
-            ..
+            guard,
         } = product;
-        let evaluate = lhs.witnessed
-            && rhs.witnessed
-            && witnessed_partial_products(lhs, rhs) > 2 * widths.len() - 1;
-        let plan = plan_product(
-            &lhs.bounds,
-            &rhs.bounds,
-            addend.map_or(&[][..], |addend| &addend.bounds),
+
+        let mut terms = vec![Term {
+            polarity: Polarity::Positive,
+            lhs,
+            rhs: Some(rhs),
+            gated: target.is_none(),
+        }];
+        if let Some(addend) = addend {
+            terms.push(Term {
+                polarity: Polarity::Positive,
+                lhs: addend,
+                rhs: None,
+                gated: target.is_none(),
+            });
+        }
+        let answer = match target {
+            Some(target) => Answer::Given(target),
+            None => Answer::Unknown(widths),
+        };
+
+        let f_polynomial = build_f_polynomial(
             widths,
             widest_injective_int_bits(self.field()),
-            evaluate,
+            terms,
+            Some(answer),
         )
         .unwrap_or_else(|| {
             unsupported_on_this_field(
                 format_args!(
-                    "a {bits}-bit unsigned {operation} is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element"
+                    "a {bits}-bit unsigned {operation} is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
                 ),
                 self.field(),
             )
         });
-
-        let guards = product.guards();
-        let mut forms = FactorForms::new(widths.len());
-        let answer = match &plan.evaluated {
-            Some(blocks) => self.evaluate_product(&plan, blocks, &product, &mut forms),
-            None => self.accumulate_columns(&plan, &product, &mut forms),
-        };
-        self.check_no_overflow(&plan, lhs, rhs, &mut forms, guards.check);
-        answer
+        self.evaluate_f_poly(&f_polynomial, guard)
     }
 
     /// An operand of the schoolbook as its limbs at `bits`, with their bounds.
@@ -177,7 +187,8 @@ impl Rewriter<'_> {
             return Factor {
                 bounds: patterns.iter().map(BigUint::from).collect(),
                 limbs: patterns.into_iter().map(Limb::Constant).collect(),
-                witnessed: false,
+                is_witnessed: false,
+                L: None,
             };
         }
 
@@ -197,143 +208,383 @@ impl Rewriter<'_> {
             .unzip();
         Factor {
             limbs,
-            witnessed: self.is_witness(value),
+            is_witnessed: self.is_witness(value),
             bounds,
+            L: None,
         }
     }
 
-    fn evaluate_product(
+    /// Witnesses and checks `f_polynomial`,
+    /// Returning the answer's limbs where it witnesses them.
+    pub(super) fn evaluate_f_poly(
         &mut self,
-        plan: &ProductPlan,
-        blocks: &[Block],
-        product: &Schoolbook<'_>,
-        forms: &mut FactorForms,
+        f_polynomial: &FPolynomial<'_>,
+        guard: Option<ValueId>,
     ) -> Vec<ValueId> {
-        let Schoolbook {
-            lhs,
-            rhs,
-            addend,
-            pinned,
-            widths,
-            ..
-        } = *product;
-        let num_limbs = widths.len();
-        let hint = CastTarget::Int(plan.hint_bits);
-        let guards = product.guards();
-        let mask = guards.check.map(|condition| {
-            let field = self.cast(condition, CastTarget::Field);
-            let pure = self.pure_of(condition, self.is_witness(condition));
-            (field, self.cast(pure, hint.clone()))
-        });
+        let terms = &f_polynomial.terms[..];
+        let pure_integer_type = CastTarget::Int(f_polynomial.hint_bits());
+        let guards = IdentityFlags::new(self, guard, f_polynomial.answer);
+        let pure_range_check_guard = guards.pure_range_check_guard(self, pure_integer_type);
 
-        let lhs_fields: Vec<ValueId> = (0..num_limbs)
-            .map(|index| {
-                let limb = forms.field(self, Side::Lhs, index, lhs);
-                match mask {
-                    Some((mask_felt, _)) => self.bin(BinaryArithOpKind::UMul, mask_felt, limb),
-                    None => limb,
-                }
-            })
-            .collect();
-        let rhs_fields: Vec<ValueId> = (0..num_limbs)
-            .map(|index| forms.field(self, Side::Rhs, index, rhs))
-            .collect();
-        let target = pinned.map(|target| match guards.pin {
-            Some(mut condition) => {
-                condition = self.cast(condition, CastTarget::Field);
-                target
-                    .iter()
-                    .map(|target_limb| self.bin(BinaryArithOpKind::UMul, condition, *target_limb))
-                    .collect()
-            }
-            None => target.to_vec(),
-        });
+        let (witnessed_answer, carries) = self.witness_columns(
+            f_polynomial,
+            guards.range_check_flag,
+            pure_range_check_guard,
+        );
 
-        let mut answer = Vec::with_capacity(num_limbs);
-        let mut carries = Vec::new();
+        let answer_as_felts =
+            self.ansswer_as_fields(f_polynomial.answer, &witnessed_answer, guards.answer_flag);
+
+        self.check_block_carries(f_polynomial, &carries, guards.range_check_flag);
+        let terms_as_felts = self.terms_as_fields(&f_polynomial, guards.answer_flag);
+
+        for point in 0..=f_polynomial.degree as u64 {
+            self.check_at_point(
+                point,
+                terms,
+                &terms_as_felts,
+                &carries,
+                &answer_as_felts,
+                pure_range_check_guard,
+            );
+        }
+        witnessed_answer
+    }
+
+    /// What the polynomial's carry chain witnesses:
+    /// the answer's limbs, where they are solved, and each carry.
+    fn witness_columns(
+        &mut self,
+        f_polynomial: &FPolynomial<'_>,
+        range_check_guard: Option<ValueId>,
+        pure_range_check_guard: Option<ValueId>,
+    ) -> (Vec<ValueId>, Vec<ValueId>) {
+        let answer = f_polynomial.answer;
+        let hint_bits = f_polynomial.hint_bits();
+
+        let mut witnessed_answer = Vec::new();
+        let mut carries = Vec::with_capacity(f_polynomial.num_committed_carries());
+
         let mut carry_in: Option<ValueId> = None;
-        for (column_idx, &width) in widths.iter().enumerate() {
-            let mut running = None;
-            for left in 0..=column_idx {
-                let a = forms.pure(self, Side::Lhs, left, lhs, &hint);
-                let b = forms.pure(self, Side::Rhs, column_idx - left, rhs, &hint);
-                let product = self.bin(BinaryArithOpKind::UMul, a, b);
-                running = Some(match running {
-                    None => product,
-                    Some(sum) => self.bin(BinaryArithOpKind::UAdd, sum, product),
-                });
-            }
-            let mut running = running.expect("a column has at least one partial product");
-            if let Some((_, flag)) = mask {
-                running = self.bin(BinaryArithOpKind::UMul, flag, running);
-            }
-            if let Some(addend) = addend {
-                let addend_limb = forms.pure(self, Side::Addend, column_idx, addend, &hint);
-                running = self.bin(BinaryArithOpKind::UAdd, running, addend_limb);
+        for column in 0..f_polynomial.carry_chain_len() {
+            let mut running_sum = self.pure_column(&f_polynomial.terms, column, hint_bits);
+            if let Some(mask) = pure_range_check_guard {
+                running_sum = self.bin(BinaryArithOpKind::SMul, mask, running_sum);
             }
             if let Some(carry) = carry_in {
-                running = self.bin(BinaryArithOpKind::UAdd, running, carry);
+                running_sum = self.bin(BinaryArithOpKind::SAdd, running_sum, carry);
             }
+            if let Some(Answer::Unknown(widths)) = answer
+                && column < widths.len()
+            {
+                let low = self.cast(running_sum, CastTarget::Int(widths[column]));
+                let low = self.cast(low, CastTarget::Field);
+                let written = self.write_witness(low);
+                self.push_guarded(
+                    range_check_guard,
+                    OpCode::Rangecheck {
+                        value: written,
+                        max_bits: widths[column],
+                    },
+                );
+                witnessed_answer.push(written);
+            }
+            if column >= f_polynomial.num_committed_carries() {
+                continue;
+            }
+            let (carry, witnessed_carry) = self.witness_carry(f_polynomial, running_sum);
+            carries.push(witnessed_carry);
+            carry_in = Some(carry);
+        }
+        (witnessed_answer, carries)
+    }
 
-            answer.push(match &target {
-                Some(target) => target[column_idx],
-                None => {
-                    let low = self.cast(running, CastTarget::Int(width));
-                    let low = self.cast(low, CastTarget::Field);
-                    let written = self.write_witness(low);
-                    self.push_guarded(
-                        guards.check,
-                        OpCode::Rangecheck {
-                            value: written,
-                            max_bits: width,
-                        },
-                    );
-                    written
-                }
-            });
-            if column_idx + 1 < num_limbs {
-                let carry = self.shifted_down(running, plan.hint_bits, width);
-                let carry_field = self.cast(carry, CastTarget::Field);
-                carries.push(self.write_witness(carry_field));
-                carry_in = Some(carry);
+    /// The carry out of a column whose running sum is `running`, as its hint and its witness.
+    fn witness_carry(
+        &mut self,
+        identity: &FPolynomial<'_>,
+        running: ValueId,
+    ) -> (ValueId, ValueId) {
+        match identity.carry_offset_bits() {
+            None => {
+                let carry = self.shifted_down(running, identity.hint_bits(), self.limb_bits());
+                let carry_as_field = self.cast(carry, CastTarget::Field);
+                (carry, self.write_witness(carry_as_field))
+            }
+            Some(offset_bits) => {
+                let limb_bits = self.int_const(IntBits::from_u128(
+                    identity.hint_bits(),
+                    self.limb_bits() as u128,
+                ));
+                let carry = self.bin(BinaryArithOpKind::SShr, running, limb_bits);
+                let offset = self.int_const(IntBits::from_biguint(
+                    identity.hint_bits(),
+                    &(BigUint::one() << offset_bits),
+                ));
+                let raised = self.bin(BinaryArithOpKind::SAdd, carry, offset);
+                let raised = self.cast(raised, CastTarget::Field);
+                let field_offset = self.field_const(self.field().two_pow(offset_bits));
+                let lowered = self.bin(BinaryArithOpKind::USub, raised, field_offset);
+                (carry, self.write_witness(lowered))
             }
         }
+    }
 
-        for block in blocks {
+    /// Range check the carry out of each block.
+    fn check_block_carries(
+        &mut self,
+        identity: &FPolynomial<'_>,
+        carries: &[ValueId],
+        check: Option<ValueId>,
+    ) {
+        let offset = identity
+            .carry_offset_bits()
+            .map(|offset_bits| self.field_const(self.field().two_pow(offset_bits)));
+        for block in &identity.blocks {
             if let Some(carry_bits) = block.carry_bits {
+                let carry = carries[block.last];
+                let value = match offset {
+                    Some(offset) => self.bin(BinaryArithOpKind::UAdd, carry, offset),
+                    None => carry,
+                };
                 self.push_guarded(
-                    guards.check,
+                    check,
                     OpCode::Rangecheck {
-                        value: carries[block.last],
+                        value,
                         max_bits: carry_bits,
                     },
                 );
             }
         }
+    }
 
-        let radix = self.field().two_pow(self.limb_bits());
-        let remainder: Option<Vec<ValueId>> = addend.map(|addend| {
-            (0..num_limbs)
-                .map(|index| forms.field(self, Side::Addend, index, addend))
-                .collect()
-        });
-        for point in 0..(2 * num_limbs - 1) as u64 {
-            let a = self.evaluate_at(&lhs_fields, point);
-            let b = self.evaluate_at(&rhs_fields, point);
-            let mut c = self.evaluate_at(&answer, point);
-            if let Some(remainder) = &remainder {
-                let r = self.evaluate_at(remainder, point);
-                c = self.bin(BinaryArithOpKind::USub, c, r);
-            }
-            if !carries.is_empty() {
-                let h = self.evaluate_at(&carries, point);
-                let scale = self.field_const(radix - self.field().constant(point));
-                let h = self.bin(BinaryArithOpKind::UMul, h, scale);
-                c = self.bin(BinaryArithOpKind::UAdd, c, h);
-            }
-            self.push(OpCode::Constrain { a, b, c });
+    /// The limbs of each term's factors as field elements, a gated term's left factor scaled by `flag`.
+    fn terms_as_fields(
+        &mut self,
+        f_polynomial: &FPolynomial<'_>,
+        flag: Option<ValueId>,
+    ) -> Vec<(Vec<ValueId>, Option<Vec<ValueId>>)> {
+        let terms = &f_polynomial.terms[..];
+        let mut fields: Vec<(Vec<ValueId>, Option<Vec<ValueId>>)> = Vec::with_capacity(terms.len());
+        for term in terms {
+            let lhs = (0..term.lhs.limbs.len())
+                .map(|limb| self.factor_limb_constrained(term.lhs, limb))
+                .collect();
+            let rhs = term.rhs.map(|rhs| {
+                (0..rhs.limbs.len())
+                    .map(|limb| self.factor_limb_constrained(rhs, limb))
+                    .collect()
+            });
+            fields.push((lhs, rhs));
         }
-        answer
+
+        if let Some(flag) = flag {
+            for (term, (lhs, _)) in terms.iter().zip(&mut fields) {
+                if term.gated {
+                    for limb in lhs {
+                        *limb = self.bin(BinaryArithOpKind::UMul, flag, *limb);
+                    }
+                }
+            }
+        }
+        fields
+    }
+
+    /// The answer as field_elements
+    fn ansswer_as_fields(
+        &mut self,
+        answer: Option<Answer<'_>>,
+        witnessed_answer_limbs: &[ValueId],
+        flag: Option<ValueId>,
+    ) -> Vec<ValueId> {
+        match answer {
+            // No specific answer term in polynomial.
+            None => Vec::new(),
+            // Answer has been solved in previous stage: return.
+            Some(Answer::Unknown(_)) => witnessed_answer_limbs.to_vec(),
+            // Answer limbs were supplied as witnesses. Mask if needed.
+            Some(Answer::Given(target)) => target
+                .limbs
+                .iter()
+                .map(|limb| {
+                    let limb = self.limb_field(limb);
+                    match flag {
+                        Some(flag) => self.bin(BinaryArithOpKind::UMul, flag, limb),
+                        None => limb,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// The identity's row at `point`: `Σ ±terms − (β − point)·H − C = 0`, with one product of
+    /// witnesses as the row's multiplication and each further one witnessed and pinned by a row of
+    /// its own.
+    fn check_at_point(
+        &mut self,
+        point: u64,
+        terms: &[Term<'_>],
+        terms_as_felts: &[(Vec<ValueId>, Option<Vec<ValueId>>)],
+        carries: &[ValueId],
+        answer: &[ValueId],
+        mask: Option<ValueId>,
+    ) {
+        let radix = self.field().two_pow(self.limb_bits());
+
+        let mut quadratic = Vec::new();
+        let mut rest: Vec<(Polarity, ValueId)> = Vec::new();
+        for (term, (lhs, rhs)) in terms.iter().zip(terms_as_felts) {
+            let a = self.evaluate_at(lhs, point);
+            match rhs {
+                Some(rhs) => {
+                    let b = self.evaluate_at(rhs, point);
+                    match term
+                        .rhs
+                        .filter(|rhs| term.lhs.is_witnessed && rhs.is_witnessed)
+                    {
+                        Some(rhs) => quadratic.push((term, rhs, a, b)),
+                        None => {
+                            let product = self.bin(BinaryArithOpKind::UMul, a, b);
+                            rest.push((term.polarity, product));
+                        }
+                    }
+                }
+                None => rest.push((term.polarity, a)),
+            }
+        }
+
+        if !carries.is_empty() {
+            let h = self.evaluate_at(carries, point);
+            let scale = self.field_const(radix - self.field().constant(point));
+            let h = self.bin(BinaryArithOpKind::UMul, h, scale);
+            rest.push((Polarity::Negative, h));
+        }
+
+        if !answer.is_empty() {
+            let c = self.evaluate_at(answer, point);
+            rest.push((Polarity::Negative, c));
+        }
+
+        let head = quadratic
+            .first()
+            .map(|(term, _, a, b)| (term.polarity, *a, *b));
+
+        for (term, rhs, a, b) in quadratic.into_iter().skip(1) {
+            // A second product of witnesses has no place in the row: it is witnessed from the pure
+            // side and pinned by a row of its own.
+            let mask = mask.filter(|_| term.gated);
+            let written = self.witness_product_at(point, term.lhs, rhs, mask);
+            self.push(OpCode::Constrain { a, b, c: written });
+            rest.push((term.polarity, written));
+        }
+
+        match head {
+            None => {
+                let sum = self.signed_sum(&rest, &CastTarget::Field);
+                let zero = self.field_const(self.field().zero());
+                self.constrain_equal(sum, zero, None);
+            }
+            Some((polarity, a, b)) => {
+                if polarity == Polarity::Positive {
+                    for (polarity, _) in &mut rest {
+                        *polarity = polarity.flipped();
+                    }
+                }
+                let c = self.signed_sum(&rest, &CastTarget::Field);
+                self.push(OpCode::Constrain { a, b, c });
+            }
+        }
+    }
+
+    /// The product of factors `lhs` and `rhs` at `point`, witnessed from the pure side, the left
+    /// one scaled by `mask` where there is one.
+    fn witness_product_at(
+        &mut self,
+        point: u64,
+        lhs: &Factor,
+        rhs: &Factor,
+        mask: Option<ValueId>,
+    ) -> ValueId {
+        let pure_lhs: Vec<_> = (0..lhs.limbs.len())
+            .map(|limb| self.factor_limb_pure(lhs, limb, &CastTarget::Field))
+            .collect();
+        let pure_rhs: Vec<_> = (0..rhs.limbs.len())
+            .map(|limb| self.factor_limb_pure(rhs, limb, &CastTarget::Field))
+            .collect();
+        let mut pa = self.evaluate_at(&pure_lhs, point);
+        if let Some(mask) = mask {
+            let mask = self.cast(mask, CastTarget::Field);
+            pa = self.bin(BinaryArithOpKind::UMul, mask, pa);
+        }
+        let pb = self.evaluate_at(&pure_rhs, point);
+        let product = self.bin(BinaryArithOpKind::UMul, pa, pb);
+        self.write_witness(product)
+    }
+
+    /// `Σ ±value` as one value of type `target`. The subtracted values come last, so the sum starts
+    /// from an added one wherever there is one.
+    fn signed_sum(&mut self, terms: &[(Polarity, ValueId)], target: &CastTarget) -> ValueId {
+        let zero = |rewriter: &mut Self| match target {
+            CastTarget::Field => rewriter.field_const(rewriter.field().zero()),
+            CastTarget::Int(bits) => rewriter.int_const(IntBits::zero(*bits)),
+            _ => ice_unreachable!("a signed sum is of a field element or an integer"),
+        };
+        let mut sum: Option<ValueId> = None;
+        for wanted in [Polarity::Positive, Polarity::Negative] {
+            for (polarity, value) in terms {
+                if *polarity != wanted {
+                    continue;
+                }
+                sum = Some(match (sum, wanted) {
+                    (None, Polarity::Positive) => *value,
+                    (None, Polarity::Negative) => {
+                        let zero = zero(self);
+                        self.bin(BinaryArithOpKind::USub, zero, *value)
+                    }
+                    (Some(sum), Polarity::Positive) => {
+                        self.bin(BinaryArithOpKind::UAdd, sum, *value)
+                    }
+                    (Some(sum), Polarity::Negative) => {
+                        self.bin(BinaryArithOpKind::USub, sum, *value)
+                    }
+                });
+            }
+        }
+        sum.unwrap_or_else(|| zero(self))
+    }
+
+    /// Calculate column `column` of `terms`.
+    fn pure_column(&mut self, terms: &[Term<'_>], column_idx: usize, hint_bits: usize) -> ValueId {
+        let hint_type = CastTarget::Int(hint_bits);
+        let mut values: Vec<(Polarity, ValueId)> = Vec::new();
+        for term in terms {
+            match term.rhs {
+                Some(rhs_factor) => {
+                    for lhs_limb in 0..term.lhs.limbs.len() {
+                        let Some(rhs_limb) = column_idx.checked_sub(lhs_limb) else {
+                            continue;
+                        };
+                        if rhs_limb >= rhs_factor.limbs.len()
+                            || term.lhs.vanishes(lhs_limb)
+                            || rhs_factor.vanishes(rhs_limb)
+                        {
+                            continue;
+                        }
+                        let a = self.factor_limb_pure(term.lhs, lhs_limb, &hint_type);
+                        let b = self.factor_limb_pure(rhs_factor, rhs_limb, &hint_type);
+                        let product = self.bin(BinaryArithOpKind::UMul, a, b);
+                        values.push((term.polarity, product));
+                    }
+                }
+                None => {
+                    if column_idx < term.lhs.limbs.len() && !term.lhs.vanishes(column_idx) {
+                        let value = self.factor_limb_pure(term.lhs, column_idx, &hint_type);
+                        values.push((term.polarity, value));
+                    }
+                }
+            }
+        }
+        self.signed_sum(&values, &hint_type)
     }
 
     /// `Σ coefficients[i] · point^i` as a field element, which is linear in the coefficients.
@@ -360,131 +611,6 @@ impl Rewriter<'_> {
         sum.expect("a polynomial has at least one coefficient")
     }
 
-    /// Every column of a summed product's answer, as field elements, following `plan`.
-    ///
-    /// Where `product` is pinned, a column's final value is held equal to the target's limb, which
-    /// bounds it as tightly as the range check it replaces; a column that never needed reducing is
-    /// held to that limb too. The range checks are under `checks` and the equalities under `pins`.
-    fn accumulate_columns(
-        &mut self,
-        plan: &ProductPlan,
-        product: &Schoolbook<'_>,
-        forms: &mut FactorForms,
-    ) -> Vec<ValueId> {
-        let Schoolbook {
-            lhs,
-            rhs,
-            addend,
-            pinned,
-            widths,
-            ..
-        } = *product;
-        let guards = product.guards();
-        let hint = CastTarget::Int(plan.hint_bits);
-        let mut answer = Vec::with_capacity(widths.len());
-        let mut incoming: std::collections::VecDeque<(ValueId, ValueId)> = Default::default();
-
-        for (index, (steps, &width)) in plan.columns.iter().zip(widths).enumerate() {
-            let mut outgoing = Vec::new();
-            let mut column = Accumulator { sum: None };
-            for (position, step) in steps.iter().enumerate() {
-                // The one check a pinned column's equality takes the place of.
-                let bounds_the_answer = pinned.is_none() || position + 1 < steps.len();
-                match *step {
-                    Step::Product {
-                        lhs: left,
-                        rhs: right,
-                    } => {
-                        let a = forms.field(self, Side::Lhs, left, lhs);
-                        let b = forms.field(self, Side::Rhs, right, rhs);
-                        let product = self.bin(BinaryArithOpKind::UMul, a, b);
-                        let a = forms.pure(self, Side::Lhs, left, lhs, &hint);
-                        let b = forms.pure(self, Side::Rhs, right, rhs, &hint);
-                        let hinted = self.bin(BinaryArithOpKind::UMul, a, b);
-                        self.accumulate(&mut column, product, hinted);
-                    }
-                    Step::Addend(limb) => {
-                        let addend = addend.expect("the plan adds limbs of an addend it was given");
-                        let value = forms.field(self, Side::Addend, limb, addend);
-                        let hinted = forms.pure(self, Side::Addend, limb, addend, &hint);
-                        self.accumulate(&mut column, value, hinted);
-                    }
-                    Step::Carry => {
-                        let (carry, hinted) = incoming
-                            .pop_front()
-                            .expect("the plan adds each carry the column below made");
-                        self.accumulate(&mut column, carry, hinted);
-                    }
-                    Step::Reduce { carry_bits } => {
-                        let (sum, hinted) = column
-                            .sum
-                            .expect("the plan reduces only a column that has a bound");
-                        match carry_bits {
-                            None => {
-                                if bounds_the_answer {
-                                    self.push_guarded(
-                                        guards.check,
-                                        OpCode::Rangecheck {
-                                            value: sum,
-                                            max_bits: width,
-                                        },
-                                    );
-                                }
-                            }
-                            Some(carry_bits) => {
-                                let carry = self.shifted_down(hinted, plan.hint_bits, width);
-                                let carry = self.cast(carry, CastTarget::Int(carry_bits));
-                                let carry_field = self.cast(carry, CastTarget::Field);
-                                let written = self.write_witness(carry_field);
-                                self.push_guarded(
-                                    guards.check,
-                                    OpCode::Rangecheck {
-                                        value: written,
-                                        max_bits: carry_bits,
-                                    },
-                                );
-                                let place = self.field_const(self.field().two_pow(width));
-                                let scaled = self.bin(BinaryArithOpKind::UMul, written, place);
-                                let low = self.bin(BinaryArithOpKind::USub, sum, scaled);
-                                if bounds_the_answer {
-                                    self.push_guarded(
-                                        guards.check,
-                                        OpCode::Rangecheck {
-                                            value: low,
-                                            max_bits: width,
-                                        },
-                                    );
-                                }
-
-                                let low_hint = self.cast(hinted, CastTarget::Int(width));
-                                let low_hint = self.cast(low_hint, hint.clone());
-                                column.sum = Some((low, low_hint));
-                                outgoing.push((written, self.cast(carry, hint.clone())));
-                            }
-                        }
-                    }
-                }
-            }
-            let value = match column.sum {
-                Some((sum, _)) => sum,
-                None => self.field_const(self.field().zero()),
-            };
-            answer.push(match pinned {
-                Some(target) => {
-                    self.constrain_equal(value, target[index], guards.pin);
-                    target[index]
-                }
-                None => value,
-            });
-            incoming.extend(outgoing);
-        }
-        assert!(
-            incoming.is_empty(),
-            "ICE: the top column of a product carried out of the answer"
-        );
-        answer
-    }
-
     /// `lhs == rhs` as field elements, where `guard` holds.
     pub(super) fn constrain_equal(&mut self, lhs: ValueId, rhs: ValueId, guard: Option<ValueId>) {
         let difference = self.bin(BinaryArithOpKind::USub, lhs, rhs);
@@ -500,102 +626,58 @@ impl Rewriter<'_> {
         });
     }
 
-    fn accumulate(&mut self, column: &mut Accumulator, term: ValueId, hinted: ValueId) {
-        column.sum = Some(match column.sum {
-            None => (term, hinted),
-            Some((sum, sum_hint)) => (
-                self.bin(BinaryArithOpKind::UAdd, sum, term),
-                self.bin(BinaryArithOpKind::UAdd, sum_hint, hinted),
-            ),
-        });
+    /// Limb `limb` of `factor` on the constraining side.
+    fn factor_limb_constrained(&mut self, factor: &Factor, limb: usize) -> ValueId {
+        let value = self.limb_field(&factor.limbs[limb]);
+        self.sub_offset(factor, limb, value, &CastTarget::Field)
     }
 
-    /// The partial products at or past the top of the answer, held to zero one left limb at a time.
-    fn check_no_overflow(
+    /// Limb `limb` of `factor`'s pure value at the `hint_type`.
+    fn factor_limb_pure(
         &mut self,
-        plan: &ProductPlan,
-        lhs: &Factor,
-        rhs: &Factor,
-        forms: &mut FactorForms,
-        guard: Option<ValueId>,
-    ) {
-        let zero = self.field_const(self.field().zero());
-        for (left, group) in &plan.overflow {
-            let a = forms.field(self, Side::Lhs, *left, lhs);
-            let mut sum = None;
-            for right in group {
-                let b = forms.field(self, Side::Rhs, *right, rhs);
-                sum = Some(match sum {
-                    None => b,
-                    Some(sum) => self.bin(BinaryArithOpKind::UAdd, sum, b),
-                });
-            }
-            let sum = sum.expect("an overflow group names at least one limb");
-            let (a, b) = match guard {
-                None => (a, sum),
-                Some(condition) => {
-                    let flag = self.cast(condition, CastTarget::Field);
-                    (flag, self.bin(BinaryArithOpKind::UMul, a, sum))
-                }
-            };
-            self.push(OpCode::Constrain { a, b, c: zero });
-        }
-    }
-}
-
-/// Which operand of a product a limb belongs to.
-#[derive(Clone, Copy)]
-enum Side {
-    Lhs,
-    Rhs,
-    Addend,
-}
-
-/// The field element and the widened pure hint of each operand limb.
-struct FactorForms {
-    field: [Vec<Option<ValueId>>; 3],
-    pure: [Vec<Option<ValueId>>; 3],
-}
-
-impl FactorForms {
-    fn new(count: usize) -> Self {
-        Self {
-            field: std::array::from_fn(|_| vec![None; count]),
-            pure: std::array::from_fn(|_| vec![None; count]),
-        }
-    }
-
-    fn field(
-        &mut self,
-        rewriter: &mut Rewriter<'_>,
-        side: Side,
-        index: usize,
         factor: &Factor,
+        limb: usize,
+        hint_type: &CastTarget,
     ) -> ValueId {
-        *self.field[side as usize][index]
-            .get_or_insert_with(|| rewriter.limb_field(&factor.limbs[index]))
+        let value = match &factor.limbs[limb] {
+            Limb::Value(value) => {
+                let pure = self.pure_of(*value, factor.is_witnessed);
+                self.cast(pure, hint_type.clone())
+            }
+            Limb::Constant(pattern) => match hint_type {
+                CastTarget::Field => self.limb_const(pattern),
+                CastTarget::Int(bits) => self.int_const(pattern.cast(*bits)),
+                _ => ice_unreachable!("a pure limb is a field element or an integer"),
+            },
+        };
+        self.sub_offset(factor, limb, value, hint_type)
     }
 
-    fn pure(
+    /// `value`, limb `limb` of `factor` as `target`, less the limb's offset where it has one.
+    fn sub_offset(
         &mut self,
-        rewriter: &mut Rewriter<'_>,
-        side: Side,
-        index: usize,
         factor: &Factor,
-        hint: &CastTarget,
+        limb: usize,
+        value: ValueId,
+        target: &CastTarget,
     ) -> ValueId {
-        *self.pure[side as usize][index].get_or_insert_with(|| match &factor.limbs[index] {
-            Limb::Value(limb) => {
-                let pure = rewriter.pure_of(*limb, factor.witnessed);
-                rewriter.cast(pure, hint.clone())
+        let Some(offset) = factor.top_offset(limb) else {
+            return value;
+        };
+        match target {
+            CastTarget::Field => {
+                let constant =
+                    self.limb_const(&IntBits::from_biguint(offset.bits() as usize, offset));
+                self.bin(BinaryArithOpKind::USub, value, constant)
             }
-            Limb::Constant(pattern) => {
-                let CastTarget::Int(bits) = hint else {
-                    ice_unreachable!("a hint is an integer width");
-                };
-                rewriter.int_const(pattern.cast(*bits))
+            CastTarget::Int(bits) => {
+                let modulus = BigUint::one() << bits;
+                let wrapped = (&modulus - offset % &modulus) % &modulus;
+                let constant = self.int_const(IntBits::from_biguint(*bits, &wrapped));
+                self.bin(BinaryArithOpKind::UAdd, value, constant)
             }
-        })
+            _ => ice_unreachable!("a limb's offset is taken in a field element or an integer"),
+        }
     }
 }
 

@@ -230,7 +230,7 @@ impl Rewriter<'_> {
     ///
     /// A known or pure limb flips on the pure side. A witnessed one is `x + 2^(w - 1) - s·2^w` for
     /// its top bit `s`: linear in the [`Self::sign_bit`] cut, and below `2^w`.
-    fn flip_top_bit(
+    pub(super) fn flip_top_bit(
         &mut self,
         (limb, witnessed): (ValueId, bool),
         width: usize,

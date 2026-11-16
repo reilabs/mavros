@@ -19,7 +19,7 @@ pub(super) fn plan_function(
     fid: FunctionId,
     reachable: &[BlockId],
     type_info: &TypeInfo,
-    limb_config: LimbConfig,
+    limb_config: &LimbConfig,
 ) -> HashMap<ValueId, Vec<ValueId>> {
     let field = limb_config.field;
     let func = ssa.get_function(fid);

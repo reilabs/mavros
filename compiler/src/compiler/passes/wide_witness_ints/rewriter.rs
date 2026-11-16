@@ -47,7 +47,7 @@ struct Rewriter<'a> {
     value_map: &'a HashMap<ValueId, Vec<ValueId>>,
     types: &'a FunctionTypeInfo,
 
-    limb_config: LimbConfig,
+    limb_config: &'a LimbConfig,
 
     /// The decompositions already emitted in this block, by value and width.
     decomposed: &'a mut HashMap<(ValueId, usize), Vec<ValueId>>,
@@ -83,7 +83,7 @@ pub(super) fn rewrite_function(
     reachable: &[BlockId],
     value_map: &HashMap<ValueId, Vec<ValueId>>,
     type_info: &TypeInfo,
-    limb_config: LimbConfig,
+    limb_config: &LimbConfig,
     globals: &Globals,
 ) {
     let mut function = ssa.take_function(fid);
@@ -154,10 +154,11 @@ pub(super) fn rewrite_function(
     ssa.put_function(fid, function);
 }
 
-impl Rewriter<'_> {
-    fn limb_config(&self) -> LimbConfig {
+impl<'a> Rewriter<'a> {
+    fn limb_config(&self) -> &'a LimbConfig {
         self.limb_config
     }
+
     fn limb_bits(&self) -> usize {
         self.limb_config().limb_bits
     }

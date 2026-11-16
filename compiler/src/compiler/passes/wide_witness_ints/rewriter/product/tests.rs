@@ -6,11 +6,9 @@ use crate::{
                 single_cell_product_fits, widest_injective_int_bits, witness_limb_bits,
             },
             wide_witness_ints::{
-                limb_config::is_evaluable,
                 rewriter::product::{
-                    full_bounds,
-                    plan::{Step, schoolbook_fits},
-                    plan_product,
+                    Polarity, Term, full_bounds,
+                    plan::{Answer, Factor, Limb, build_f_polynomial},
                 },
                 test_utils::{
                     bn254, emitted, fields, guard_every_instruction, limbed_widths,
@@ -19,307 +17,47 @@ use crate::{
             },
         },
         ssa::{
-            Instruction, Located, ValueId,
+            Instruction, ValueId,
             hlssa::{BinaryArithOpKind, CastTarget, Constant, HLSSA, OpCode, Type},
         },
     },
 };
 
-use super::{super::super::types::limb_widths, ProductPlan};
+use super::super::super::types::limb_widths;
 use crate::compiler::Field;
 use mavros_artifacts::FieldConfig;
-use mavros_int_semantics::{IntBits, int_bits::HOST_LIMB_BITS};
-use num_bigint::BigUint;
-use num_traits::{One, Zero};
+use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
 
-/// Re-derive what `plan` claims from its steps alone and hold it to the soundness argument
-/// [`plan_product`] states without reading how the plan was built.
-fn assert_plan_is_sound(
-    plan: &ProductPlan,
-    lhs: &[BigUint],
-    rhs: &[BigUint],
-    addend: &[BigUint],
-    widths: &[usize],
-    injective: usize,
-) {
-    let limit = BigUint::one() << injective;
-    let count = widths.len();
-    let mut added = crate::collections::HashSet::default();
-    let mut added_addends = crate::collections::HashSet::default();
-    let mut incoming: Vec<BigUint> = Vec::new();
-
-    for (column, (steps, &width)) in plan.columns.iter().zip(widths).enumerate() {
-        let top = column + 1 == count;
-        let mut accumulated = BigUint::zero();
-        let mut carries = incoming.iter();
-        let mut outgoing = Vec::new();
-        for step in steps {
-            match *step {
-                Step::Product {
-                    lhs: left,
-                    rhs: right,
-                } => {
-                    assert_eq!(
-                        left + right,
-                        column,
-                        "a partial product in the wrong column"
-                    );
-                    assert!(added.insert((left, right)), "a partial product added twice");
-                    accumulated += &lhs[left] * &rhs[right];
-                }
-                Step::Addend(index) => {
-                    assert_eq!(index, column, "an addend limb in the wrong column");
-                    assert!(added_addends.insert(index), "an addend limb added twice");
-                    accumulated += &addend[index];
-                }
-                Step::Carry => {
-                    accumulated += carries.next().expect("a carry the column below made");
-                }
-                Step::Reduce { carry_bits: None } => {
-                    assert!(top, "only the top column reduces without a carry");
-                    accumulated = (BigUint::one() << width) - 1u8;
-                }
-                Step::Reduce {
-                    carry_bits: Some(carry_bits),
-                } => {
-                    assert!(!top, "the top column carries nothing out");
-                    assert!(
-                        accumulated < BigUint::one() << (width + carry_bits),
-                        "column {column}'s honest carry does not fit its range check"
-                    );
-                    assert!(
-                        width + carry_bits <= injective,
-                        "column {column}'s split does not stay below the modulus"
-                    );
-                    outgoing.push((BigUint::one() << carry_bits) - 1u8);
-                    accumulated = (BigUint::one() << width) - 1u8;
-                }
-            }
-            assert!(accumulated < limit, "column {column} passes the modulus");
-            assert!(
-                accumulated.bits() as usize <= plan.hint_bits,
-                "column {column} passes the hint width"
-            );
-        }
-        assert!(carries.next().is_none(), "column {column} drops a carry");
-        assert!(
-            accumulated < BigUint::one() << width,
-            "column {column} ends outside its limb"
-        );
-        incoming = outgoing;
+/// A checked schoolbook's terms: `factor · factor`, plus `factor` where `addend`.
+fn schoolbook_terms(factor: &Factor, addend: bool) -> Vec<Term<'_>> {
+    let mut terms = vec![Term {
+        polarity: Polarity::Positive,
+        lhs: factor,
+        rhs: Some(factor),
+        gated: true,
+    }];
+    if addend {
+        terms.push(Term {
+            polarity: Polarity::Positive,
+            lhs: factor,
+            rhs: None,
+            gated: false,
+        });
     }
-    assert!(incoming.is_empty(), "the top column carries out");
-
-    // An evaluated product holds every column, the ones past the answer included, to its
-    // integer sum, which has to stay below the modulus for that to mean anything.
-    if plan.evaluated.is_some() {
-        assert!(
-            plan.overflow.is_empty(),
-            "an evaluated product with overflow terms"
-        );
-        for column in 0..2 * count - 1 {
-            let sum: BigUint = (0..count)
-                .filter(|left| *left <= column && column - left < count)
-                .map(|left| &lhs[left] * &rhs[column - left])
-                .sum();
-            assert!(
-                sum < limit,
-                "column {column} of an evaluated product passes the modulus"
-            );
-        }
-        return;
-    }
-
-    let mut covered = crate::collections::HashSet::default();
-    for (left, group) in &plan.overflow {
-        let sum: BigUint = group.iter().map(|right| &rhs[*right]).sum();
-        assert!(
-            &lhs[*left] * sum < limit,
-            "an overflow term passes the modulus"
-        );
-        for right in group {
-            assert!(left + right >= count, "an overflow term inside the answer");
-            assert!(
-                covered.insert((*left, *right)),
-                "an overflow term checked twice"
-            );
-        }
-    }
-
-    for (index, bound) in addend.iter().enumerate() {
-        assert!(
-            bound.is_zero() || added_addends.contains(&index),
-            "addend limb {index} is never added"
-        );
-    }
-
-    for left in 0..count {
-        for right in 0..count {
-            if (&lhs[left] * &rhs[right]).is_zero() {
-                continue;
-            }
-            let (set, what) = if left + right < count {
-                (&added, "added to its column")
-            } else {
-                (&covered, "held to zero")
-            };
-            assert!(
-                set.contains(&(left, right)),
-                "the partial product ({left}, {right}) is never {what}"
-            );
-        }
-    }
-}
-
-/// The plan is sound on any field that can hold it. bn254 can at every width and limb tried,
-/// and goldilocks at every width tried on the limb `witness_limb_bits` gives it.
-///
-/// The `2h + 2`, `2h + 1` and `2h` injective widths stand for fields this compiler cannot be
-/// configured for. They exercise reductions part-way along a column, which neither configured
-/// field needs, and the refusal of a field too narrow for one product plus its headroom.
-#[test]
-fn the_schoolbook_plan_is_sound_on_any_field_that_holds_it() {
-    let bn254 = widest_injective_int_bits(bn254());
-    let configured: Vec<(usize, usize)> = fields()
-        .into_iter()
-        .map(|field| (widest_injective_int_bits(field), witness_limb_bits(field)))
-        .collect();
-    let goldilocks = widest_injective_int_bits(FieldConfig::goldilocks());
-    let sparse = |widths: &[usize]| -> Vec<BigUint> {
-        full_bounds(widths)
-            .into_iter()
-            .enumerate()
-            .map(|(index, bound)| match index % 3 {
-                0 => bound,
-                1 => BigUint::zero(),
-                _ => BigUint::from(5u8),
-            })
-            .collect()
-    };
-    for limb_bits in [16usize, 32, 64] {
-        for bits in [64usize, 100, 127, 200, 253, 254, 320, 1000] {
-            let widths = limb_widths(bits, limb_bits);
-            let full = full_bounds(&widths);
-            for injective in [
-                bn254,
-                goldilocks,
-                2 * limb_bits + 2,
-                2 * limb_bits + 1,
-                2 * limb_bits,
-            ] {
-                for rhs in [full.clone(), sparse(&widths)] {
-                    for addend in [Vec::new(), full.clone(), sparse(&widths)] {
-                        for evaluate in [false, true] {
-                            if evaluate && !is_evaluable(bits, limb_bits, injective) {
-                                continue;
-                            }
-                            let planned =
-                                plan_product(&full, &rhs, &addend, &widths, injective, evaluate);
-                            match planned {
-                                Some(plan) => assert_plan_is_sound(
-                                    &plan, &full, &rhs, &addend, &widths, injective,
-                                ),
-                                None => {
-                                    assert_ne!(injective, bn254, "bn254 refuses int{bits}");
-                                    assert!(
-                                        !configured.contains(&(injective, limb_bits)),
-                                        "a configured field refuses int{bits} on its limb"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// On bn254 a whole column fits an element, so each reduces once, at its end, and each left
-/// limb's overflow terms are one constraint. Evaluated, every column fits too, so the product
-/// is evaluated and has no overflow terms at all.
-#[test]
-fn bn254_reduces_each_column_once() {
-    let widths = limb_widths(320, witness_limb_bits(bn254()));
-    let full = full_bounds(&widths);
-    let injective = widest_injective_int_bits(bn254());
-
-    for bits in [127usize, 254, 320, 1000, 16384] {
-        let widths = limb_widths(bits, witness_limb_bits(bn254()));
-        let full = full_bounds(&widths);
-        let plan = plan_product(&full, &full, &[], &widths, injective, true)
-            .unwrap_or_else(|| panic!("bn254 holds an int{bits} product"));
-        assert!(plan.evaluated.is_some(), "int{bits} is evaluated on bn254");
-        assert!(plan.overflow.is_empty(), "int{bits} has no overflow terms");
-    }
-
-    let plan = plan_product(&full, &full, &[], &widths, injective, false)
-        .expect("bn254 holds an int320 product");
-
-    for (column, steps) in plan.columns.iter().enumerate() {
-        let reductions = steps
-            .iter()
-            .filter(|step| matches!(step, Step::Reduce { .. }))
-            .count();
-        assert_eq!(reductions, 1, "column {column}");
-        assert!(matches!(steps.last(), Some(Step::Reduce { .. })));
-    }
-    assert_eq!(
-        plan.overflow.len(),
-        widths.len() - 1,
-        "one overflow constraint per left limb above the lowest"
-    );
-}
-
-/// A field one partial product fills refuses; a field that holds one with room to spare but not
-/// a whole column reduces part-way along it.
-#[test]
-fn a_narrow_field_reduces_more_often_or_refuses() {
-    let widths = limb_widths(320, 64);
-    let full = full_bounds(&widths);
-
-    // A 32-bit limb on goldilocks: `(2^32 - 1)^2` alone has 64 bits against an injective 63.
-    let goldilocks = limb_widths(320, 32);
-    assert!(
-        plan_product(
-            &full_bounds(&goldilocks),
-            &full_bounds(&goldilocks),
-            &[],
-            &goldilocks,
-            63,
-            false
-        )
-        .is_none()
-    );
-
-    // Five products to a column do not fit 130 bits, so summing reduces mid-column.
-    let injective = 2 * 64 + 2;
-    let plan = plan_product(&full, &full, &[], &widths, injective, false)
-        .expect("two products and a carry fit 130 bits");
-    assert_plan_is_sound(&plan, &full, &full, &[], &widths, injective);
-    assert!(
-        plan.columns.iter().any(|steps| {
-            steps
-                .iter()
-                .filter(|step| matches!(step, Step::Reduce { .. }))
-                .count()
-                > 1
-        }),
-        "a column of five products reduces before its end"
-    );
+    terms
 }
 
 /// bn254 plans a schoolbook product, and the `q·d + r` of a division, at every width class it
 /// has, so neither ever reaches [`unsupported_on_this_field`].
 #[test]
 fn bn254_holds_a_product_at_every_width() {
-    for bits in [1usize, 127, 128, 129, 253, 254, 1000, 16383, 16384] {
-        for with_addend in [false, true] {
-            assert!(
-                schoolbook_fits(bn254(), bits, with_addend),
-                "int{bits}, addend: {with_addend}"
-            );
-        }
+    let injective = widest_injective_int_bits(bn254());
+    for bits in [127usize, 128, 129, 253, 254, 320, 1000, 16383, 16384] {
+        let widths = limb_widths(bits, witness_limb_bits(bn254()));
+        assert!(
+            planned_written_checks(&widths, injective, false, false).is_some(),
+            "int{bits}"
+        );
     }
 }
 
@@ -339,53 +77,53 @@ fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
     product_with(field, bits, Type::witness_of(Type::int(bits)))
 }
 
-/// The range check on each witness a schoolbook writes after its operands, in the order they are
-/// written, [`None`] for one nothing checks.
+/// The range check on each witness a checked schoolbook at limb `widths` writes after its
+/// operands, in the order they are written, [`None`] for one nothing checks; or [`None`] if a
+/// field whose widest injective width is `injective` cannot hold it. Its operands are full-range
+/// witnesses, the left one also an addend where `addend`.
 fn planned_written_checks(
-    plan: &ProductPlan,
     widths: &[usize],
+    injective: usize,
+    addend: bool,
     pinned: bool,
-) -> Vec<Option<usize>> {
-    if let Some(blocks) = &plan.evaluated {
-        let count = widths.len();
-        let mut expected = Vec::new();
-        for (column, &width) in widths.iter().enumerate() {
-            if !pinned {
-                expected.push(Some(width));
-            }
-            if column + 1 < count {
-                expected.push(
-                    blocks
-                        .iter()
-                        .find(|block| block.last == column)
-                        .and_then(|block| block.carry_bits),
-                );
-            }
+) -> Option<Vec<Option<usize>>> {
+    // The planner reads only the factor's shape.
+    let factor = Factor {
+        limbs: widths.iter().map(|_| Limb::Value(ValueId(0))).collect(),
+        is_witnessed: true,
+        bounds: full_bounds(widths),
+        L: None,
+    };
+    let identity = build_f_polynomial(
+        widths,
+        injective,
+        schoolbook_terms(&factor, addend),
+        Some(Answer::Unknown(widths)),
+    )?;
+    let count = widths.len();
+    let mut expected = Vec::new();
+    for (column, &width) in widths.iter().enumerate() {
+        if !pinned {
+            expected.push(Some(width));
         }
-        expected
-    } else {
-        // Summed, the only witnesses are the carries.
-        plan.columns
-            .iter()
-            .flatten()
-            .filter_map(|step| match step {
-                Step::Reduce {
-                    carry_bits: Some(bits),
-                } => Some(*bits),
-                _ => None,
-            })
-            .map(Some)
-            .collect()
+        if column + 1 < count {
+            expected.push(
+                identity
+                    .blocks
+                    .iter()
+                    .find(|block| block.last == column)
+                    .and_then(|block| block.carry_bits),
+            );
+        }
     }
+    Some(expected)
 }
 
-/// Every carry a product witnesses is range-checked at the width its plan gives, and every limb
-/// of the answer at its width, however the columns are formed.
+/// Every carry a product witnesses is range-checked at the width its identity gives, and every
+/// limb of the answer at its width, whether the right operand is witnessed or pure.
 ///
-/// Evaluated (both operands witnessed), each limb and each carry is a separate witness, the
-/// carries inside a block pinned only by the `2k - 1` evaluations, and nothing is held to zero.
-/// Summed (a pure right operand), the columns are linear and every left limb above the lowest
-/// is held to a zero overflow.
+/// Each limb and each carry is a separate witness, the carries inside a block pinned only by the
+/// `2k - 1` evaluations, and nothing is held to zero.
 ///
 /// Structural for the reason [`every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded`]
 /// gives: perturbing a limb or a boundary carry trips its check, an interior carry an evaluation.
@@ -397,22 +135,13 @@ fn every_carry_and_every_limb_of_a_product_is_bounded() {
         for bits in limbed_widths(field) {
             let widths = limb_widths(bits, h);
             let k = widths.len();
-            let full = full_bounds(&widths);
-            for (what, rhs_type, evaluated) in [
-                ("evaluated", Type::witness_of(Type::int(bits)), true),
-                ("summed", Type::int(bits), false),
+            for (what, rhs_type) in [
+                ("witnessed", Type::witness_of(Type::int(bits))),
+                ("pure", Type::int(bits)),
             ] {
-                let plan = plan_product(
-                    &full,
-                    &full,
-                    &[],
-                    &widths,
-                    widest_injective_int_bits(field),
-                    evaluated,
-                )
-                .expect("the field holds the product");
-                assert_eq!(plan.evaluated.is_some(), evaluated);
-                let expected = planned_written_checks(&plan, &widths, false);
+                let expected =
+                    planned_written_checks(&widths, widest_injective_int_bits(field), false, false)
+                        .expect("the field holds the identity");
 
                 let mut ssa = product_with(field, bits, rhs_type);
                 run_pass(&mut ssa);
@@ -455,14 +184,9 @@ fn every_carry_and_every_limb_of_a_product_is_bounded() {
                         _ => None,
                     })
                     .collect();
-                assert_eq!(
-                    limbs,
-                    if evaluated {
-                        Vec::new()
-                    } else {
-                        widths.clone()
-                    },
-                    "{id:?} int{bits} {what}: a summed answer's limbs are bounded at their widths"
+                assert!(
+                    limbs.is_empty(),
+                    "{id:?} int{bits} {what}: every check is on a written witness"
                 );
 
                 let constraints = ops
@@ -471,8 +195,8 @@ fn every_carry_and_every_limb_of_a_product_is_bounded() {
                     .count();
                 assert_eq!(
                     constraints,
-                    if evaluated { 2 * k - 1 } else { k - 1 },
-                    "{id:?} int{bits} {what}: the evaluations, or one overflow constraint per left limb"
+                    2 * k - 1,
+                    "{id:?} int{bits} {what}: the evaluations"
                 );
             }
         }
@@ -602,20 +326,12 @@ fn a_guarded_product_is_checked_only_under_its_guard() {
         );
         let widths = limb_widths(bits, witness_limb_bits(field));
         let k = widths.len();
-        let full = full_bounds(&widths);
-        let plan = plan_product(
-            &full,
-            &full,
-            &[],
-            &widths,
-            widest_injective_int_bits(field),
-            true,
-        )
-        .expect("the field holds the product");
-        let planned = planned_written_checks(&plan, &widths, false)
-            .into_iter()
-            .flatten()
-            .count();
+        let planned =
+            planned_written_checks(&widths, widest_injective_int_bits(field), false, false)
+                .expect("the field holds the product")
+                .into_iter()
+                .flatten()
+                .count();
         let guarded = ops
             .iter()
             .filter(|op| {
@@ -712,81 +428,8 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
     }
 }
 
-/// A constant factor is cut at compile time, so the limbs it does not reach cost nothing: a
-/// product by a one-limb constant has no partial product above the diagonal and nothing to hold
-/// to zero.
-#[test]
-fn a_constant_factor_drops_the_limbs_it_does_not_reach() {
-    let bits = 320usize;
-    let mut ssa = product(bits);
-    let main = ssa.get_unique_entrypoint_id();
-    let five = ssa.add_const(Constant::Int(IntBits::from_u128(bits, 5)));
-    {
-        let entry = ssa.get_function_mut(main).get_entry_mut();
-        let instructions: Vec<_> = entry
-            .take_instructions()
-            .into_iter()
-            .map(|op| {
-                let OpCode::BinaryArithOp {
-                    kind, result, lhs, ..
-                } = op.as_ref().clone()
-                else {
-                    panic!("the program is one product")
-                };
-                let rewritten = OpCode::BinaryArithOp {
-                    kind,
-                    result,
-                    lhs,
-                    rhs: five,
-                };
-                Located::new(rewritten, op.location().clone())
-            })
-            .collect();
-        entry.put_instructions(instructions);
-    }
-    run_pass(&mut ssa);
-    let ops = emitted(&ssa);
-
-    let k = limb_widths(bits, witness_limb_bits(bn254())).len();
-    let products = ops
-        .iter()
-        .filter(|op| {
-            matches!(
-                op,
-                OpCode::BinaryArithOp {
-                    kind: BinaryArithOpKind::UMul,
-                    ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(
-        ops.iter()
-            .filter(|op| matches!(op, OpCode::Constrain { .. }))
-            .count(),
-        0,
-        "no partial product reaches past the answer"
-    );
-    // Per column: the partial product and its hint, then the carry's place value.
-    assert_eq!(products, 2 * k + (k - 1), "one partial product per column");
-}
-
 /// The range check on each witness the division's schoolbook writes, in order, at full operand ranges.
-pub(crate) fn division_carries(
-    field: FieldConfig,
-    widths: &[usize],
-    evaluate: bool,
-) -> Vec<Option<usize>> {
-    let full = full_bounds(widths);
-    let plan = plan_product(
-        &full,
-        &full,
-        &full,
-        widths,
-        widest_injective_int_bits(field),
-        evaluate,
-    )
-    .expect("the field holds the division");
-    assert_eq!(plan.evaluated.is_some(), evaluate);
-    planned_written_checks(&plan, widths, true)
+pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Option<usize>> {
+    planned_written_checks(widths, widest_injective_int_bits(field), true, true)
+        .expect("the field holds the division's identity")
 }

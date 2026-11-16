@@ -54,7 +54,7 @@ impl Rewriter<'_> {
             lhs: &lhs_factor,
             rhs: &rhs_factor,
             addend: None,
-            pinned: None,
+            target: None,
             widths: &widths,
             bits,
             operation: "multiplication",
@@ -369,7 +369,7 @@ impl Rewriter<'_> {
     /// Limbs at `widths` as a schoolbook [`Factor`]: a known limb is a constant with its value as
     /// its bound, and any other is bounded by its width.
     fn factor_of(&mut self, limbs: &[(ValueId, bool)], widths: &[usize]) -> Factor {
-        let mut witnessed = false;
+        let mut is_witnessed = false;
         let (limbs, bounds) = limbs
             .iter()
             .zip(full_bounds(widths))
@@ -382,7 +382,7 @@ impl Rewriter<'_> {
                         (Limb::Constant(pattern), bound)
                     }
                     None => {
-                        witnessed |= limb_witnessed;
+                        is_witnessed |= limb_witnessed;
                         (Limb::Value(limb), full)
                     }
                 },
@@ -390,8 +390,9 @@ impl Rewriter<'_> {
             .unzip();
         Factor {
             limbs,
-            witnessed,
+            is_witnessed,
             bounds,
+            L: None,
         }
     }
 

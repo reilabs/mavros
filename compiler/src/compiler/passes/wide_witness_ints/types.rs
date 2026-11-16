@@ -21,7 +21,7 @@ pub(super) fn limb_widths(bits: usize, limb_bits: usize) -> Vec<usize> {
 }
 
 /// The types a type expands into: one per limb for a witnessed wide integer, itself otherwise.
-pub(super) fn limb_types(ty: &Type, limb_config: LimbConfig) -> Vec<Type> {
+pub(super) fn limb_types(ty: &Type, limb_config: &LimbConfig) -> Vec<Type> {
     match &ty.expr {
         TypeExpr::WitnessOf(inner) => match &inner.expr {
             TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field) => {
@@ -61,7 +61,7 @@ pub(super) fn limb_types(ty: &Type, limb_config: LimbConfig) -> Vec<Type> {
 /// A sequence is stored as one sequence per limb, so a **pure** wide element splits too: kept
 /// whole, a constant wide sequence would hold each entry as one field element, capping its width at
 /// the modulus. Reassembling an element costs interpreter work, not constraints.
-fn element_limb_types(ty: &Type, limb_config: LimbConfig) -> Vec<Type> {
+fn element_limb_types(ty: &Type, limb_config: &LimbConfig) -> Vec<Type> {
     match &ty.expr {
         TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field) => {
             limb_widths(*bits, limb_config.limb_bits)
@@ -122,7 +122,7 @@ pub(super) fn flat_limbs(
 #[track_caller]
 pub(super) fn element_types(
     elem_type: &Type,
-    limb_config: LimbConfig,
+    limb_config: &LimbConfig,
     expected: usize,
 ) -> Vec<Type> {
     let types = element_limb_types(elem_type, limb_config);

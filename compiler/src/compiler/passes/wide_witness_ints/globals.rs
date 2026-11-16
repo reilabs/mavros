@@ -19,7 +19,7 @@ pub(super) struct Globals {
 
 impl Globals {
     /// Split every global in `ssa` that holds a wide integer, and record where each slot went.
-    pub(super) fn split(ssa: &mut HLSSA, limb_config: LimbConfig) -> Self {
+    pub(super) fn split(ssa: &mut HLSSA, limb_config: &LimbConfig) -> Self {
         let old_types: Vec<Type> = ssa.get_global_types().to_vec();
         let mut offsets = Vec::with_capacity(old_types.len());
         let mut new_types = Vec::new();

@@ -178,12 +178,11 @@ impl Rewriter<'_> {
         let q = self.witness_hinted(quotient_hint, bits, widths, &quotient_max);
         let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
 
-        let target: Vec<ValueId> = n.limbs.iter().map(|limb| self.limb_field(limb)).collect();
         self.schoolbook(Schoolbook {
             lhs: &q,
             rhs: d,
             addend: Some(&r),
-            pinned: Some(&target),
+            target: Some(n),
             widths,
             bits,
             operation: "division",
@@ -236,7 +235,7 @@ impl Rewriter<'_> {
     /// A pure `bits`-wide `hint` witnessed as limbs at `widths`, each range-checked no wider than
     /// `max` allows for it. A limb `max` does not reach is a constant zero, which drops out of the
     /// schoolbook's plan. Only the caller's constraints tie the limbs to anything.
-    fn witness_hinted(
+    pub(super) fn witness_hinted(
         &mut self,
         hint: ValueId,
         bits: usize,
@@ -260,8 +259,9 @@ impl Rewriter<'_> {
         }
         Factor {
             limbs,
-            witnessed: true,
+            is_witnessed: true,
             bounds,
+            L: None,
         }
     }
 
@@ -293,7 +293,7 @@ impl Rewriter<'_> {
         factor.limbs[..count]
             .iter()
             .map(|limb| match limb {
-                Limb::Value(limb) => (*limb, factor.witnessed),
+                Limb::Value(limb) => (*limb, factor.is_witnessed),
                 Limb::Constant(pattern) => (self.int_const(pattern.clone()), false),
             })
             .collect()
