@@ -288,7 +288,7 @@ impl LowerWitnessFieldOps {
 
     /// Lower a decomposition into more digits than a field element has to a false assert and a
     /// dummy value.
-    /// 
+    ///
     /// Decomposition fails rather than pads: a wider one needs a decision on how its leading
     /// zeroes fit the field-agnostic lowering contract.
     fn wider_than_the_field(
