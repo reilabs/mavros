@@ -3,7 +3,7 @@
 use crate::{
     collections::HashMap,
     compiler::{
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::{BlockId, Terminator, ValueId, hlssa::HLSSA},
     },
 };
@@ -19,8 +19,9 @@ impl Pass for DeduplicatePhis {
         vec![]
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         self.do_run(ssa);
+        Ok(())
     }
 }
 

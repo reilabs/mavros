@@ -9,7 +9,7 @@ use crate::compiler::{
     util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 pub struct LowerSideEffectFreeGuards {}
 
@@ -19,17 +19,17 @@ impl InstructionLoweringRule for LowerSideEffectFreeGuards {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let OpCode::Guard { inner, .. } = instruction else {
-            return false;
+            return Ok(false);
         };
 
-        if self.can_drop_guard(inner, context.types()) {
+        Ok(if self.can_drop_guard(inner, context.types()) {
             b.emit(inner.as_ref().clone());
             true
         } else {
             false
-        }
+        })
     }
 }
 

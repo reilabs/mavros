@@ -210,7 +210,9 @@ fn unit_bodies_and_empty_structs_have_one_typed_result_until_tuple_elision() {
         let expected = TypeConverter::new().convert_type(&return_type);
         let mut ssa = lower(vec![function(0, body, return_type)]);
         assert_return_shape(&ssa, &[expected.clone()]);
-        PassManager::new(name.into(), false, vec![Box::new(ElideTuples::new())]).run(&mut ssa);
+        PassManager::new(name.into(), false, vec![Box::new(ElideTuples::new())])
+            .run(&mut ssa)
+            .unwrap();
         assert_return_shape(&ssa, &after);
     }
 }
@@ -349,7 +351,8 @@ fn direct_and_indirect_unit_calls_match_their_signatures() {
                 Box::new(ElideTuples::new()),
             ],
         )
-        .run(&mut ssa);
+        .run(&mut ssa)
+        .unwrap();
         assert_return_shape(&ssa, &[]);
         for (_, function) in ssa.iter_functions() {
             for (_, block) in function.get_blocks() {

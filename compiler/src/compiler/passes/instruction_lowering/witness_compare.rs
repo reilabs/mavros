@@ -1,6 +1,6 @@
 use crate::compiler::{
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
         shared::limbs::widest_cell_sum_bits,
     },
     ssa::{
@@ -20,8 +20,8 @@ impl InstructionLoweringRule for LowerWitnessCompareOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
-        self.process_cmp(b, context, instruction)
+    ) -> LoweringResult {
+        Ok(self.process_cmp(b, context, instruction))
     }
 }
 

@@ -9,7 +9,7 @@ use crate::compiler::{
     util::ice_non_elided_tuple,
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 pub struct LowerWitnessMemoryOps {}
 
@@ -19,20 +19,20 @@ impl InstructionLoweringRule for LowerWitnessMemoryOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let OpCode::Guard { condition, inner } = instruction else {
-            return false;
+            return Ok(false);
         };
 
         let OpCode::Store { ptr, value } = inner.as_ref() else {
-            return false;
+            return Ok(false);
         };
 
         let value_type = context.types().get_value_type(*value).clone();
         let old_value = b.load(*ptr);
         let new_value = emit_select(b, *condition, *value, old_value, &value_type);
         b.store(*ptr, new_value);
-        true
+        Ok(true)
     }
 }
 

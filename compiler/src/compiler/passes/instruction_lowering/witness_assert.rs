@@ -9,7 +9,7 @@ use crate::compiler::{
     },
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 pub struct LowerWitnessAssertOps {}
 
@@ -19,12 +19,12 @@ impl InstructionLoweringRule for LowerWitnessAssertOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
-        if let OpCode::Guard { condition, inner } = instruction {
+    ) -> LoweringResult {
+        Ok(if let OpCode::Guard { condition, inner } = instruction {
             self.process_assert(b, context, Some(*condition), inner.as_ref())
         } else {
             self.process_assert(b, context, None, instruction)
-        }
+        })
     }
 }
 

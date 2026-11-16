@@ -7,7 +7,7 @@
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
-    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext},
+    passes::instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
     ssa::{
         ValueId,
         hlssa::{
@@ -25,14 +25,14 @@ impl InstructionLoweringRule for LowerWitnessSpreadOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let types = context.types();
         let (guard, op) = match instruction {
             OpCode::Guard { condition, inner } => (Some(*condition), inner.as_ref()),
             other => (None, other),
         };
         let witnessed = |value: &ValueId| types.get_value_type(*value).is_witness_of();
-        match op {
+        Ok(match op {
             OpCode::Spread {
                 result,
                 value,
@@ -61,7 +61,7 @@ impl InstructionLoweringRule for LowerWitnessSpreadOps {
                 true
             }
             _ => false,
-        }
+        })
     }
 }
 

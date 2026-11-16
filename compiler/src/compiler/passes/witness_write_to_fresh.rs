@@ -4,7 +4,7 @@
 
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     ssa::hlssa::{HLSSA, OpCode},
     util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
 };
@@ -20,8 +20,9 @@ impl Pass for WitnessWriteToFresh {
         vec![TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<TypeInfo>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

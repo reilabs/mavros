@@ -322,6 +322,11 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> BlockEmitter<'_
         result
     }
 
+    /// The location instructions emitted here are located at, for a diagnostic about them.
+    pub fn source_location(&self) -> SourceLocation {
+        self.ambient_location.resolve()
+    }
+
     pub fn emit_instruction(&mut self, instruction: Op) {
         let instruction = Located::new(instruction, self.ambient_location.resolve());
         self.editor.block.push_instruction(instruction);

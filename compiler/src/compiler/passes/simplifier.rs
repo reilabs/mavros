@@ -9,7 +9,7 @@ use crate::{
             types::{FunctionTypeInfo, Types, pool_constant_types},
             value_definitions::{FunctionValueDefinitions, ValueDefinition},
         },
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::{
             limbs::widest_injective_int_bits,
             value_replacements::{ReplaceScope, ValueReplacements},
@@ -38,8 +38,9 @@ impl Pass for Simplifier {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<FlowAnalysis>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

@@ -4,7 +4,7 @@ use crate::{
     collections::HashSet,
     compiler::{
         analysis::flow_analysis::FlowAnalysis,
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::{BlockId, hlssa::HLSSA},
     },
 };
@@ -26,8 +26,9 @@ impl Pass for RemoveUnreachableBlocks {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         remove_unreachable_blocks(ssa, store.get::<FlowAnalysis>());
+        Ok(())
     }
 }
 

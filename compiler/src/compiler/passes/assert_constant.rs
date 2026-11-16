@@ -14,7 +14,7 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 use crate::compiler::{
     analysis::witness_taint_inference::WitnessTaintInference,
-    pass_manager::{AnalysisStore, Pass},
+    pass_manager::{AnalysisStore, Pass, PassResult},
     ssa::{
         SourceLocation,
         hlssa::{CallTarget, HLSSA, OpCode},
@@ -48,7 +48,7 @@ impl Pass for AssertConstantValidation {
         "assert_constant_validation"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         let mut failures = BTreeSet::new();
         let mut functions_with_markers = Vec::new();
 
@@ -112,6 +112,7 @@ impl Pass for AssertConstantValidation {
         }
 
         *self.failures.borrow_mut() = Some(failures);
+        Ok(())
     }
 }
 
@@ -155,7 +156,8 @@ mod tests {
                 Rc::clone(&failures),
             ))],
         )
-        .run(ssa);
+        .run(ssa)
+        .unwrap();
         let failures = failures.borrow_mut().take().unwrap();
         if failures.is_empty() {
             Ok(())
@@ -397,6 +399,7 @@ mod tests {
                 failures,
             ))],
         )
-        .run(&mut ssa);
+        .run(&mut ssa)
+        .unwrap();
     }
 }

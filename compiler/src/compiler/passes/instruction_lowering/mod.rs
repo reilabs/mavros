@@ -20,6 +20,8 @@ mod witness_integer_arith;
 mod witness_memory;
 mod witness_spread;
 
+use std::collections::BTreeSet;
+
 use crate::compiler::{
     analysis::{
         flow_analysis::FlowAnalysis,
@@ -28,17 +30,17 @@ use crate::compiler::{
             FunctionValueRanges, Interval, ValueRange, ValueRangeAnalysis, Width,
         },
     },
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
+    diagnostic::Diagnostic,
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassFailure, PassResult},
     ssa::{
-        BlockId, ValueId,
+        BlockId, FunctionId, ValueId,
         hlssa::{
-            HLSSA, OpCode, Type, TypeExpr,
+            CallTarget, HLSSA, OpCode, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter, HLFunctionBuilder, HLSSABuilder},
         },
     },
 };
 
-pub(crate) use self::witness_field::{witness_to_bits_refusal, witness_to_radix_refusal};
 use self::{
     bit_range::LowerBitRangeOps,
     bit_windows::WideBitWindows,
@@ -153,6 +155,70 @@ pub(super) fn integer_bits(ty: &Type) -> Option<usize> {
     }
 }
 
+/// What a rule reports for one instruction
+pub(super) type LoweringResult = Result<bool, PassFailure>;
+
+fn at_user_calls(
+    ssa: &HLSSA,
+    function_id: FunctionId,
+    diagnostics: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    if !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.location().is_stdlib())
+    {
+        return diagnostics;
+    }
+
+    // Walk up through stdlib callers, since one wrapper may reach the builtin through another.
+    let mut call_sites = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = vec![function_id];
+    while let Some(callee) = pending.pop() {
+        if !visited.insert(callee) {
+            continue;
+        }
+        for (caller, function) in ssa.iter_functions() {
+            for (_, block) in function.get_blocks() {
+                for (op, location) in block.get_instructions_with_source_locations() {
+                    let OpCode::Call {
+                        function: CallTarget::Static(target),
+                        ..
+                    } = op
+                    else {
+                        continue;
+                    };
+                    if *target != callee {
+                        continue;
+                    }
+                    if location.is_stdlib() {
+                        pending.push(*caller);
+                    } else {
+                        call_sites.insert(location.clone());
+                    }
+                }
+            }
+        }
+    }
+    if call_sites.is_empty() {
+        return diagnostics;
+    }
+
+    diagnostics
+        .into_iter()
+        .flat_map(|diagnostic| {
+            if diagnostic.location().is_stdlib() {
+                call_sites
+                    .iter()
+                    .map(|site| diagnostic.clone().relocated(site.clone()))
+                    .collect()
+            } else {
+                vec![diagnostic]
+            }
+        })
+        .collect()
+}
+
 pub(super) trait InstructionLoweringRule {
     /// Whether this rule reads the [`LoweringContext`]'s value ranges.
     ///
@@ -172,7 +238,7 @@ pub(super) trait InstructionLoweringRule {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool;
+    ) -> LoweringResult;
 }
 
 impl InstructionLowering {
@@ -329,7 +395,7 @@ impl InstructionLowering {
         }
     }
 
-    fn run_iteration(&self, ssa: &mut HLSSA) -> bool {
+    fn run_iteration(&self, ssa: &mut HLSSA) -> LoweringResult {
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
         let value_ranges = self
@@ -338,17 +404,30 @@ impl InstructionLowering {
 
         let function_ids: Vec<_> = ssa.get_function_ids().collect();
         let mut changed = false;
+        let mut failure = None;
         let mut sb = HLSSABuilder::new(ssa);
         for function_id in function_ids {
             let function_type_info = types.get_function(function_id);
             let function_value_ranges = value_ranges
                 .as_ref()
                 .map(|ranges| ranges.get_function(function_id));
-            sb.modify_function(function_id, |fb| {
-                changed |= self.run_on_function(fb, function_type_info, function_value_ranges);
-            });
+            match sb.modify_function(function_id, |fb| {
+                self.run_on_function(fb, function_type_info, function_value_ranges)
+            }) {
+                Ok(lowered) => changed |= lowered,
+                Err(failed) => {
+                    failure = Some((function_id, failed));
+                    break;
+                }
+            }
         }
-        changed
+        match failure {
+            None => Ok(changed),
+            Some((function_id, failure)) => {
+                Err(failure
+                    .map_diagnostics(|diagnostics| at_user_calls(ssa, function_id, diagnostics)))
+            }
+        }
     }
 
     fn run_on_function(
@@ -356,7 +435,7 @@ impl InstructionLowering {
         fb: &mut HLFunctionBuilder<'_>,
         function_type_info: &FunctionTypeInfo,
         function_value_ranges: Option<&FunctionValueRanges>,
-    ) -> bool {
+    ) -> LoweringResult {
         let context = LoweringContext::new(function_type_info, function_value_ranges);
         let mut changed = false;
         let block_ids: Vec<_> = fb.function.get_blocks().map(|(bid, _)| *bid).collect();
@@ -379,7 +458,7 @@ impl InstructionLowering {
                 let location = instruction.location().clone();
                 if b.emit_with_location(location, |b| {
                     self.try_lower_instruction(b, &context, instruction.as_ref())
-                }) {
+                })? {
                     changed = true;
                 } else {
                     b.emit_located(instruction);
@@ -389,7 +468,7 @@ impl InstructionLowering {
                 b.set_terminator(terminator);
             }
         }
-        changed
+        Ok(changed)
     }
 
     fn try_lower_instruction(
@@ -397,13 +476,13 @@ impl InstructionLowering {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         for lowerer in &self.lowerers {
-            if lowerer.lower_instruction(b, context, instruction) {
-                return true;
+            if lowerer.lower_instruction(b, context, instruction)? {
+                return Ok(true);
             }
         }
-        false
+        Ok(false)
     }
 }
 
@@ -412,15 +491,15 @@ impl Pass for InstructionLowering {
         self.name
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         if !self.fixed_point {
-            self.run_iteration(ssa);
-            return;
+            self.run_iteration(ssa)?;
+            return Ok(());
         }
 
         for _ in 0..ITERATION_LIMIT {
-            if !self.run_iteration(ssa) {
-                return;
+            if !self.run_iteration(ssa)? {
+                return Ok(());
             }
         }
         ice!("instruction lowering did not reach a fixed point");
@@ -501,7 +580,9 @@ mod tests {
             .get_entry_mut()
             .set_terminator(Terminator::Return(returned));
 
-        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::witness_integer_ops()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         (ssa, op)
     }
 

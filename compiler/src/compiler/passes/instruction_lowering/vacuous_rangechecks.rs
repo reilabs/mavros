@@ -4,7 +4,7 @@
 
 use crate::compiler::{
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
         shared::limbs::widest_injective_int_bits,
     },
     ssa::hlssa::{
@@ -25,8 +25,8 @@ impl InstructionLoweringRule for VacuousRangechecks {
         b: &mut HLBlockEmitter<'_>,
         _context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
-        matches!(instruction, OpCode::Rangecheck { max_bits, .. }
-            if *max_bits > widest_injective_int_bits(b.field()))
+    ) -> LoweringResult {
+        Ok(matches!(instruction, OpCode::Rangecheck { max_bits, .. }
+            if *max_bits > widest_injective_int_bits(b.field())))
     }
 }

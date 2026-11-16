@@ -7,7 +7,7 @@
 
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
     passes::shared::value_replacements::ValueReplacements,
     ssa::hlssa::{HLSSA, OpCode, Type},
     util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
@@ -19,8 +19,9 @@ impl Pass for StripWitnessOf {
     fn name(&self) -> &'static str {
         "strip_witness_of"
     }
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         self.do_run(ssa);
+        Ok(())
     }
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]

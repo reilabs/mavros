@@ -7,5 +7,5 @@ pub mod overflow_guard;
 pub mod rewrite_asserts;
 pub mod seq_bounds;
 pub mod shift_guard;
-pub mod unsupported;
+pub mod unreachable;
 pub mod value_replacements;

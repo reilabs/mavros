@@ -1,4 +1,4 @@
-//! Located compiler diagnostics: a program the compiler refuses, reported against the user's
+//! Located compiler diagnostics: why the compiler rejects a program, reported against the user's
 //! source.
 
 use std::{
@@ -18,7 +18,7 @@ use crate::{
     compiler::located::{SourceLocation, SourcePosition},
 };
 
-/// A reason behind a program refusal.
+/// A reason the compiler rejects a program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     /// A one-line statement of the error.
@@ -68,6 +68,13 @@ impl Diagnostic {
     #[must_use]
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
         self.notes.push(note.into());
+        self
+    }
+
+    #[must_use]
+    pub fn relocated(mut self, location: SourceLocation) -> Self {
+        self.location = location;
+        self.source = None;
         self
     }
 

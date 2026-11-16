@@ -44,11 +44,11 @@ use crate::{
     collections::HashMap,
     compiler::{
         diagnostic::Diagnostic,
-        pass_manager::{AnalysisStore, Pass},
+        pass_manager::{AnalysisStore, Pass, PassFailure, PassResult},
         passes::{
             shared::{
                 limbs::widest_injective_int_bits,
-                unsupported::{field_offers, unsupported_on_this_field},
+                unreachable::{field_offers, unreachable_on_this_field},
             },
             wide_witness_ints::multi_cell_int_bits,
         },
@@ -157,7 +157,12 @@ impl Pass for PrepareEntryPoint {
         "prepare_entry_point"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
+        let refusals = Self::param_refusals(ssa);
+        if !refusals.is_empty() {
+            return Err(PassFailure::Unsupported(refusals));
+        }
+
         let layout = Self::wrap_main(
             ssa,
             self.main_is_unconstrained,
@@ -168,6 +173,7 @@ impl Pass for PrepareEntryPoint {
             *sink.borrow_mut() = Some(layout);
         }
         Self::process_unconstrained_calls(ssa);
+        Ok(())
     }
 }
 
@@ -185,9 +191,8 @@ impl PrepareEntryPoint {
     }
 
     /// A diagnostic for every entry-point parameter whose integers the configured field cannot
-    /// carry. The driver asks before this pass runs, so it reports them as errors; the pass refuses
-    /// them too.
-    pub fn param_refusals(ssa: &HLSSA) -> Vec<Diagnostic> {
+    /// carry. The pass asks before it wraps `main`, so it reports them as errors.
+    fn param_refusals(ssa: &HLSSA) -> Vec<Diagnostic> {
         fn refusals(typ: &Type, field: FieldConfig, found: &mut BTreeSet<String>) {
             match &typ.expr {
                 TypeExpr::Int(size) => {
@@ -843,8 +848,10 @@ impl PrepareEntryPoint {
                 e.array_get(input_array, zero)
             }
             TypeExpr::Int(size) => {
+                // The Noir frontend rejects wider entry point integers with a located error, and
+                // `run` asks `param_refusals` before wrapping `main`.
                 if let Some(refusal) = Self::int_param_refusal(*size, e.field()) {
-                    unsupported_on_this_field(format_args!("{refusal}"), e.field());
+                    unreachable_on_this_field(format_args!("{refusal}"), e.field());
                 }
                 let zero = e.int_const(IntBits::zero(32));
                 let field_param = e.array_get(input_array, zero);

@@ -2,7 +2,7 @@
 
 use crate::compiler::{
     passes::{
-        instruction_lowering::{InstructionLoweringRule, LoweringContext},
+        instruction_lowering::{InstructionLoweringRule, LoweringContext, LoweringResult},
         shared::seq_bounds::build_pop_bounds_assert,
     },
     ssa::hlssa::{
@@ -21,7 +21,7 @@ impl InstructionLoweringRule for LowerSlicePop {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let (guard, op) = HLBlockEmitter::unwrap_guard(instruction);
         let OpCode::SlicePop {
             dir,
@@ -30,7 +30,7 @@ impl InstructionLoweringRule for LowerSlicePop {
             slice,
         } = op
         else {
-            return false;
+            return Ok(false);
         };
 
         let slice_ty = context.types().get_value_type(*slice).clone();
@@ -69,6 +69,6 @@ impl InstructionLoweringRule for LowerSlicePop {
             value: shrunk,
             target: CastTarget::Nop,
         });
-        true
+        Ok(true)
     }
 }

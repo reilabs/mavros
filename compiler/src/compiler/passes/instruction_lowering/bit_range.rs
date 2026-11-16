@@ -17,7 +17,7 @@ use crate::compiler::{
     util::biguint_of_limbs,
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 pub struct LowerBitRangeOps {}
 
@@ -27,8 +27,8 @@ impl InstructionLoweringRule for LowerBitRangeOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
-        match instruction {
+    ) -> LoweringResult {
+        Ok(match instruction {
             OpCode::BitRange {
                 result,
                 value,
@@ -39,7 +39,7 @@ impl InstructionLoweringRule for LowerBitRangeOps {
                 true
             }
             _ => false,
-        }
+        })
     }
 }
 

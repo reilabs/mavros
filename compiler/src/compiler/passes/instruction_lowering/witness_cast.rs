@@ -9,7 +9,7 @@ use crate::compiler::ssa::{
     },
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 /// Puts the bit window that truncates in front of a narrowing `Cast` of a witnessed operand.
 ///
@@ -58,14 +58,14 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
+    ) -> LoweringResult {
         let OpCode::Cast {
             result,
             value,
             target,
         } = instruction
         else {
-            return false;
+            return Ok(false);
         };
         let to_bits = match target {
             CastTarget::Int(to_bits) => to_bits,
@@ -75,16 +75,16 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
                     value: *value,
                     target: CastTarget::Int(*to_bits),
                 });
-                return true;
+                return Ok(true);
             }
-            _ => return false,
+            _ => return Ok(false),
         };
 
         let Some(from_bits) = witnessed_width(context, *value, b.field().field_bit_size()) else {
-            return false;
+            return Ok(false);
         };
         if from_bits <= *to_bits {
-            return false;
+            return Ok(false);
         }
 
         // A value already inside the target width has nothing to discard, so the cast is a relabel
@@ -104,7 +104,7 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
             .urange(*value)
             .proves_fits_in_unsigned_bits(*to_bits)
         {
-            return false;
+            return Ok(false);
         }
 
         let window = b.bit_range(*value, 0, *to_bits);
@@ -113,7 +113,7 @@ impl InstructionLoweringRule for LowerWitnessNarrowingCast {
             value: window,
             target: CastTarget::Int(*to_bits),
         });
-        true
+        Ok(true)
     }
 }
 

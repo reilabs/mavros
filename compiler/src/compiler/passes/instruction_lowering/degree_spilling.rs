@@ -9,7 +9,7 @@ use crate::compiler::{
     },
 };
 
-use super::{InstructionLoweringRule, LoweringContext};
+use super::{InstructionLoweringRule, LoweringContext, LoweringResult};
 
 pub struct LowerDegreeSpillingOps {}
 
@@ -19,8 +19,8 @@ impl InstructionLoweringRule for LowerDegreeSpillingOps {
         b: &mut HLBlockEmitter<'_>,
         context: &LoweringContext<'_>,
         instruction: &OpCode,
-    ) -> bool {
-        match instruction {
+    ) -> LoweringResult {
+        Ok(match instruction {
             // Degree spilling is about the _shape_ of the product, not how its operands read.
             OpCode::BinaryArithOp {
                 kind,
@@ -31,7 +31,7 @@ impl InstructionLoweringRule for LowerDegreeSpillingOps {
                 self.lower_mul(b, context.types(), *result, *lhs, *rhs)
             }
             _ => false,
-        }
+        })
     }
 }
 
