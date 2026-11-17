@@ -35,9 +35,9 @@ mod shift;
 mod sign;
 mod spread;
 
-pub(super) use division::divided;
 #[cfg(test)]
 pub(super) use division::EuclideanDivision;
+pub(super) use division::divided;
 pub(super) use f_poly::IdentityShape;
 #[cfg(test)]
 pub(super) use product::division_carries;

@@ -36,10 +36,7 @@ fn bn254_holds_a_product_at_every_width() {
     let injective = widest_injective_int_bits(bn254());
     for bits in [127usize, 128, 129, 253, 254, 320, 1000, 16383, 16384] {
         let widths = limb_widths(bits, witness_limb_bits(bn254()));
-        assert!(
-            product_checks(&widths, injective).is_some(),
-            "int{bits}"
-        );
+        assert!(product_checks(&widths, injective).is_some(), "int{bits}");
     }
 }
 
@@ -69,8 +66,12 @@ fn full_factor(widths: &[usize]) -> Factor {
 /// widest injective width is `injective` cannot hold it.
 fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize>>> {
     let factor = full_factor(widths);
-    let identity =
-        build_f_polynomial(UnsignedProduct, widths, injective, (&factor, &factor, widths))?;
+    let identity = build_f_polynomial(
+        UnsignedProduct,
+        widths,
+        injective,
+        (&factor, &factor, widths),
+    )?;
     Some(planned_written_checks(&identity, widths, false))
 }
 
@@ -307,12 +308,11 @@ fn a_guarded_product_is_checked_only_under_its_guard() {
         );
         let widths = limb_widths(bits, witness_limb_bits(field));
         let k = widths.len();
-        let planned =
-            product_checks(&widths, widest_injective_int_bits(field))
-                .expect("the field holds the product")
-                .into_iter()
-                .flatten()
-                .count();
+        let planned = product_checks(&widths, widest_injective_int_bits(field))
+            .expect("the field holds the product")
+            .into_iter()
+            .flatten()
+            .count();
         let guarded = ops
             .iter()
             .filter(|op| {
