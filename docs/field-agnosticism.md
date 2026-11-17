@@ -102,8 +102,8 @@ bytecode and runs on the VM, witgen and AD both checked against the R1CS. Undern
 - **The R1CS** is generic (`R1CS<F>`, with bn254 as the default): `Driver::generate_r1cs::<F>`
   refuses an `F` other than the program's field, `R1CGen<F>` converts constants with
   `MavrosField::from_element`, and a serialized coefficient is `F::CANONICAL_LIMBS` limbs.
-- **The R1CS artifact** (`r1cs.bin`: a `MAVR1CS` header with format version, field tag and digest)
-  names the field and the format of the system it carries.
+- **The artifact** (`program.mavros`: a `MAVR1CS` header with the format version, compiler version,
+  field tag and digest) names the field and the format of the system it carries.
 - **The WASM path** runs Goldilocks. LLSSA and LLVM read an element's width from `FieldConfig`, and
   the runtime's `__goldilocks_*` entry points (`wasm-runtime/src/goldilocks.rs`) take and return one
   `u64`, because LLVM returns a one-`i64` struct directly on wasm32. A module exports its field
@@ -148,10 +148,9 @@ a carry, which neither column probe reaches.
 **Repeated LogUp** (`L4-logup-challenges`): the driver sizes the argument's repetitions `K` for the
 `--logup-soundness` target before sealing and repeats the argument at independent challenges over
 shared multiplicities, so the pre-commitment witness is unchanged. bn254 keeps `K = 1`, with
-byte-identical constraints and witnesses; `r1cs.bin` (format version 2) and the VM header (format
-version 5) carry `K`. The layout is under `L4-logup-challenges` below. The WASM path repeats the
-argument as the VM does, and a one-repetition module holds exactly the instructions of a single
-argument.
+byte-identical constraints and witnesses; the artifact's witness layout and the VM header both carry
+`K`. The layout is under `L4-logup-challenges` below. The WASM path repeats the argument as the VM
+does, and a one-repetition module holds exactly the instructions of a single argument.
 
 **Cast semantics:** an HLSSA cast across the field boundary is total on every field, but for the
 unchecked narrowing below. `Int(n) → Field` reduces the integer modulo `p`, and `Field → Int(n)`
@@ -287,8 +286,8 @@ stays raw by design until P5. By file (count):
 
 - [x] `mavros-artifacts/src/lib.rs` — `lc_serde` writes each coefficient as its `F::CANONICAL_LIMBS`
       canonical limbs, a fixed-size array (`MavrosField::Limbs`) with no length: four limbs for a
-      bn254 coefficient and one for a Goldilocks one. `r1cs.bin` names the field and the format in
-      its header (`manifest.rs`).
+      bn254 coefficient and one for a Goldilocks one. `program.mavros` names the field and the
+      format in its header (`manifest.rs`).
 - [x] `mavros-artifacts/src/lib.rs` — `InputValueOrdered::field_sizes` answers `F::STORAGE_CELLS`.
 
 ### `L1-noir-frontend` — Frontend field selection and remaining integration gaps (P5)
@@ -639,8 +638,8 @@ argument is repeated K times with independent `(αₖ, βₖ)` pairs and shared 
 sections, in the witness and in the constraints, are K consecutive copies of one repetition's. The
 prover draws all `challenges_size` challenges _independently_ (powers `α, α², …` are invalid for
 this identity) after committing to the pre-commitment witness, and passes them in order to
-`run_witgen_phase2`: challenge `i` sits at `challenges_start() + i`. The layout word is part of
-`r1cs.bin` (format version 2) and of the VM header's constraint layouts (format version 5).
+`run_witgen_phase2`: challenge `i` sits at `challenges_start() + i`. The layout word is part of the
+artifact's witness layout and of the VM header's constraint layouts.
 
 - [x] `compiler/src/compiler/codegen/hlssa_to_r1cs.rs` —
       `compute_logup_soundness`/`logup_soundness_report` + `SoundnessReport` (the formula,

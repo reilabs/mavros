@@ -725,6 +725,25 @@ fn verifier_artifact_cannot_run_as_a_prover() {
 }
 
 #[test]
+fn a_verifier_binary_is_not_a_prover_artifact() {
+    use mavros_artifacts::ArtifactError;
+    use mavros_compiler::driver::Error;
+    let project = common::noir_project("fn main(x: Field) { assert(x * x == 9); }");
+    let (mut driver, r1cs) =
+        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
+    let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
+    let error = driver.artifact(r1cs, verifier).err().unwrap();
+    assert!(
+        matches!(error, Error::Artifact(ArtifactError::Bytecode(_))),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("not a prover artifact"),
+        "{error}"
+    );
+}
+
+#[test]
 fn cli_exports_verifier_separately_without_changing_prover_binary() {
     let project = common::noir_project("fn main(x: Field) -> pub Field { x * x + 3 }");
     let invoke = |extra: &[&str]| {
@@ -741,8 +760,8 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
         );
     };
     invoke(&[]);
-    let prover_path = project.path().join("target/basic.json");
-    let original_prover = std::fs::read(&prover_path).unwrap();
+    let program_path = project.path().join("target/program.mavros");
+    let original_program = std::fs::read(&program_path).unwrap();
     assert!(
         !project
             .path()
@@ -754,12 +773,15 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
         "target/verifier.json",
         "--include-debug-info",
     ]);
-    assert_eq!(std::fs::read(&prover_path).unwrap(), original_prover);
+    assert_eq!(std::fs::read(&program_path).unwrap(), original_program);
     let artifact: serde_json::Value = serde_json::from_slice(
         &std::fs::read(project.path().join("target/verifier.json")).unwrap(),
     )
     .unwrap();
     assert!(artifact.get("constraints").is_none());
+    let program: mavros_artifacts::Artifact =
+        mavros_artifacts::Artifact::from_bytes(&original_program).unwrap();
+    assert_eq!(artifact["circuit_digest"], program.circuit_digest_hex());
     let binary: Vec<u64> = serde_json::from_value(artifact["binary"].clone()).unwrap();
     let wl: mavros_vm::WitnessLayout =
         serde_json::from_value(artifact["witness_layout"].clone()).unwrap();

@@ -17,8 +17,8 @@ use noirc_frontend::{
 use tracing::info;
 
 use mavros_artifacts::{
-    FieldConfig, FieldId, LogupStrides, ManifestParam, MavrosField, ParamVisibility, R1CSArtifact,
-    ReturnSlot, WitnessManifest,
+    Artifact, ArtifactError, FieldConfig, FieldId, LogupStrides, ManifestParam, MavrosField,
+    ParamVisibility, ReturnSlot, WitnessManifest,
 };
 
 use crate::{
@@ -84,7 +84,7 @@ use crate::{
 };
 
 /// Executable VM bytecode plus optional standalone source metadata.
-pub struct BytecodeArtifact {
+pub struct CompiledBytecode {
     pub binary: Vec<u64>,
     pub debug_info: Option<DebugInfo>,
 }
@@ -100,6 +100,9 @@ pub struct EntryColumns {
 /// Default LogUp bits-of-security target when `--logup-soundness` is not given: one repetition on
 /// bn254; on Goldilocks three up to `D = 2^20` table entries and lookups, and four up to `2^31`.
 pub const DEFAULT_LOGUP_SOUNDNESS_BITS: u32 = 128;
+
+/// Recorded in every artifact: the release version of the Mavros workspace.
+pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Driver {
     /// The Noir package being compiled, or `None` for a driver seeded with a hand-built
@@ -171,6 +174,10 @@ pub enum Error {
     /// Missing ABI or inconsistent entry-point/R1CS layouts.
     WitnessManifest(String),
 
+    /// The parts handed to [`Driver::artifact`] do not make an artifact, such as bytecode that is
+    /// not a prover binary for the R1CS.
+    Artifact(ArtifactError),
+
     Toolchain(ToolchainError),
 }
 
@@ -205,6 +212,7 @@ impl std::fmt::Display for Error {
                 write!(f, "an inconsistent R1CS layout: {message}")
             }
             Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
+            Error::Artifact(error) => write!(f, "{error}"),
             Error::Toolchain(error) => write!(f, "{error}"),
         }
     }
@@ -247,7 +255,7 @@ impl Driver {
     /// feature can be prototyped before the frontend supports it.
     ///
     /// Such a driver has no [`Self::abi`], so [`Self::entry_blob_field_count`],
-    /// [`Self::witness_manifest`], [`Self::r1cs_artifact`] and the WASM metadata sidecar are
+    /// [`Self::witness_manifest`], [`Self::artifact`] and the WASM metadata sidecar are
     /// unavailable, and no [`Self::package_root`]: all belong to the Noir package, which an SSA
     /// does not carry.
     ///
@@ -984,7 +992,7 @@ impl Driver {
     pub fn compile_bytecode_artifact(
         &mut self,
         options: CodeGenOptions,
-    ) -> Result<BytecodeArtifact, Error> {
+    ) -> Result<CompiledBytecode, Error> {
         self.compile_vm_artifact(options, WitnessMode::Ad)
     }
 
@@ -1000,7 +1008,7 @@ impl Driver {
     pub fn compile_verifier_bytecode_artifact(
         &mut self,
         options: CodeGenOptions,
-    ) -> Result<BytecodeArtifact, Error> {
+    ) -> Result<CompiledBytecode, Error> {
         self.compile_vm_artifact(options, WitnessMode::Verifier)
     }
 
@@ -1008,7 +1016,7 @@ impl Driver {
         &mut self,
         options: CodeGenOptions,
         mode: WitnessMode,
-    ) -> Result<BytecodeArtifact, Error> {
+    ) -> Result<CompiledBytecode, Error> {
         self.prepare_program_ssa();
         let ssa = self.program_ssa.as_ref().unwrap();
 
@@ -1046,7 +1054,7 @@ impl Driver {
 
         info!(message = %"Program binary generated", binary_size = binary.len() * 8);
 
-        Ok(BytecodeArtifact { binary, debug_info })
+        Ok(CompiledBytecode { binary, debug_info })
     }
 
     pub fn abi(&self) -> &noirc_abi::Abi {
@@ -1112,12 +1120,19 @@ impl Driver {
         Ok(manifest)
     }
 
-    pub fn r1cs_artifact<F: MavrosField>(
+    /// Packs `r1cs` and `bytecode` with this driver's manifest and ABI; needs what
+    /// [`Self::witness_manifest`] needs.
+    pub fn artifact<F: MavrosField>(
         &self,
         r1cs: SealedR1CS<F>,
-    ) -> Result<R1CSArtifact<F>, Error> {
+        bytecode: Vec<u64>,
+    ) -> Result<Artifact<F>, Error> {
+        LogupStrides::try_new(&r1cs.witness_layout, &r1cs.constraints_layout)
+            .map_err(Error::R1csLayoutInvalid)?;
         let manifest = self.witness_manifest(&r1cs)?;
-        Ok(R1CSArtifact::new(manifest, r1cs))
+        let abi = serde_json::to_vec(self.abi()).expect("a Noir ABI always serializes to JSON");
+        Artifact::new(COMPILER_VERSION.to_string(), manifest, r1cs, bytecode, abi)
+            .map_err(Error::Artifact)
     }
 
     /// The parameters only; the return is computed, not an input.
@@ -1582,6 +1597,25 @@ mod tests {
         inconsistent.witness_layout.logup_repetitions = 1;
         let options = crate::compiler::codegen::CodeGenOptions::default();
         match driver.compile_llvm_targets(false, &inconsistent, None, options) {
+            Err(Error::R1csLayoutInvalid(message)) => {
+                assert_eq!(message, "1 LogUp repetitions over 0 multiplicities");
+            }
+            other => panic!("expected an inconsistent layout, got {other:?}"),
+        }
+    }
+
+    /// Packing an artifact refuses that layout under the same error.
+    #[test]
+    fn packing_an_artifact_refuses_an_inconsistent_logup_layout() {
+        let (driver, r1cs, _scratch) = empty_goldilocks_program();
+        let mut inconsistent = mavros_artifacts::R1CS::<mavros_artifacts::Goldilocks> {
+            witness_layout: r1cs.witness_layout,
+            constraints_layout: r1cs.constraints_layout,
+            constraints: vec![],
+        };
+        inconsistent.witness_layout.logup_repetitions = 1;
+        let sealed = mavros_artifacts::SealedR1CS::new(inconsistent);
+        match driver.artifact(sealed, vec![]) {
             Err(Error::R1csLayoutInvalid(message)) => {
                 assert_eq!(message, "1 LogUp repetitions over 0 multiplicities");
             }

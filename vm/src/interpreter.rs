@@ -263,7 +263,7 @@ pub(crate) fn prepare_dispatch(program: &mut [u64], code_start: usize) {
     let mut current_offset = code_start;
     while current_offset < program.len() {
         let opcode = program[current_offset];
-        if opcode == u64::MAX {
+        if opcode == bytecode::FUNCTION_MARKER {
             current_offset += 2;
             continue;
         }
@@ -1159,12 +1159,7 @@ fn run_constraint_program<F: mavros_artifacts::MavrosField>(
             }.to_string()),
             stack_trace: Vec::new(),
         })?;
-    if header.constraint_layouts
-        != Some(bytecode::ConstraintLayouts::new(
-            witness_layout,
-            constraints_layout,
-        ))
-    {
+    if !header.has_layouts(witness_layout, constraints_layout) {
         return Err(TrapError {
             message: Some("constraint layouts do not match bytecode".to_string()),
             stack_trace: Vec::new(),

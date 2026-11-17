@@ -210,7 +210,7 @@ pub fn compile_bytecode(
 pub fn compile_bytecode_artifact(
     driver: &mut Driver,
     options: crate::compiler::codegen::CodeGenOptions,
-) -> Result<crate::driver::BytecodeArtifact, Error> {
+) -> Result<crate::driver::CompiledBytecode, Error> {
     Ok(driver.compile_bytecode_artifact(options)?)
 }
 
@@ -226,7 +226,7 @@ pub fn compile_verifier_bytecode(
 pub fn compile_verifier_bytecode_artifact(
     driver: &mut Driver,
     options: crate::compiler::codegen::CodeGenOptions,
-) -> Result<crate::driver::BytecodeArtifact, Error> {
+) -> Result<crate::driver::CompiledBytecode, Error> {
     Ok(driver.compile_verifier_bytecode_artifact(options)?)
 }
 

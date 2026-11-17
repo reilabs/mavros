@@ -226,7 +226,7 @@ constant one, public parameters, surviving private parameters, internal witnesse
 returns in that order. The constant, public parameters and all returns are pinned. Private
 parameters may be elided only as a whole; integer range checks keep otherwise unused parameters
 live. Synthetic source origins let the R1CS generator recover the surviving columns for the
-`r1cs.bin` witness manifest. Return columns are constrained to the computation; an expected `return`
+artifact's witness manifest. Return columns are constrained to the computation; an expected `return`
 in `Prover.toml` is checked by the host after witness generation.
 
 ### Stage 6: R1CS Generation and Further Optimization
