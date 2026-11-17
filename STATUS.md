@@ -1495,7 +1495,7 @@
 | noir/test_programs/execution_success/simple_print | ✅ | ✅ | 0 | 2 | 608 | 1692 | 24907 | 264573 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/simple_print | ✅ | ✅ | 0 | 2 | 568 | 1692 | 19578 | 259233 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/simple_program_addition | ✅ | ✅ | 1 | 3 | 1104 | 2079 | 25800 | 265633 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
-| noir/test_programs/execution_success/simple_program_addition | ✅ | ✅ | 1 | 3 | 1040 | 2077 | 20020 | 259836 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
+| noir/test_programs/execution_success/simple_program_addition | ✅ | ✅ | 1 | 3 | 1040 | 2077 | - | - | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 💥 | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | goldilocks |
 | noir/test_programs/execution_success/simple_radix | ✅ | ✅ | 7 | 5 | 4696 | 5017 | 34857 | 275365 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
 | noir/test_programs/execution_success/simple_radix | ✅ | ✅ | 7 | 5 | 4536 | 5016 | 23015 | 263504 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | goldilocks |
 | noir/test_programs/execution_success/simple_shield | ✅ | ✅ | 588009 | 971548 | 272824 | 204846 | 416778 | 705103 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | bn254 |
@@ -1766,4 +1766,4 @@
 Success rates count passed or not-applicable stages; ignored tests are excluded.
 
 - **bn254 success rate: 100.0%** (14064/14064 stages)
-- **goldilocks success rate: 84.0%** (11818/14064 stages)
+- **goldilocks success rate: 84.0%** (11811/14064 stages)
