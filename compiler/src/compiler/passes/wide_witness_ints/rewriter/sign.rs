@@ -28,6 +28,10 @@ impl IdentityShape for SignedProduct {
     fn num_linear_terms(&self) -> usize {
         1
     }
+
+    fn has_negative_terms(&self) -> bool {
+        true
+    }
 }
 
 impl<'a> Identity<'a> for SignedProduct {

@@ -11,6 +11,9 @@ pub(super) struct FPolynomial<'a, S: IdentityShape> {
     /// The degree of the `F` polynomial
     pub(super) degree: usize,
 
+    /// `k`: the number of limbs of each factor.
+    num_limbs: usize,
+
     /// The terms `F` sums, each `±lhs·rhs` or `±lhs` of factors.
     pub(super) terms: Vec<Term<'a>>,
 
@@ -41,6 +44,11 @@ pub(in super::super) trait IdentityShape: fmt::Debug + Sync {
         false
     }
 
+    /// Whether any of its terms is subtracted, so that a carry can be negative.
+    fn has_negative_terms(&self) -> bool {
+        false
+    }
+
     /// Whether an identity of this shape holds at limb `widths`.
     fn admits(&self, widths: &[usize], injective: usize) -> bool {
         shape_params(self, widths, injective).is_some()
@@ -60,6 +68,7 @@ fn shape_params<S: IdentityShape + ?Sized>(
         shape.num_products(),
         shape.num_linear_terms(),
         shape.is_checked(),
+        shape.has_negative_terms(),
     )?;
     (params.t <= degree(shape.num_products(), widths.len()) + 1).then_some(params)
 }
@@ -96,6 +105,7 @@ fn f_polynomial_params(
     num_quadratic_terms: usize,
     num_linear_terms: usize,
     is_checked: bool,
+    has_negative_terms: bool,
 ) -> Option<FPolynomialParams> {
     let k = widths.len();
     if k < 2 {
@@ -119,26 +129,30 @@ fn f_polynomial_params(
     let max_partial_product_carry = (&low_limbs_max_value * (k - 1))
         .max(&low_limbs_max_value * (k - 2) + &top_limb_max_value * 2u8);
     let max_carry = max_partial_product_carry * num_quadratic_terms + num_linear_terms;
-    let carry_check_bits = max_carry.bits() as usize;
+    let carry_bits = max_carry.bits() as usize;
+    let (carry_check_bits, carry_offset_bits, sign_bits) = if has_negative_terms {
+        (carry_bits + 1, Some(carry_bits), 1)
+    } else {
+        (carry_bits, None, 0)
+    };
 
     if is_checked {
         let group_size = injective_integer_width.checked_sub(carry_check_bits)? / low_limbs_width;
         (group_size > 0).then_some(FPolynomialParams {
             carry_check_bits,
-            carry_offset_bits: None,
+            carry_offset_bits,
             group_size,
             t: k,
-            pure_bits: low_limbs_width + carry_check_bits.max(low_limbs_width + 1),
+            pure_bits: low_limbs_width + carry_bits.max(low_limbs_width + 1) + sign_bits,
         })
     } else {
-        let group_size =
-            injective_integer_width.saturating_sub(carry_check_bits + 1) / low_limbs_width;
+        let group_size = injective_integer_width.saturating_sub(carry_check_bits) / low_limbs_width;
         (t == 0 || group_size > 0).then_some(FPolynomialParams {
-            carry_check_bits: carry_check_bits + 1,
-            carry_offset_bits: Some(carry_check_bits),
+            carry_check_bits,
+            carry_offset_bits,
             group_size,
             t,
-            pure_bits: low_limbs_width + carry_check_bits.max(low_limbs_width) + 1,
+            pure_bits: low_limbs_width + carry_bits.max(low_limbs_width) + sign_bits,
         })
     }
 }
@@ -191,7 +205,7 @@ impl<S: IdentityShape> FPolynomial<'_, S> {
 
     pub(super) fn num_committed_carries(&self) -> usize {
         if self.is_checked() {
-            self.degree / 2
+            self.num_limbs - 1
         } else {
             self.degree
         }
@@ -230,8 +244,12 @@ pub(super) fn build_f_polynomial<'a, S: Identity<'a>>(
 ) -> Option<FPolynomial<'a, S>> {
     let params = shape_params(&shape, widths, injective)?;
     let (terms, answer) = shape.terms(factors);
+    if !shape.has_negative_terms() && terms.iter().any(|t| t.polarity == Polarity::Negative) {
+        ice!("{shape:?} subtracts a term, but its carries are planned as non-negative");
+    }
     let mut identity = FPolynomial {
         degree: degree(shape.num_products(), widths.len()),
+        num_limbs: widths.len(),
         terms,
         answer,
         blocks: Vec::new(),
