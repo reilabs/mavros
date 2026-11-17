@@ -24,8 +24,8 @@ pub(super) fn limb_widths(bits: usize, limb_bits: usize) -> Vec<usize> {
 pub(super) fn limb_types(ty: &Type, limb_config: &LimbConfig) -> Vec<Type> {
     match &ty.expr {
         TypeExpr::WitnessOf(inner) => match &inner.expr {
-            TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field) => {
-                limb_widths(*bits, limb_config.limb_bits)
+            TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field()) => {
+                limb_widths(*bits, limb_config.limb_bits())
                     .into_iter()
                     .map(|width| Type::witness_of(Type::int(width)))
                     .collect()
@@ -63,8 +63,8 @@ pub(super) fn limb_types(ty: &Type, limb_config: &LimbConfig) -> Vec<Type> {
 /// the modulus. Reassembling an element costs interpreter work, not constraints.
 fn element_limb_types(ty: &Type, limb_config: &LimbConfig) -> Vec<Type> {
     match &ty.expr {
-        TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field) => {
-            limb_widths(*bits, limb_config.limb_bits)
+        TypeExpr::Int(bits) if *bits > multi_cell_int_bits(limb_config.field()) => {
+            limb_widths(*bits, limb_config.limb_bits())
                 .into_iter()
                 .map(Type::int)
                 .collect()

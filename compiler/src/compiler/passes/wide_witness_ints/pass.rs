@@ -32,7 +32,7 @@ impl Pass for WideWitnessInts {
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
         let limb_config = store.get::<LimbConfig>();
-        let field = limb_config.field;
+        let field = limb_config.field();
         let globals = Globals::split(ssa, limb_config);
 
         let type_info = store.get::<TypeInfo>();

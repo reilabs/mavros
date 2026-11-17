@@ -21,7 +21,7 @@ pub(super) fn plan_function(
     type_info: &TypeInfo,
     limb_config: &LimbConfig,
 ) -> HashMap<ValueId, Vec<ValueId>> {
-    let field = limb_config.field;
+    let field = limb_config.field();
     let func = ssa.get_function(fid);
     let fti = type_info.get_function(fid);
     let mut value_map: HashMap<ValueId, Vec<ValueId>> = HashMap::default();
@@ -87,7 +87,7 @@ pub(super) fn plan_function(
                         else {
                             continue;
                         };
-                        (*result, limb_widths(bits, limb_config.limb_bits).len())
+                        (*result, limb_widths(bits, limb_config.limb_bits()).len())
                     }
                     // No conversion, so the result stands for whatever the source does.
                     //

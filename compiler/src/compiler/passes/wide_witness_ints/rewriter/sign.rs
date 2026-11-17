@@ -2,14 +2,11 @@ use super::{
     super::types::limb_widths,
     CarryOut, Rewriter,
     division::Answer,
-    f_poly::{Factor, Limb, Polarity, Term, build_f_polynomial},
+    f_poly::{Answer as PolynomialAnswer, Factor, Identity, IdentityShape, Limb, Polarity, Term},
 };
 
 use crate::compiler::{
-    passes::shared::{
-        limbs::widest_injective_int_bits, overflow_guard::abs_as_u,
-        unsupported::unsupported_on_this_field,
-    },
+    passes::shared::overflow_guard::abs_as_u,
     ssa::{
         ValueId,
         hlssa::{BinaryArithOpKind, CastTarget, builder::HLEmitter},
@@ -18,6 +15,43 @@ use crate::compiler::{
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 use num_traits::One;
+
+/// `a·b − c = 0` of two's complement factors, with `c` given.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SignedProduct;
+
+impl IdentityShape for SignedProduct {
+    fn num_products(&self) -> usize {
+        1
+    }
+
+    fn num_linear_terms(&self) -> usize {
+        1
+    }
+}
+
+impl<'a> Identity<'a> for SignedProduct {
+    /// `a`, `b` and `c`.
+    type Factors = (&'a Factor, &'a Factor, &'a Factor);
+
+    fn terms(self, (a, b, c): Self::Factors) -> (Vec<Term<'a>>, Option<PolynomialAnswer<'a>>) {
+        let terms = vec![
+            Term {
+                polarity: Polarity::Positive,
+                lhs: a,
+                rhs: Some(b),
+                gated: true,
+            },
+            Term {
+                polarity: Polarity::Negative,
+                lhs: c,
+                rhs: None,
+                gated: true,
+            },
+        ];
+        (terms, None)
+    }
+}
 
 /// A sign bit as the signed gadgets read it.
 #[derive(Clone, Copy, Debug)]
@@ -59,30 +93,7 @@ impl Rewriter<'_> {
         let c_limbs = self.chain_limbs_of(&c, widths.len());
         let c_offset = self.offset_factor_of(c_limbs.clone(), &widths);
 
-        let terms = vec![
-            Term {
-                polarity: Polarity::Positive,
-                lhs: &a,
-                rhs: Some(b),
-                gated: true,
-            },
-            Term {
-                polarity: Polarity::Negative,
-                lhs: &c_offset,
-                rhs: None,
-                gated: true,
-            },
-        ];
-        let identity =
-            build_f_polynomial(&widths, widest_injective_int_bits(self.field()), terms, None)
-                .unwrap_or_else(|| {
-                unsupported_on_this_field(
-                    format_args!(
-                        "a {bits}-bit signed multiplication is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
-                    ),
-                    self.field(),
-                )
-            });
+        let identity = self.identity(SignedProduct, &widths, (&a, b, &c_offset));
         self.evaluate_f_poly(&identity, guard);
 
         let answer = self.limb_fields(c_limbs);

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::compiler::ssa::ValueId;
 use num_traits::{One, Zero};
 
@@ -5,7 +7,7 @@ use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
 #[derive(Clone)]
-pub(super) struct FPolynomial<'a> {
+pub(super) struct FPolynomial<'a, S: IdentityShape> {
     /// The degree of the `F` polynomial
     pub(super) degree: usize,
 
@@ -21,6 +23,50 @@ pub(super) struct FPolynomial<'a> {
 
     /// What the identity is checked with.
     params: FPolynomialParams,
+
+    /// Which identity it is.
+    shape: S,
+}
+
+/// The shape of an identity. Used for finding sound parameters.
+pub(in super::super) trait IdentityShape: fmt::Debug + Sync {
+    /// The number of `±lhs·rhs` terms.
+    fn num_products(&self) -> usize;
+
+    /// The number of `±lhs` terms.
+    fn num_linear_terms(&self) -> usize;
+
+    /// Whether it is checked against an answer.
+    fn is_checked(&self) -> bool {
+        false
+    }
+
+    /// Whether an identity of this shape holds at limb `widths`.
+    fn admits(&self, widths: &[usize], injective: usize) -> bool {
+        shape_params(self, widths, injective).is_some()
+    }
+}
+
+/// What an identity of `shape` at limb `widths` is checked with, or [`None`] where the field
+/// cannot hold it.
+fn shape_params<S: IdentityShape + ?Sized>(
+    shape: &S,
+    widths: &[usize],
+    injective: usize,
+) -> Option<FPolynomialParams> {
+    let params = f_polynomial_params(
+        widths,
+        injective,
+        shape.num_products(),
+        shape.num_linear_terms(),
+        shape.is_checked(),
+    )?;
+    (params.t <= degree(shape.num_products(), widths.len()) + 1).then_some(params)
+}
+
+/// The degree of `F` at `k` limbs.
+fn degree(products: usize, k: usize) -> usize {
+    if products > 0 { 2 * k - 2 } else { k - 1 }
 }
 
 /// What an identity is checked with, from [`f_polynomial_params`].
@@ -132,7 +178,7 @@ pub(super) enum Answer<'a> {
     Given(&'a Factor),
 }
 
-impl<'a> FPolynomial<'a> {
+impl<S: IdentityShape> FPolynomial<'_, S> {
     /// The columns the carry chain writes a witness from: a carry out of each committed one, and
     /// an answer limb from each of a witnessed answer's.
     pub(super) fn carry_chain_len(&self) -> usize {
@@ -153,7 +199,7 @@ impl<'a> FPolynomial<'a> {
 
     /// Whether the identity is checked against a known answer.
     fn is_checked(&self) -> bool {
-        self.answer.is_some()
+        self.shape.is_checked()
     }
 
     pub(super) fn carry_offset_bits(&self) -> Option<usize> {
@@ -165,32 +211,32 @@ impl<'a> FPolynomial<'a> {
     }
 }
 
-pub(super) fn build_f_polynomial<'a>(
+/// An identity the lowering builds, which lays out its own terms, so they are of its shape.
+pub(super) trait Identity<'a>: IdentityShape + Copy {
+    /// What it is built from.
+    type Factors;
+
+    /// Its terms over `factors`, and the answer they are held to.
+    fn terms(self, factors: Self::Factors) -> (Vec<Term<'a>>, Option<Answer<'a>>);
+}
+
+/// The identity `shape` lays out over `factors` at limb `widths`; or [`None`] exactly where
+/// `shape` does not [admit](IdentityShape::admits) `widths`.
+pub(super) fn build_f_polynomial<'a, S: Identity<'a>>(
+    shape: S,
     widths: &[usize],
     injective: usize,
-    terms: Vec<Term<'a>>,
-    answer: Option<Answer<'a>>,
-) -> Option<FPolynomial<'a>> {
-    let products = terms.iter().filter(|term| term.rhs.is_some()).count();
-    let params = f_polynomial_params(
-        widths,
-        injective,
-        products,
-        terms.len() - products,
-        answer.is_some(),
-    )?;
-    // A product reaches `2k − 1` columns, and a single factor `k`.
-    let k = widths.len();
-    let degree = if products > 0 { 2 * k - 2 } else { k - 1 };
-    if params.t > degree + 1 {
-        return None;
-    }
+    factors: S::Factors,
+) -> Option<FPolynomial<'a, S>> {
+    let params = shape_params(&shape, widths, injective)?;
+    let (terms, answer) = shape.terms(factors);
     let mut identity = FPolynomial {
-        degree,
+        degree: degree(shape.num_products(), widths.len()),
         terms,
         answer,
         blocks: Vec::new(),
         params,
+        shape,
     };
     let committed_carries = identity.num_committed_carries();
     let certified = params.t;

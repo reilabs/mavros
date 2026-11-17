@@ -6,7 +6,11 @@ use crate::{
                 single_cell_product_fits, widest_injective_int_bits, witness_limb_bits,
             },
             wide_witness_ints::{
-                rewriter::f_poly::{Answer, Factor, Limb, Polarity, Term, build_f_polynomial},
+                rewriter::{
+                    division::EuclideanDivision,
+                    f_poly::{FPolynomial, Factor, IdentityShape, Limb, build_f_polynomial},
+                    product::UnsignedProduct,
+                },
                 test_utils::{
                     bn254, emitted, fields, guard_every_instruction, limbed_widths,
                     operation_with_in, run_pass,
@@ -25,25 +29,6 @@ use crate::compiler::Field;
 use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
 
-/// A checked schoolbook's terms: `factor · factor`, plus `factor` where `addend`.
-fn schoolbook_terms(factor: &Factor, addend: bool) -> Vec<Term<'_>> {
-    let mut terms = vec![Term {
-        polarity: Polarity::Positive,
-        lhs: factor,
-        rhs: Some(factor),
-        gated: true,
-    }];
-    if addend {
-        terms.push(Term {
-            polarity: Polarity::Positive,
-            lhs: factor,
-            rhs: None,
-            gated: false,
-        });
-    }
-    terms
-}
-
 /// bn254 plans a schoolbook product, and the `q·d + r` of a division, at every width class it
 /// has, so neither ever reaches [`unsupported_on_this_field`].
 #[test]
@@ -52,7 +37,7 @@ fn bn254_holds_a_product_at_every_width() {
     for bits in [127usize, 128, 129, 253, 254, 320, 1000, 16383, 16384] {
         let widths = limb_widths(bits, witness_limb_bits(bn254()));
         assert!(
-            planned_written_checks(&widths, injective, false, false).is_some(),
+            product_checks(&widths, injective).is_some(),
             "int{bits}"
         );
     }
@@ -74,25 +59,29 @@ fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
     product_with(field, bits, Type::witness_of(Type::int(bits)))
 }
 
-/// The range check on each witness a checked schoolbook at limb `widths` writes after its
-/// operands, in the order they are written, [`None`] for one nothing checks; or [`None`] if a
-/// field whose widest injective width is `injective` cannot hold it. Its operands are full-range
-/// witnesses, the left one also an addend where `addend`.
-fn planned_written_checks(
-    widths: &[usize],
-    injective: usize,
-    addend: bool,
-    pinned: bool,
-) -> Option<Vec<Option<usize>>> {
-    // The planner reads only the factor's shape.
+/// A full-range witnessed factor at limb `widths`; the planner reads only its shape.
+fn full_factor(widths: &[usize]) -> Factor {
     let limbs = widths.iter().map(|_| Limb::Value(ValueId(0))).collect();
-    let factor = Factor::new(limbs, widths, true, None);
-    let identity = build_f_polynomial(
-        widths,
-        injective,
-        schoolbook_terms(&factor, addend),
-        Some(Answer::Unknown(widths)),
-    )?;
+    Factor::new(limbs, widths, true, None)
+}
+
+/// [`planned_written_checks`] of a product of full-range witnesses, or [`None`] if a field whose
+/// widest injective width is `injective` cannot hold it.
+fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize>>> {
+    let factor = full_factor(widths);
+    let identity =
+        build_f_polynomial(UnsignedProduct, widths, injective, (&factor, &factor, widths))?;
+    Some(planned_written_checks(&identity, widths, false))
+}
+
+/// The range check on each witness `identity` at limb `widths` writes after its operands, in the
+/// order they are written, [`None`] for one nothing checks. The answer's limbs are written too
+/// unless `pinned`.
+fn planned_written_checks<S: IdentityShape>(
+    identity: &FPolynomial<'_, S>,
+    widths: &[usize],
+    pinned: bool,
+) -> Vec<Option<usize>> {
     let count = widths.len();
     let mut expected = Vec::new();
     for (column, &width) in widths.iter().enumerate() {
@@ -109,7 +98,7 @@ fn planned_written_checks(
             );
         }
     }
-    Some(expected)
+    expected
 }
 
 /// Every carry a product witnesses is range-checked at the width its identity gives, and every
@@ -132,9 +121,8 @@ fn every_carry_and_every_limb_of_a_product_is_bounded() {
                 ("witnessed", Type::witness_of(Type::int(bits))),
                 ("pure", Type::int(bits)),
             ] {
-                let expected =
-                    planned_written_checks(&widths, widest_injective_int_bits(field), false, false)
-                        .expect("the field holds the identity");
+                let expected = product_checks(&widths, widest_injective_int_bits(field))
+                    .expect("the field holds the identity");
 
                 let mut ssa = product_with(field, bits, rhs_type);
                 run_pass(&mut ssa);
@@ -320,7 +308,7 @@ fn a_guarded_product_is_checked_only_under_its_guard() {
         let widths = limb_widths(bits, witness_limb_bits(field));
         let k = widths.len();
         let planned =
-            planned_written_checks(&widths, widest_injective_int_bits(field), false, false)
+            product_checks(&widths, widest_injective_int_bits(field))
                 .expect("the field holds the product")
                 .into_iter()
                 .flatten()
@@ -423,6 +411,13 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
 
 /// The range check on each witness the division's schoolbook writes, in order, at full operand ranges.
 pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Option<usize>> {
-    planned_written_checks(widths, widest_injective_int_bits(field), true, true)
-        .expect("the field holds the division's identity")
+    let factor = full_factor(widths);
+    let identity = build_f_polynomial(
+        EuclideanDivision,
+        widths,
+        widest_injective_int_bits(field),
+        (&factor, &factor, &factor, &factor),
+    )
+    .expect("the field holds the division's identity");
+    planned_written_checks(&identity, widths, true)
 }

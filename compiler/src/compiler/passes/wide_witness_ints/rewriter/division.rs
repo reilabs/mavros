@@ -1,9 +1,6 @@
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
-    passes::shared::{
-        divmod_guard::nonzero_hint_divisor, limbs::widest_injective_int_bits,
-        unsupported::unsupported_on_this_field,
-    },
+    passes::shared::divmod_guard::nonzero_hint_divisor,
     ssa::{
         ValueId,
         hlssa::{BinaryArithOpKind, CastTarget, OpCode, builder::HLEmitter},
@@ -13,7 +10,7 @@ use crate::compiler::{
 use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
-    f_poly::{Answer as PolynomialAnswer, Factor, Limb, Polarity, Term, build_f_polynomial},
+    f_poly::{Answer as PolynomialAnswer, Factor, Identity, IdentityShape, Limb, Polarity, Term},
     product::past_the_single_cell_product,
     sign::Sign,
 };
@@ -24,6 +21,47 @@ use num_traits::{One, Zero};
 
 /// What decides both answers of a division: dividend, divisor, guard, and whether it is signed.
 pub(super) type Division = (ValueId, ValueId, Option<ValueId>, bool);
+
+/// `q·d + r = n`, held to the dividend.
+#[derive(Clone, Copy, Debug)]
+pub(in super::super) struct EuclideanDivision;
+
+impl IdentityShape for EuclideanDivision {
+    fn num_products(&self) -> usize {
+        1
+    }
+
+    fn num_linear_terms(&self) -> usize {
+        1
+    }
+
+    fn is_checked(&self) -> bool {
+        true
+    }
+}
+
+impl<'a> Identity<'a> for EuclideanDivision {
+    /// `q`, `d`, `r` and `n`.
+    type Factors = (&'a Factor, &'a Factor, &'a Factor, &'a Factor);
+
+    fn terms(self, (q, d, r, n): Self::Factors) -> (Vec<Term<'a>>, Option<PolynomialAnswer<'a>>) {
+        let terms = vec![
+            Term {
+                polarity: Polarity::Positive,
+                lhs: q,
+                rhs: Some(d),
+                gated: false,
+            },
+            Term {
+                polarity: Polarity::Positive,
+                lhs: r,
+                rhs: None,
+                gated: false,
+            },
+        ];
+        (terms, Some(PolynomialAnswer::Given(n)))
+    }
+}
 
 /// One answer of a division, as far as it has been built.
 #[derive(Clone)]
@@ -181,34 +219,7 @@ impl Rewriter<'_> {
         let q = self.witness_hinted(quotient_hint, bits, widths, &quotient_max);
         let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
 
-        let terms = vec![
-            Term {
-                polarity: Polarity::Positive,
-                lhs: &q,
-                rhs: Some(d),
-                gated: false,
-            },
-            Term {
-                polarity: Polarity::Positive,
-                lhs: &r,
-                rhs: None,
-                gated: false,
-            },
-        ];
-        let identity = build_f_polynomial(
-            widths,
-            widest_injective_int_bits(self.field()),
-            terms,
-            Some(PolynomialAnswer::Given(n)),
-        )
-        .unwrap_or_else(|| {
-            unsupported_on_this_field(
-                format_args!(
-                    "a {bits}-bit unsigned division is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
-                ),
-                self.field(),
-            )
-        });
+        let identity = self.identity(EuclideanDivision, widths, (&q, d, &r, n));
         self.evaluate_f_poly(&identity, guard);
 
         // `r < d` reads only the limbs either side can reach, as above them both are zero.

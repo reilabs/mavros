@@ -37,8 +37,11 @@ mod spread;
 
 pub(super) use division::divided;
 #[cfg(test)]
+pub(super) use division::EuclideanDivision;
+pub(super) use f_poly::IdentityShape;
+#[cfg(test)]
 pub(super) use product::division_carries;
-pub(super) use product::multiplied;
+pub(super) use product::{lowered_identity, multiplied};
 /// One instruction's worth of rewriting, plus the minting the gadgets need.
 ///
 /// `ssa` is borrowed immutably, which is enough to mint a value or intern a constant: the function
@@ -161,11 +164,11 @@ impl<'a> Rewriter<'a> {
     }
 
     fn limb_bits(&self) -> usize {
-        self.limb_config().limb_bits
+        self.limb_config().limb_bits()
     }
 
     fn field(&self) -> FieldConfig {
-        self.limb_config().field
+        self.limb_config().field()
     }
     fn limbs(&self, value: ValueId) -> Vec<ValueId> {
         limbs_of(self.value_map, value)

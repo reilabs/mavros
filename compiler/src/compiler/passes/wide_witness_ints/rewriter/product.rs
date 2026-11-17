@@ -1,17 +1,17 @@
-use super::f_poly::{Answer, FPolynomial, Factor, Limb, Polarity, Term, build_f_polynomial};
+use super::f_poly::{
+    Answer, FPolynomial, Factor, Identity, IdentityShape, Limb, Polarity, Term, build_f_polynomial,
+};
 use super::{
-    Operands, Rewriter,
+    Operands, Rewriter, divided,
+    division::EuclideanDivision,
     lower::{unguarded, witnessed_width},
+    sign::SignedProduct,
 };
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     passes::{
-        shared::{
-            limbs::{
-                single_cell_product_fits, single_cell_signed_product_fits,
-                widest_injective_int_bits,
-            },
-            unsupported::unsupported_on_this_field,
+        shared::limbs::{
+            single_cell_product_fits, single_cell_signed_product_fits, widest_injective_int_bits,
         },
         wide_witness_ints::types::limb_widths,
     },
@@ -81,29 +81,33 @@ impl Rewriter<'_> {
         let widths = limb_widths(bits, self.limb_bits());
         let lhs = self.factor(lhs, bits, &widths);
         let rhs = self.factor(rhs, bits, &widths);
-        let terms = vec![Term {
-            polarity: Polarity::Positive,
-            lhs: &lhs,
-            rhs: Some(&rhs),
-            gated: true,
-        }];
-        let identity = build_f_polynomial(
-            &widths,
-            widest_injective_int_bits(self.field()),
-            terms,
-            Some(Answer::Unknown(&widths)),
-        )
-        .unwrap_or_else(|| {
-            unsupported_on_this_field(
-                format_args!(
-                    "a {bits}-bit unsigned multiplication is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
-                ),
-                self.field(),
-            )
-        });
+        let identity = self.identity(UnsignedProduct, &widths, (&lhs, &rhs, &widths));
         let answer = self.evaluate_f_poly(&identity, guard);
         self.deliver(*result, answer, &widths, bits, guard);
         true
+    }
+
+    /// The identity `shape` lays out over `factors` at limb `widths`.
+    ///
+    /// [`LimbConfig`](super::super::limb_config::LimbConfig) admitted every identity the program
+    /// lowers at this limb, so the field holds it.
+    pub(super) fn identity<'f, S: Identity<'f>>(
+        &self,
+        shape: S,
+        widths: &[usize],
+        factors: S::Factors,
+    ) -> FPolynomial<'f, S> {
+        build_f_polynomial(
+            shape,
+            widths,
+            widest_injective_int_bits(self.field()),
+            factors,
+        )
+        .unwrap_or_else(|| {
+            ice_unreachable!(
+                "the limb config admits every identity it lowers, but not {shape:?} at {widths:?}"
+            )
+        })
     }
 
     /// An operand of the schoolbook as its limbs at `bits`, with their bounds.
@@ -140,9 +144,9 @@ impl Rewriter<'_> {
 
     /// Witnesses and checks `f_polynomial`,
     /// Returning the answer's limbs where it witnesses them.
-    pub(super) fn evaluate_f_poly(
+    pub(super) fn evaluate_f_poly<S: IdentityShape>(
         &mut self,
-        f_polynomial: &FPolynomial<'_>,
+        f_polynomial: &FPolynomial<'_, S>,
         guard: Option<ValueId>,
     ) -> Vec<ValueId> {
         let terms = &f_polynomial.terms[..];
@@ -177,9 +181,9 @@ impl Rewriter<'_> {
 
     /// What the polynomial's carry chain witnesses:
     /// the answer's limbs, where they are solved, and each carry.
-    fn witness_columns(
+    fn witness_columns<S: IdentityShape>(
         &mut self,
-        f_polynomial: &FPolynomial<'_>,
+        f_polynomial: &FPolynomial<'_, S>,
         range_check_guard: Option<ValueId>,
         pure_range_check_guard: Option<ValueId>,
     ) -> (Vec<ValueId>, Vec<ValueId>) {
@@ -224,9 +228,9 @@ impl Rewriter<'_> {
     }
 
     /// The carry out of a column whose running sum is `running`, as its hint and its witness.
-    fn witness_carry(
+    fn witness_carry<S: IdentityShape>(
         &mut self,
-        identity: &FPolynomial<'_>,
+        identity: &FPolynomial<'_, S>,
         running: ValueId,
     ) -> (ValueId, ValueId) {
         match identity.carry_offset_bits() {
@@ -255,9 +259,9 @@ impl Rewriter<'_> {
     }
 
     /// Range check the carry out of each block.
-    fn check_block_carries(
+    fn check_block_carries<S: IdentityShape>(
         &mut self,
-        identity: &FPolynomial<'_>,
+        identity: &FPolynomial<'_, S>,
         carries: &[ValueId],
         check: Option<ValueId>,
     ) {
@@ -283,9 +287,9 @@ impl Rewriter<'_> {
     }
 
     /// The limbs of each term's factors as field elements, a gated term's left factor scaled by `flag`.
-    fn terms_as_fields(
+    fn terms_as_fields<S: IdentityShape>(
         &mut self,
-        f_polynomial: &FPolynomial<'_>,
+        f_polynomial: &FPolynomial<'_, S>,
         flag: Option<ValueId>,
     ) -> Vec<(Vec<ValueId>, Option<Vec<ValueId>>)> {
         let terms = &f_polynomial.terms[..];
@@ -603,6 +607,64 @@ impl Rewriter<'_> {
             _ => ice_unreachable!("a limb's offset is taken in a field element or an integer"),
         }
     }
+}
+
+/// `a·b = c`, solving for `c`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct UnsignedProduct;
+
+impl IdentityShape for UnsignedProduct {
+    fn num_products(&self) -> usize {
+        1
+    }
+
+    fn num_linear_terms(&self) -> usize {
+        0
+    }
+
+    fn is_checked(&self) -> bool {
+        true
+    }
+}
+
+impl<'a> Identity<'a> for UnsignedProduct {
+    /// `a`, `b`, and the widths `c` is solved at.
+    type Factors = (&'a Factor, &'a Factor, &'a [usize]);
+
+    fn terms(self, (a, b, widths): Self::Factors) -> (Vec<Term<'a>>, Option<Answer<'a>>) {
+        let product = Term {
+            polarity: Polarity::Positive,
+            lhs: a,
+            rhs: Some(b),
+            gated: true,
+        };
+        (vec![product], Some(Answer::Unknown(widths)))
+    }
+}
+
+/// The identity `op` lowers to, if it lowers to one, at the width of its operands.
+///
+/// A signed division divides the magnitudes, so it is the unsigned division's identity.
+pub(in super::super) fn lowered_identity(
+    op: &OpCode,
+    types: &FunctionTypeInfo,
+    field: FieldConfig,
+) -> Option<(usize, &'static dyn IdentityShape)> {
+    let Operands { bits, .. } =
+        multiplied(op, types, field).or_else(|| divided(op, types, field))?;
+    let OpCode::BinaryArithOp { kind, .. } = unguarded(op) else {
+        ice_unreachable!("`multiplied` and `divided` match only a binary operation");
+    };
+    let shape: &'static dyn IdentityShape = match kind {
+        BinaryArithOpKind::UMul => &UnsignedProduct,
+        BinaryArithOpKind::SMul => &SignedProduct,
+        BinaryArithOpKind::UDiv
+        | BinaryArithOpKind::URem
+        | BinaryArithOpKind::SDiv
+        | BinaryArithOpKind::SRem => &EuclideanDivision,
+        _ => ice_unreachable!("`multiplied` and `divided` match only products and divisions"),
+    };
+    Some((bits, shape))
 }
 
 /// The product the schoolbook lowers, if `op` is one: a multiplication under either reading,
