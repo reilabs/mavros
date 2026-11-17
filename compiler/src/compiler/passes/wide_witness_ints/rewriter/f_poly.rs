@@ -5,9 +5,9 @@ use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
 #[derive(Clone)]
-pub(crate) struct FPolynomial<'a> {
+pub(super) struct FPolynomial<'a> {
     /// The degree of the `F` polynomial
-    pub(crate) degree: usize,
+    pub(super) degree: usize,
 
     /// The terms `F` sums, each `±lhs·rhs` or `±lhs` of factors.
     pub(super) terms: Vec<Term<'a>>,
@@ -17,7 +17,7 @@ pub(crate) struct FPolynomial<'a> {
     pub(super) answer: Option<Answer<'a>>,
 
     /// The blocks `0..t` in order.
-    pub(crate) blocks: Vec<Block>,
+    pub(super) blocks: Vec<Block>,
 
     /// What the identity is checked with.
     params: FPolynomialParams,
@@ -99,22 +99,22 @@ fn f_polynomial_params(
 
 /// One term of an identity.
 #[derive(Clone, Copy)]
-pub(in super::super) struct Term<'a> {
-    pub(in super::super) polarity: Polarity,
-    pub(in super::super) lhs: &'a Factor,
-    pub(in super::super) rhs: Option<&'a Factor>,
-    pub(in super::super) gated: bool,
+pub(super) struct Term<'a> {
+    pub(super) polarity: Polarity,
+    pub(super) lhs: &'a Factor,
+    pub(super) rhs: Option<&'a Factor>,
+    pub(super) gated: bool,
 }
 
 /// Whether a term of an identity is added or subtracted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in super::super) enum Polarity {
+pub(super) enum Polarity {
     Positive,
     Negative,
 }
 
 impl Polarity {
-    pub(in super::super) fn flipped(self) -> Self {
+    pub(super) fn flipped(self) -> Self {
         match self {
             Polarity::Positive => Polarity::Negative,
             Polarity::Negative => Polarity::Positive,
@@ -124,7 +124,7 @@ impl Polarity {
 
 /// What a checked polynomial solves for, either a given answer or on to be solved.
 #[derive(Clone, Copy)]
-pub(in super::super) enum Answer<'a> {
+pub(super) enum Answer<'a> {
     /// The answer to be solved.
     Unknown(&'a [usize]),
 
@@ -135,7 +135,7 @@ pub(in super::super) enum Answer<'a> {
 impl<'a> FPolynomial<'a> {
     /// The columns the carry chain writes a witness from: a carry out of each committed one, and
     /// an answer limb from each of a witnessed answer's.
-    pub(crate) fn carry_chain_len(&self) -> usize {
+    pub(super) fn carry_chain_len(&self) -> usize {
         let answer_limbs = match self.answer {
             Some(Answer::Unknown(widths)) => widths.len(),
             Some(Answer::Given(_)) | None => 0,
@@ -143,7 +143,7 @@ impl<'a> FPolynomial<'a> {
         self.num_committed_carries().max(answer_limbs)
     }
 
-    pub(crate) fn num_committed_carries(&self) -> usize {
+    pub(super) fn num_committed_carries(&self) -> usize {
         if self.is_checked() {
             self.degree / 2
         } else {
@@ -156,16 +156,16 @@ impl<'a> FPolynomial<'a> {
         self.answer.is_some()
     }
 
-    pub(crate) fn carry_offset_bits(&self) -> Option<usize> {
+    pub(super) fn carry_offset_bits(&self) -> Option<usize> {
         self.params.carry_offset_bits
     }
 
-    pub(crate) fn hint_bits(&self) -> usize {
+    pub(super) fn hint_bits(&self) -> usize {
         self.params.pure_bits
     }
 }
 
-pub(crate) fn build_f_polynomial<'a>(
+pub(super) fn build_f_polynomial<'a>(
     widths: &[usize],
     injective: usize,
     terms: Vec<Term<'a>>,
@@ -210,33 +210,33 @@ pub(crate) fn build_f_polynomial<'a>(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Block {
-    pub(crate) first: usize,
-    pub(crate) last: usize,
-    pub(crate) carry_bits: Option<usize>,
+pub(super) struct Block {
+    pub(super) first: usize,
+    pub(super) last: usize,
+    pub(super) carry_bits: Option<usize>,
 }
 
 /// One operand of the schoolbook, limb by limb.
 #[allow(non_snake_case)]
-pub(crate) struct Factor {
+pub(super) struct Factor {
     /// Each limb at its width.
-    pub(crate) limbs: Vec<Limb>,
+    pub(super) limbs: Vec<Limb>,
 
     /// Whether the operand is witnessed, which decides how the hints of its [`Limb::Value`]s are
     /// read. A witnessed operand can still have known limbs, which are [`Limb::Constant`]s.
-    pub(crate) is_witnessed: bool,
+    pub(super) is_witnessed: bool,
 
     /// The largest value each limb can take: the largest its width holds, or a constant limb's value.
-    pub(crate) bounds: Vec<BigUint>,
+    pub(super) bounds: Vec<BigUint>,
 
     /// `L = 2^(w−1)` for a signed factor where `w` is the top limb width.
-    pub(crate) L: Option<BigUint>,
+    pub(super) L: Option<BigUint>,
 }
 
 impl Factor {
     /// `limbs` at `widths` as a factor
     #[allow(non_snake_case)]
-    pub(crate) fn new(
+    pub(super) fn new(
         limbs: Vec<Limb>,
         widths: &[usize],
         is_witnessed: bool,
@@ -269,7 +269,7 @@ impl Factor {
     }
 
     /// The largest value the whole operand can take, from its limbs' bounds at `limb_bits` apart.
-    pub(crate) fn largest(&self, limb_bits: usize) -> BigUint {
+    pub(super) fn largest(&self, limb_bits: usize) -> BigUint {
         self.bounds
             .iter()
             .enumerate()
@@ -278,7 +278,7 @@ impl Factor {
     }
 
     /// The smallest value the whole operand can take: its known limbs, with every other at zero.
-    pub(crate) fn smallest(&self, limb_bits: usize) -> BigUint {
+    pub(super) fn smallest(&self, limb_bits: usize) -> BigUint {
         self.limbs
             .iter()
             .enumerate()
@@ -291,7 +291,7 @@ impl Factor {
 }
 
 /// One limb of a [`Factor`].
-pub(crate) enum Limb {
+pub(super) enum Limb {
     /// A value, witnessed or pure as the operand is.
     Value(ValueId),
 

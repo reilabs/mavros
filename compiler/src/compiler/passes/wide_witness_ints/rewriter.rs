@@ -27,6 +27,7 @@ use shift::shifted;
 mod cast;
 mod chain;
 mod division;
+mod f_poly;
 mod gadgets;
 mod lower;
 mod product;

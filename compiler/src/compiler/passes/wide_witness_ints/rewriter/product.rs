@@ -1,3 +1,4 @@
+use super::f_poly::{Answer, FPolynomial, Factor, Limb, Polarity, Term, build_f_polynomial};
 use super::{
     Operands, Rewriter,
     lower::{unguarded, witnessed_width},
@@ -23,10 +24,8 @@ use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 use num_traits::One;
-pub(super) use plan::{Answer, FPolynomial, Factor, Limb, Polarity, Term, build_f_polynomial};
 #[cfg(test)]
 pub(crate) use tests::division_carries;
-mod plan;
 #[cfg(test)]
 mod tests;
 #[derive(Clone, Copy)]

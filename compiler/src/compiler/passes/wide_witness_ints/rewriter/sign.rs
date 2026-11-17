@@ -2,7 +2,7 @@ use super::{
     super::types::limb_widths,
     CarryOut, Rewriter,
     division::Answer,
-    product::{Factor, Limb, Polarity, Term, build_f_polynomial},
+    f_poly::{Factor, Limb, Polarity, Term, build_f_polynomial},
 };
 
 use crate::compiler::{

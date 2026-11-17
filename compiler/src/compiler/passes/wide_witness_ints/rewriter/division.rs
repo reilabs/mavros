@@ -13,9 +13,8 @@ use crate::compiler::{
 use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
-    product::{
-        self, Factor, Limb, Polarity, Term, build_f_polynomial, past_the_single_cell_product,
-    },
+    f_poly::{Answer as PolynomialAnswer, Factor, Limb, Polarity, Term, build_f_polynomial},
+    product::past_the_single_cell_product,
     sign::Sign,
 };
 use mavros_artifacts::FieldConfig;
@@ -200,7 +199,7 @@ impl Rewriter<'_> {
             widths,
             widest_injective_int_bits(self.field()),
             terms,
-            Some(product::Answer::Given(n)),
+            Some(PolynomialAnswer::Given(n)),
         )
         .unwrap_or_else(|| {
             unsupported_on_this_field(

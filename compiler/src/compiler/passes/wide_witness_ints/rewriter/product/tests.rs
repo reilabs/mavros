@@ -6,10 +6,7 @@ use crate::{
                 single_cell_product_fits, widest_injective_int_bits, witness_limb_bits,
             },
             wide_witness_ints::{
-                rewriter::product::{
-                    Polarity, Term,
-                    plan::{Answer, Factor, Limb, build_f_polynomial},
-                },
+                rewriter::f_poly::{Answer, Factor, Limb, Polarity, Term, build_f_polynomial},
                 test_utils::{
                     bn254, emitted, fields, guard_every_instruction, limbed_widths,
                     operation_with_in, run_pass,
