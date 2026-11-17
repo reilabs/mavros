@@ -896,6 +896,9 @@ impl<F: MavrosField> symbolic_executor::Value<R1CGen<F>> for Value<F> {
             (hlssa::CastTarget::FieldLimbs, _) => {
                 ice!("a {cast_target} cast should have been lowered by WideWitnessInts")
             }
+            (hlssa::CastTarget::IntUnchecked(_), _) => {
+                ice!("a {cast_target} cast should have been rewritten by LowerWitnessNarrowingCast")
+            }
             _ => self.clone(),
         }
     }

@@ -5336,26 +5336,97 @@ fn check_a_limbed_cast_to_field<F: HarnessField>() {
     }
 }
 
-/// A bare cast of a witnessed field element to a narrower integer, with no bit window in front of
-/// it, relabels the element on both fields: an element inside the width reads back as itself.
-/// Past it, the witness generator truncates while the constraints carry the whole element, so the
-/// honest witness does not satisfy them. Whatever emits the cast owes the bound.
-#[test]
-fn a_bare_witnessed_field_cast_relabels_the_element() {
-    check_a_bare_field_cast_relabels::<Field>();
-    check_a_bare_field_cast_relabels::<mavros_artifacts::Goldilocks>();
+/// `main(x: Field) -> intN { x as intN }` over `F`, written as a bare cast to `target`, whose
+/// width is `N`.
+fn program_casting_a_field_down<F: HarnessField>(target: CastTarget) -> HLSSA {
+    let (CastTarget::Int(bits) | CastTarget::IntUnchecked(bits)) = target else {
+        panic!("{target} is not an integer cast");
+    };
+    main_program_in(
+        F::CONFIG,
+        &[Type::field()],
+        &[Type::int(bits)],
+        move |e, params| vec![e.cast_to(target, params[0])],
+    )
 }
 
-fn check_a_bare_field_cast_relabels<F: HarnessField>() {
+/// A bare cast of a witnessed field element to a narrower integer **truncates** on both fields, as
+/// one of a witnessed integer does, at every width below the field's. Nothing else bounds a `Field`
+/// below the target, so `LowerWitnessNarrowingCast` puts the bit window in front of it.
+///
+/// The widths straddle the host word, past which the value ranges stop tracking, and end one below
+/// the field's, where the window's canonical decomposition is at its widest.
+#[test]
+fn a_bare_witnessed_field_cast_truncates_the_element() {
+    check_a_bare_field_cast_truncates::<Field>();
+    check_a_bare_field_cast_truncates::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_a_bare_field_cast_truncates<F: HarnessField>() {
     let field = F::CONFIG;
     let modulus = biguint_of_limbs(field.modulus_limbs());
-    let compiled = Compiled::<F>::compile(main_program_in(
-        field,
-        &[Type::field()],
-        &[Type::int(8)],
-        |e, params| vec![e.cast_to(CastTarget::Int(8), params[0])],
-    ))
-    .unwrap_or_else(|error| panic!("{:?}: the cast does not compile: {error}", field.id()));
+    let field_bits = field.field_bit_size() as usize;
+    let element = |value: &BigUint| InputValueOrdered::Field(F::of_biguint(value));
+    for bits in [1, 8, 32, 63, 64, 128, 129, 200, field_bits - 1] {
+        if bits >= field_bits {
+            continue;
+        }
+        let compiled =
+            Compiled::<F>::compile(program_casting_a_field_down::<F>(CastTarget::Int(bits)))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{:?}: the int{bits} cast does not compile: {error}",
+                        field.id()
+                    )
+                });
+        let place = BigUint::from(1u8) << bits;
+        let values = [
+            BigUint::from(0u8),
+            &place - 1u8,
+            place.clone(),
+            &place + (&place >> 1u8) + 5u8,
+            &modulus - 1u8,
+        ];
+        for value in values.into_iter().filter(|value| value < &modulus) {
+            let truncated = &value % &place;
+            let verdict = compiled.run(&[element(&value), element(&truncated)]);
+            assert!(
+                verdict.is_accepted(),
+                "{:?}: {value} as int{bits}: {verdict:?}",
+                field.id()
+            );
+            let wrong = (&truncated + 1u8) % &place;
+            let verdict = compiled.run(&[element(&value), element(&wrong)]);
+            assert!(
+                matches!(verdict, Verdict::ReturnMismatch { .. }),
+                "{:?}: {value} as int{bits} accepted {wrong}: {verdict:?}",
+                field.id()
+            );
+        }
+    }
+}
+
+/// An **unchecked** cast of a witnessed field element relabels it: an element inside the width
+/// reads back as itself, at fewer columns than the checked cast, as no window is put in front of
+/// it. Past the width, the witness generator truncates while the constraints carry the whole
+/// element, so the honest witness does not satisfy them. Whatever emits the cast owes the bound.
+#[test]
+fn an_unchecked_witnessed_field_cast_relabels_the_element() {
+    check_an_unchecked_field_cast_relabels::<Field>();
+    check_an_unchecked_field_cast_relabels::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_an_unchecked_field_cast_relabels<F: HarnessField>() {
+    let field = F::CONFIG;
+    let modulus = biguint_of_limbs(field.modulus_limbs());
+    let compile = |target| {
+        Compiled::<F>::compile(program_casting_a_field_down::<F>(target))
+            .unwrap_or_else(|error| panic!("{:?}: the cast does not compile: {error}", field.id()))
+    };
+    let (checked, compiled) = (
+        compile(CastTarget::Int(8)),
+        compile(CastTarget::IntUnchecked(8)),
+    );
     let element = |value: &BigUint| InputValueOrdered::Field(F::of_biguint(value));
     for value in [0u16, 44, 255] {
         let value = BigUint::from(value);
@@ -5366,6 +5437,22 @@ fn check_a_bare_field_cast_relabels<F: HarnessField>() {
             field.id()
         );
     }
+
+    let columns = |compiled: &Compiled<F>| {
+        let zero = element(&BigUint::from(0u8));
+        let verdict = compiled.run(&[zero.clone(), zero]);
+        verdict
+            .witness()
+            .unwrap_or_else(|| panic!("{:?}: 0 as int8 ran: {verdict:?}", field.id()))
+            .len()
+    };
+    let (windowed, relabelled) = (columns(&checked), columns(&compiled));
+    assert!(
+        relabelled < windowed,
+        "{:?}: the unchecked cast paid for a window: {relabelled} columns against {windowed}",
+        field.id()
+    );
+
     for value in [BigUint::from(256u16), BigUint::from(300u16), &modulus - 1u8] {
         let truncated = &value & BigUint::from(0xffu8);
         let verdict = compiled.run(&[element(&value), element(&truncated)]);

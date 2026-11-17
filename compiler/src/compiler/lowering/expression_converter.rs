@@ -1498,7 +1498,6 @@ impl<'a> ExpressionConverter<'a> {
         let field_bits = b.field().field_bit_size() as usize;
 
         let source_type = Self::expression_type(&cast.lhs);
-        let source_is_field = matches!(source_type, AstType::Field);
         let (src_bits, src_signed) = match source_type {
             AstType::Field => (field_bits, false),
             AstType::Integer(signedness, bit_size) => {
@@ -1520,15 +1519,9 @@ impl<'a> ExpressionConverter<'a> {
             _ => ice!("Unsupported cast target type: {:?}", cast.r#type),
         };
 
+        // A narrowing truncates on every source, so no bit window is put in front of it here: both
+        // backends truncate a pure one, and `LowerWitnessNarrowingCast` windows a witnessed one.
         let result = self.emit_located(b, Some(cast.location), |e| {
-            // A field narrowing needs an explicit bit window. Integer casts already truncate
-            // in the integer lowerings, so inserting a BitRange here would be redundant.
-            let value = if source_is_field && target_bits < src_bits {
-                e.bit_range(value, 0, target_bits)
-            } else {
-                value
-            };
-
             // Signed widening: sign-extend before casting. A cast into `Field` reads its source
             // unsigned, so only an integer target extends.
             let value = if src_signed
@@ -2206,18 +2199,13 @@ impl<'a> ExpressionConverter<'a> {
             "unsafe_cast" => {
                 use noirc_frontend::monomorphization::ast::Type as AstType;
 
+                // The caller bounds the value (`unsafe_cast`'s contract), so no bit window. Only
+                // the standard library calls it, and only at a scalar.
                 let target = match &call.return_type {
                     AstType::Field => CastTarget::Field,
-                    AstType::Bool => CastTarget::Int(1),
-                    AstType::Integer(_, bit_size) => CastTarget::Int(*bit_size as usize),
-                    other => {
-                        self.reject_unsupported(
-                            format!("unsafe_cast: unsupported target type {other:?}"),
-                            Some(call.location),
-                        );
-                        let typ = self.type_converter.convert_type(other);
-                        return Some(self.placeholder(b, Some(call.location), &typ));
-                    }
+                    AstType::Bool => CastTarget::IntUnchecked(1),
+                    AstType::Integer(_, bit_size) => CastTarget::IntUnchecked(*bit_size as usize),
+                    other => ice!("unsafe_cast to a non-scalar {other:?}"),
                 };
 
                 let value = self.convert_expression(&call.arguments[0], b).unwrap();

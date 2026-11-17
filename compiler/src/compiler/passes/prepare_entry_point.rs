@@ -720,7 +720,8 @@ impl PrepareEntryPoint {
                 e.write_witness(value_id)
             }
             TypeExpr::Int(size) => {
-                let cast_back = CastTarget::Int(*size);
+                // Unchecked: the range check (or boolean constraint) below bounds the witness.
+                let cast_back = CastTarget::IntUnchecked(*size);
                 let as_field = e.cast_to_field(value_id);
                 let witness = e.write_witness(as_field);
 
@@ -857,7 +858,8 @@ impl PrepareEntryPoint {
                     e.rangecheck(field_param, *size);
                 }
 
-                e.cast_to(CastTarget::Int(*size), field_param)
+                // Unchecked: the range check (or boolean constraint) above bounds the parameter.
+                e.cast_to(CastTarget::IntUnchecked(*size), field_param)
             }
             TypeExpr::Array(inner, size) => {
                 let child_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);

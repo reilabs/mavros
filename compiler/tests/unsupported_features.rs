@@ -124,17 +124,6 @@ fn every_refusal_in_a_program_is_reported_together() {
     assert_eq!(rendered.matches("error:").count(), 2, "{rendered}");
 }
 
-/// `unsafe_cast` handles scalars only
-#[test]
-fn unsafe_casts_to_non_scalars_are_refused() {
-    let rendered = assert_lowering_refused(
-        "use std::mavros::unsafe_cast;\n\
-         fn main(x: Field) -> pub [Field; 2] { unsafe_cast::<[Field; 2]>(x) }\n",
-        &["unsafe_cast: unsupported target type Array(2, Field)"],
-    );
-    assert!(rendered.contains("src/main.nr:2:"), "{rendered}");
-}
-
 /// Compiles `source`, whose `main` takes `x: u32`, and runs it on each value, answering whether its
 /// witness satisfies the constraints.
 fn witness_holds_for_each(source: &str, values: &[u32]) -> Vec<bool> {

@@ -787,7 +787,7 @@ impl Rewriter<'_> {
         {
             let pattern = match target {
                 CastTarget::WitnessOf | CastTarget::ValueOf | CastTarget::Nop => Some(pattern),
-                CastTarget::Int(bits) => Some(pattern.cast(*bits)),
+                CastTarget::Int(bits) | CastTarget::IntUnchecked(bits) => Some(pattern.cast(*bits)),
                 _ => None,
             };
             if let Some(pattern) = pattern {
@@ -815,6 +815,12 @@ impl Rewriter<'_> {
             target,
         });
         result
+    }
+
+    /// A field element read as an integer of `width` with no bit window in front of it, which the
+    /// caller bounds where the element is witnessed.
+    fn relabel(&mut self, value: ValueId, width: usize) -> ValueId {
+        self.cast(value, CastTarget::IntUnchecked(width))
     }
 
     /// `value >> offset` on the pure side.
@@ -1009,7 +1015,7 @@ impl Rewriter<'_> {
         let narrowed = self.cast(hint, CastTarget::Int(width));
         let hint_field = self.cast(narrowed, CastTarget::Field);
         let written = self.write_witness(hint_field);
-        let limb = self.cast(written, CastTarget::Int(width));
+        let limb = self.relabel(written, width);
         let limb_field = self.cast(limb, CastTarget::Field);
         self.push(OpCode::Rangecheck {
             value: limb_field,
@@ -1088,7 +1094,7 @@ impl Rewriter<'_> {
         }
 
         let sum = sum.expect("an integer has at least one limb");
-        self.cast(sum, CastTarget::Int(bits))
+        self.relabel(sum, bits)
     }
 
     /// `sum + element · 2^(h·index)` in one field element.
@@ -1299,7 +1305,7 @@ impl Rewriter<'_> {
                 self.push(OpCode::Cast {
                     result: *result,
                     value: chain.carry_out.expect("an ordering witnesses its borrow"),
-                    target: CastTarget::Int(1),
+                    target: CastTarget::IntUnchecked(1),
                 });
             }
             OpCode::AssertCmp { kind, .. } => {
@@ -1386,7 +1392,7 @@ impl Rewriter<'_> {
         let carry = chain
             .carry_out
             .expect("a signed sum or difference witnesses its top carry");
-        let answer_top = self.cast(chain.answer[top], CastTarget::Int(chain.widths[top]));
+        let answer_top = self.relabel(chain.answer[top], chain.widths[top]);
         let answer_sign = self.sign_bit((answer_top, true), chain.widths[top]);
 
         let (left, right) = if subtract {
@@ -1464,7 +1470,7 @@ impl Rewriter<'_> {
         let place = self.field_const(self.field.two_pow(width));
         let cleared = self.bin(BinaryArithOpKind::UMul, sign, place);
         let flipped = self.bin(BinaryArithOpKind::USub, raised, cleared);
-        (self.cast(flipped, CastTarget::Int(width)), true)
+        (self.relabel(flipped, width), true)
     }
 
     /// A checked sum or difference, whose carry out of the top limb is its overflow.
@@ -1527,14 +1533,14 @@ impl Rewriter<'_> {
                 self.push(OpCode::Cast {
                     result,
                     value: limb,
-                    target: CastTarget::Int(*width),
+                    target: CastTarget::IntUnchecked(*width),
                 });
             }
         } else {
             let limbs: Vec<ValueId> = kept
                 .into_iter()
                 .zip(widths)
-                .map(|(limb, width)| self.cast(limb, CastTarget::Int(*width)))
+                .map(|(limb, width)| self.relabel(limb, *width))
                 .collect();
             let whole = self.recombine(&limbs, widths, bits);
             self.push(OpCode::Cast {
@@ -3862,7 +3868,7 @@ impl Rewriter<'_> {
                 None => {
                     let x = self.cast(limb, CastTarget::Field);
                     let flipped = self.bin(BinaryArithOpKind::USub, ones, x);
-                    (self.cast(flipped, CastTarget::Int(width)), witnessed)
+                    (self.relabel(flipped, width), witnessed)
                 }
             },
             Sign::Bit(sign, sign_witnessed) => {
@@ -3872,7 +3878,7 @@ impl Rewriter<'_> {
                 let moved = self.bin(BinaryArithOpKind::UMul, sign, span);
                 let flipped = self.bin(BinaryArithOpKind::UAdd, x, moved);
                 let witnessed = (witnessed && known.is_none()) || sign_witnessed;
-                (self.cast(flipped, CastTarget::Int(width)), witnessed)
+                (self.relabel(flipped, width), witnessed)
             }
         }
     }
@@ -3903,9 +3909,7 @@ impl Rewriter<'_> {
             .enumerate()
             .map(|(index, width)| match (index, sign) {
                 (0, Sign::Known(_)) => (self.int_const(IntBits::one(*width)), false),
-                (0, Sign::Bit(bit, witnessed)) => {
-                    (self.cast(bit, CastTarget::Int(*width)), witnessed)
-                }
+                (0, Sign::Bit(bit, witnessed)) => (self.relabel(bit, *width), witnessed),
                 _ => (self.int_const(IntBits::zero(*width)), false),
             })
             .collect();
@@ -4000,7 +4004,7 @@ impl Rewriter<'_> {
             .zip(widths)
             .map(|(limb, width)| match self.constant_limb(limb, *width) {
                 Some(pattern) => (self.int_const(pattern), false),
-                None => (self.cast(limb, CastTarget::Int(*width)), true),
+                None => (self.relabel(limb, *width), true),
             })
             .collect()
     }
@@ -4156,7 +4160,7 @@ impl Rewriter<'_> {
                             max_bits: 1,
                         },
                     );
-                    (None, self.cast(bit, CastTarget::Int(even_width)))
+                    (None, self.relabel(bit, even_width))
                 }
                 _ => {
                     let (odd, even) = (self.fresh(), self.fresh());
@@ -4260,15 +4264,14 @@ impl Rewriter<'_> {
             } else {
                 rest = self.bin(BinaryArithOpKind::USub, rest, placed);
             }
-            pieces.push((
-                self.cast(written, CastTarget::Int(containers[index])),
-                *piece_read,
-            ));
+            pieces.push((self.relabel(written, containers[index]), *piece_read));
         }
         match sum {
             Some(sum) => self.constrain_equal(source, sum, guard),
             None => {
-                let lowest = self.cast(rest, CastTarget::Int(containers[0]));
+                // A relabel, not a window: the bits above the read land in this piece, and the
+                // narrow lookup that bounds it is what rejects them.
+                let lowest = self.relabel(rest, containers[0]);
                 pieces.insert(0, (lowest, reads[0]));
             }
         }
@@ -4323,7 +4326,7 @@ impl Rewriter<'_> {
             self.push(OpCode::Cast {
                 result: target,
                 value: sum.expect("a limb is at least one half-limb"),
-                target: CastTarget::Int(width),
+                target: CastTarget::IntUnchecked(width),
             });
         }
     }
@@ -4961,7 +4964,9 @@ impl Rewriter<'_> {
         let source_bits = source_type.int_width();
 
         match target {
-            CastTarget::Int(to_bits) => {
+            // An unchecked narrowing of a wide value is lowered as a checked one: its limbs are
+            // range-checked where the representation pins them.
+            CastTarget::Int(to_bits) | CastTarget::IntUnchecked(to_bits) => {
                 // The other side of the field boundary: a wide value read back out of the field
                 // elements its limbs were pinned as. Each limb returns at its width, so there
                 // is nothing to recombine and no place value to mint.
@@ -4991,7 +4996,7 @@ impl Rewriter<'_> {
                         self.push(OpCode::Cast {
                             result,
                             value: limb,
-                            target: CastTarget::Int(width),
+                            target: CastTarget::IntUnchecked(width),
                         });
                     }
                     return;
