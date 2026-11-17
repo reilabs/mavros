@@ -2,11 +2,14 @@ use super::{
     super::types::limb_widths,
     CarryOut, Rewriter,
     division::Answer,
-    product::{Factor, Limb, Schoolbook, full_bounds},
+    product::{Factor, Limb, Polarity, Term, build_f_polynomial},
 };
 
 use crate::compiler::{
-    passes::shared::overflow_guard::abs_as_u,
+    passes::shared::{
+        limbs::widest_injective_int_bits, overflow_guard::abs_as_u,
+        unsupported::unsupported_on_this_field,
+    },
     ssa::{
         ValueId,
         hlssa::{BinaryArithOpKind, CastTarget, builder::HLEmitter},
@@ -14,6 +17,7 @@ use crate::compiler::{
 };
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
+use num_traits::One;
 
 /// A sign bit as the signed gadgets read it.
 #[derive(Clone, Copy, Debug)]
@@ -27,12 +31,6 @@ pub(super) enum Sign {
 
 impl Rewriter<'_> {
     /// A signed product the single cell cannot hold.
-    ///
-    /// The unsigned schoolbook over the operands' magnitudes, whose overflow check keeps the
-    /// product below `2^N`; then [`Self::check_fits`] under the product's sign; then the product
-    /// negated by that sign. Every check past the operands is guarded, except the cut of the
-    /// product's top bit, which reads a product that is zero where the guard is off; the answer is
-    /// zero there too, as the unsigned product's is.
     pub(super) fn lower_signed_product(
         &mut self,
         result: ValueId,
@@ -42,52 +40,67 @@ impl Rewriter<'_> {
         guard: Option<ValueId>,
     ) {
         let widths = limb_widths(bits, self.limb_bits());
-        let (lhs_magnitude, lhs_sign, _) = self.magnitude(lhs, bits, &widths, guard);
-        let (rhs_magnitude, rhs_sign, _) = if lhs == rhs {
-            (lhs_magnitude.clone(), lhs_sign, None)
-        } else {
-            self.magnitude(rhs, bits, &widths, guard)
-        };
-        let lhs_factor = self.factor_of(&lhs_magnitude, &widths);
-        let rhs_factor = self.factor_of(&rhs_magnitude, &widths);
-        let product = self.schoolbook(Schoolbook {
-            lhs: &lhs_factor,
-            rhs: &rhs_factor,
-            addend: None,
-            target: None,
-            widths: &widths,
-            bits,
-            operation: "multiplication",
-            guard,
-        });
 
-        // Off the guard the schoolbook's checks are off, so a top column the untaken branch
-        // overflowed is past its width. The negation reads that column through a cast to a limb's
-        // width, which truncates on the pure side while the constraints carry it whole, so the
-        // negation's products would disagree with their columns. The product is zero there
-        // instead.
-        let product = match guard {
-            Some(condition) => {
-                let zero = self.field_const(self.field().zero());
-                product
-                    .into_iter()
-                    .map(|limb| self.select(condition, limb, zero))
-                    .collect()
-            }
-            None => product,
-        };
-        let product = self.answer_limbs(product, &widths);
+        let a = self.offset_factor(lhs, bits, &widths);
+        let b = (lhs != rhs).then(|| self.offset_factor(rhs, bits, &widths));
+        let b = b.as_ref().unwrap_or(&a);
 
-        // A square is never negative.
-        let sign = if lhs == rhs {
-            Sign::Known(false)
-        } else {
-            self.xor_signs(lhs_sign, rhs_sign)
-        };
-        self.check_fits(&product, &widths, sign, guard);
-        let answer = self.negate_if(product, &widths, sign, guard);
-        let answer = self.limb_fields(answer);
+        let wide_integer_type = CastTarget::Int(2 * bits);
+        let pure_lhs = self.pure_whole(lhs, bits);
+        let pure_wide_lhs = self.cast(pure_lhs, wide_integer_type.clone());
+        let pure_rhs = self.pure_whole(rhs, bits);
+        let pure_wide_rhs = self.cast(pure_rhs, wide_integer_type);
+
+        let product = self.bin(BinaryArithOpKind::UMul, pure_wide_lhs, pure_wide_rhs);
+        let narrow_product = self.cast(product, CastTarget::Int(bits));
+
+        let max_value = (BigUint::one() << bits) - 1u8;
+        let c = self.witness_hinted(narrow_product, bits, &widths, &max_value);
+        let c_limbs = self.chain_limbs_of(&c, widths.len());
+        let c_offset = self.offset_factor_of(c_limbs.clone(), &widths);
+
+        let terms = vec![
+            Term {
+                polarity: Polarity::Positive,
+                lhs: &a,
+                rhs: Some(b),
+                gated: true,
+            },
+            Term {
+                polarity: Polarity::Negative,
+                lhs: &c_offset,
+                rhs: None,
+                gated: true,
+            },
+        ];
+        let identity =
+            build_f_polynomial(&widths, widest_injective_int_bits(self.field()), terms, None)
+                .unwrap_or_else(|| {
+                unsupported_on_this_field(
+                    format_args!(
+                        "a {bits}-bit signed multiplication is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
+                    ),
+                    self.field(),
+                )
+            });
+        self.evaluate_f_poly(&identity, guard);
+
+        let answer = self.limb_fields(c_limbs);
         self.deliver(result, answer, &widths, bits, guard);
+    }
+
+    /// A two's complement `bits`-wide operand as a factor.
+    fn offset_factor(&mut self, value: ValueId, bits: usize, widths: &[usize]) -> Factor {
+        let limbs = self.chain_limbs(value, bits, widths.len());
+        self.offset_factor_of(limbs, widths)
+    }
+
+    /// Two's complement `limbs` at `widths` as a factor.
+    fn offset_factor_of(&mut self, mut limbs: Vec<(ValueId, bool)>, widths: &[usize]) -> Factor {
+        let top_limb_idx = widths.len() - 1;
+        limbs[top_limb_idx] = self.flip_top_bit(limbs[top_limb_idx], widths[top_limb_idx]);
+        let offset = BigUint::one() << (widths[top_limb_idx] - 1);
+        self.factor_of(&limbs, widths, Some(offset))
     }
 
     /// The signed quotient and remainder of `dividend / divisor`, each as its magnitude and the
@@ -108,8 +121,8 @@ impl Rewriter<'_> {
     ) -> (Answer, Answer) {
         let (n, dividend_sign, pure_dividend) = self.magnitude(dividend, bits, widths, guard);
         let (d, divisor_sign, pure_divisor) = self.magnitude(divisor, bits, widths, guard);
-        let n = self.factor_of(&n, widths);
-        let d = self.factor_of(&d, widths);
+        let n = self.factor_of(&n, widths, None);
+        let d = self.factor_of(&d, widths, None);
         let mut pure_side = |operand: ValueId, magnitude: Option<ValueId>| {
             magnitude.unwrap_or_else(|| {
                 let whole = self.pure_whole(operand, bits);
@@ -366,34 +379,26 @@ impl Rewriter<'_> {
         self.constrain_equal(product, zero, guard);
     }
 
-    /// Limbs at `widths` as a schoolbook [`Factor`]: a known limb is a constant with its value as
-    /// its bound, and any other is bounded by its width.
-    fn factor_of(&mut self, limbs: &[(ValueId, bool)], widths: &[usize]) -> Factor {
+    /// Limbs at `widths` as a [`Factor`].
+    fn factor_of(
+        &mut self,
+        limbs: &[(ValueId, bool)],
+        widths: &[usize],
+        offset: Option<BigUint>,
+    ) -> Factor {
         let mut is_witnessed = false;
-        let (limbs, bounds) = limbs
+        let limbs = limbs
             .iter()
-            .zip(full_bounds(widths))
             .zip(widths)
-            .map(
-                |((&(limb, limb_witnessed), full), width)| match self.known(limb) {
-                    Some(pattern) => {
-                        let pattern = pattern.cast(*width);
-                        let bound = BigUint::from(&pattern);
-                        (Limb::Constant(pattern), bound)
-                    }
-                    None => {
-                        is_witnessed |= limb_witnessed;
-                        (Limb::Value(limb), full)
-                    }
-                },
-            )
-            .unzip();
-        Factor {
-            limbs,
-            is_witnessed,
-            bounds,
-            L: None,
-        }
+            .map(|(&(limb, limb_witnessed), width)| match self.known(limb) {
+                Some(pattern) => Limb::Constant(pattern.cast(*width)),
+                None => {
+                    is_witnessed |= limb_witnessed;
+                    Limb::Value(limb)
+                }
+            })
+            .collect();
+        Factor::new(limbs, widths, is_witnessed, offset)
     }
 
     /// A gadget's answer, one field element per limb of `widths`, as limbs the chain and the

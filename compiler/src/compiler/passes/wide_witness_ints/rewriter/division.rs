@@ -1,6 +1,9 @@
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
-    passes::shared::divmod_guard::nonzero_hint_divisor,
+    passes::shared::{
+        divmod_guard::nonzero_hint_divisor, limbs::widest_injective_int_bits,
+        unsupported::unsupported_on_this_field,
+    },
     ssa::{
         ValueId,
         hlssa::{BinaryArithOpKind, CastTarget, OpCode, builder::HLEmitter},
@@ -10,8 +13,9 @@ use crate::compiler::{
 use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
-    product::Schoolbook,
-    product::{Factor, Limb, past_the_single_cell_product},
+    product::{
+        self, Factor, Limb, Polarity, Term, build_f_polynomial, past_the_single_cell_product,
+    },
     sign::Sign,
 };
 use mavros_artifacts::FieldConfig;
@@ -178,16 +182,35 @@ impl Rewriter<'_> {
         let q = self.witness_hinted(quotient_hint, bits, widths, &quotient_max);
         let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
 
-        self.schoolbook(Schoolbook {
-            lhs: &q,
-            rhs: d,
-            addend: Some(&r),
-            target: Some(n),
+        let terms = vec![
+            Term {
+                polarity: Polarity::Positive,
+                lhs: &q,
+                rhs: Some(d),
+                gated: false,
+            },
+            Term {
+                polarity: Polarity::Positive,
+                lhs: &r,
+                rhs: None,
+                gated: false,
+            },
+        ];
+        let identity = build_f_polynomial(
             widths,
-            bits,
-            operation: "division",
-            guard,
+            widest_injective_int_bits(self.field()),
+            terms,
+            Some(product::Answer::Given(n)),
+        )
+        .unwrap_or_else(|| {
+            unsupported_on_this_field(
+                format_args!(
+                    "a {bits}-bit unsigned division is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
+                ),
+                self.field(),
+            )
         });
+        self.evaluate_f_poly(&identity, guard);
 
         // `r < d` reads only the limbs either side can reach, as above them both are zero.
         let reached = (0..widths.len())

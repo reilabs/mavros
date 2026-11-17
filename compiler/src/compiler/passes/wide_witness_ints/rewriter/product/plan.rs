@@ -234,6 +234,30 @@ pub(crate) struct Factor {
 }
 
 impl Factor {
+    /// `limbs` at `widths` as a factor
+    #[allow(non_snake_case)]
+    pub(crate) fn new(
+        limbs: Vec<Limb>,
+        widths: &[usize],
+        is_witnessed: bool,
+        L: Option<BigUint>,
+    ) -> Self {
+        let bounds = limbs
+            .iter()
+            .zip(full_bounds(widths))
+            .map(|(limb, full)| match limb {
+                Limb::Constant(pattern) => BigUint::from(pattern),
+                Limb::Value(_) => full,
+            })
+            .collect();
+        Factor {
+            limbs,
+            is_witnessed,
+            bounds,
+            L,
+        }
+    }
+
     /// `L` where `limb` is the top limb and the factor is signed.
     pub(super) fn top_offset(&self, limb: usize) -> Option<&BigUint> {
         self.L.as_ref().filter(|_| limb + 1 == self.limbs.len())
@@ -277,7 +301,7 @@ pub(crate) enum Limb {
 
 /// The bound of each limb at `widths` when nothing narrower is known: the largest value its width
 /// holds.
-pub(crate) fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
+fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
     widths
         .iter()
         .map(|width| (BigUint::one() << *width) - 1u8)

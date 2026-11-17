@@ -7,7 +7,7 @@ use crate::{
             },
             wide_witness_ints::{
                 rewriter::product::{
-                    Polarity, Term, full_bounds,
+                    Polarity, Term,
                     plan::{Answer, Factor, Limb, build_f_polynomial},
                 },
                 test_utils::{
@@ -88,12 +88,8 @@ fn planned_written_checks(
     pinned: bool,
 ) -> Option<Vec<Option<usize>>> {
     // The planner reads only the factor's shape.
-    let factor = Factor {
-        limbs: widths.iter().map(|_| Limb::Value(ValueId(0))).collect(),
-        is_witnessed: true,
-        bounds: full_bounds(widths),
-        L: None,
-    };
+    let limbs = widths.iter().map(|_| Limb::Value(ValueId(0))).collect();
+    let factor = Factor::new(limbs, widths, true, None);
     let identity = build_f_polynomial(
         widths,
         injective,

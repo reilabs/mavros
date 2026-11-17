@@ -23,36 +23,12 @@ use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 use num_traits::One;
-pub(super) use plan::{
-    Answer, FPolynomial, Factor, Limb, Polarity, Term, build_f_polynomial, full_bounds,
-};
+pub(super) use plan::{Answer, FPolynomial, Factor, Limb, Polarity, Term, build_f_polynomial};
 #[cfg(test)]
 pub(crate) use tests::division_carries;
 mod plan;
 #[cfg(test)]
 mod tests;
-/// One schoolbook: `lhs · rhs`, plus `addend` where there is one, either range-checked into limbs
-/// or `pinned` to a target's.
-#[derive(Clone, Copy)]
-pub(super) struct Schoolbook<'a> {
-    pub(super) lhs: &'a Factor,
-    pub(super) rhs: &'a Factor,
-    pub(super) addend: Option<&'a Factor>,
-
-    /// The target, each limb already bounded at its width.
-    pub(super) target: Option<&'a Factor>,
-
-    /// The answer's limb widths, which are the operands' too.
-    pub(super) widths: &'a [usize],
-
-    /// The width the operation is at, for a refusal.
-    pub(super) bits: usize,
-
-    /// What the operation is called, for a refusal.
-    pub(super) operation: &'static str,
-
-    pub(super) guard: Option<ValueId>,
-}
 #[derive(Clone, Copy)]
 struct IdentityFlags {
     range_check_flag: Option<ValueId>,
@@ -106,67 +82,29 @@ impl Rewriter<'_> {
         let widths = limb_widths(bits, self.limb_bits());
         let lhs = self.factor(lhs, bits, &widths);
         let rhs = self.factor(rhs, bits, &widths);
-        let answer = self.schoolbook(Schoolbook {
-            lhs: &lhs,
-            rhs: &rhs,
-            addend: None,
-            target: None,
-            widths: &widths,
-            bits,
-            operation: "multiplication",
-            guard,
-        });
-        self.deliver(*result, answer, &widths, bits, guard);
-        true
-    }
-
-    /// `lhs · rhs (+ addend)` at `widths`, as the field element of each answer limb.
-    pub(super) fn schoolbook(&mut self, product: Schoolbook<'_>) -> Vec<ValueId> {
-        let Schoolbook {
-            lhs,
-            rhs,
-            addend,
-            target,
-            widths,
-            bits,
-            operation,
-            guard,
-        } = product;
-
-        let mut terms = vec![Term {
+        let terms = vec![Term {
             polarity: Polarity::Positive,
-            lhs,
-            rhs: Some(rhs),
-            gated: target.is_none(),
+            lhs: &lhs,
+            rhs: Some(&rhs),
+            gated: true,
         }];
-        if let Some(addend) = addend {
-            terms.push(Term {
-                polarity: Polarity::Positive,
-                lhs: addend,
-                rhs: None,
-                gated: target.is_none(),
-            });
-        }
-        let answer = match target {
-            Some(target) => Answer::Given(target),
-            None => Answer::Unknown(widths),
-        };
-
-        let f_polynomial = build_f_polynomial(
-            widths,
+        let identity = build_f_polynomial(
+            &widths,
             widest_injective_int_bits(self.field()),
             terms,
-            Some(answer),
+            Some(Answer::Unknown(&widths)),
         )
         .unwrap_or_else(|| {
             unsupported_on_this_field(
                 format_args!(
-                    "a {bits}-bit unsigned {operation} is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
+                    "a {bits}-bit unsigned multiplication is an identity of witness limbs, which needs each of its columns and the carries it is grouped with to fit a field element"
                 ),
                 self.field(),
             )
         });
-        self.evaluate_f_poly(&f_polynomial, guard)
+        let answer = self.evaluate_f_poly(&identity, guard);
+        self.deliver(*result, answer, &widths, bits, guard);
+        true
     }
 
     /// An operand of the schoolbook as its limbs at `bits`, with their bounds.
@@ -179,39 +117,26 @@ impl Rewriter<'_> {
         if let Some(constant) = self.ssa.get_const(value)
             && let Constant::Int(pattern) = constant.as_ref()
         {
-            let patterns: Vec<IntBits> = widths
+            let limbs = widths
                 .iter()
                 .enumerate()
-                .map(|(index, width)| pattern.bit_range(index * self.limb_bits(), *width))
+                .map(|(index, width)| {
+                    Limb::Constant(pattern.bit_range(index * self.limb_bits(), *width))
+                })
                 .collect();
-            return Factor {
-                bounds: patterns.iter().map(BigUint::from).collect(),
-                limbs: patterns.into_iter().map(Limb::Constant).collect(),
-                is_witnessed: false,
-                L: None,
-            };
+            return Factor::new(limbs, widths, false, None);
         }
 
-        let (limbs, bounds) = self
+        let limbs = self
             .chain_operand(value, bits, widths.len())
             .into_iter()
-            .zip(full_bounds(widths))
             .zip(widths)
-            .map(|((limb, full), width)| match self.known(limb) {
-                Some(pattern) => {
-                    let pattern = pattern.cast(*width);
-                    let bound = BigUint::from(&pattern);
-                    (Limb::Constant(pattern), bound)
-                }
-                None => (Limb::Value(limb), full),
+            .map(|(limb, width)| match self.known(limb) {
+                Some(pattern) => Limb::Constant(pattern.cast(*width)),
+                None => Limb::Value(limb),
             })
-            .unzip();
-        Factor {
-            limbs,
-            is_witnessed: self.is_witness(value),
-            bounds,
-            L: None,
-        }
+            .collect();
+        Factor::new(limbs, widths, self.is_witness(value), None)
     }
 
     /// Witnesses and checks `f_polynomial`,
