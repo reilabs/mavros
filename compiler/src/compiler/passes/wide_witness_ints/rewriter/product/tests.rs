@@ -8,7 +8,7 @@ use crate::{
             wide_witness_ints::{
                 rewriter::{
                     division::EuclideanDivision,
-                    f_poly::{FPolynomial, Factor, IdentityShape, Limb, build_f_polynomial},
+                    f_poly::{FPolynomial, Factor, IdentityShape, build_f_polynomial},
                     product::UnsignedProduct,
                 },
                 test_utils::{
@@ -56,16 +56,10 @@ fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
     product_with(field, bits, Type::witness_of(Type::int(bits)))
 }
 
-/// A full-range witnessed factor at limb `widths`; the planner reads only its shape.
-fn full_factor(widths: &[usize]) -> Factor {
-    let limbs = widths.iter().map(|_| Limb::Value(ValueId(0))).collect();
-    Factor::new(limbs, widths, true, None)
-}
-
 /// [`planned_written_checks`] of a product of full-range witnesses, or [`None`] if a field whose
 /// widest injective width is `injective` cannot hold it.
 fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize>>> {
-    let factor = full_factor(widths);
+    let factor = Factor::full(widths);
     let identity = build_f_polynomial(
         UnsignedProduct,
         widths,
@@ -411,7 +405,7 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
 
 /// The range check on each witness the division's schoolbook writes, in order, at full operand ranges.
 pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Option<usize>> {
-    let factor = full_factor(widths);
+    let factor = Factor::full(widths);
     let identity = build_f_polynomial(
         EuclideanDivision,
         widths,

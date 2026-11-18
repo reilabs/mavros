@@ -322,6 +322,13 @@ impl Factor {
         }
     }
 
+    /// A full-range witnessed factor at limb `widths`.
+    #[cfg(test)]
+    pub(super) fn full(widths: &[usize]) -> Self {
+        let limbs = widths.iter().map(|_| Limb::Value(ValueId(0))).collect();
+        Factor::new(limbs, widths, true, None)
+    }
+
     /// `L` where `limb` is the top limb and the factor is signed.
     pub(super) fn top_offset(&self, limb: usize) -> Option<&BigUint> {
         self.L.as_ref().filter(|_| limb + 1 == self.limbs.len())
