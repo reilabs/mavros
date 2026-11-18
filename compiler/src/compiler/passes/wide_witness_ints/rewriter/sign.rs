@@ -484,3 +484,342 @@ impl Rewriter<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        collections::HashMap,
+        compiler::{
+            passes::{
+                shared::limbs::witness_limb_bits,
+                wide_witness_ints::{
+                    test_utils::{bn254, limbed_widths},
+                    types::limb_widths,
+                },
+            },
+            ssa::{
+                Instruction, SourceLocation, ValueId,
+                hlssa::{
+                    BinaryArithOpKind, CastTarget, Constant, HLSSA, OpCode, Type,
+                    builder::{HLEmitter, HLSSABuilder},
+                },
+            },
+            util::biguint_of_limbs,
+        },
+        forgery::{self, replace_hints},
+    };
+    use mavros_artifacts::{FieldConfig, InputValueOrdered, MavrosField};
+    use mavros_int_semantics::IntBits;
+    use num_bigint::{BigInt, BigUint};
+    use num_traits::{One, Zero};
+
+    /// A signed product accepts exactly the products that fit its width.
+    #[test]
+    fn a_signed_product_accepts_only_within_bounds() {
+        signed_product_accepts_exactly_what_fits::<mavros_artifacts::Field>(bn254());
+        signed_product_accepts_exactly_what_fits::<mavros_artifacts::Goldilocks>(
+            FieldConfig::goldilocks(),
+        );
+    }
+
+    fn signed_product_accepts_exactly_what_fits<F: MavrosField>(field: FieldConfig) {
+        let id = field.id();
+        for bits in limbed_widths(field) {
+            for (a, b, fits) in signed_product_cases(bits) {
+                assert_eq!(
+                    signed_product_accepts::<F>(field, bits, &a, &b, |_| {}),
+                    fits,
+                    "{id:?} int{bits}: {a} · {b}"
+                );
+            }
+        }
+    }
+
+    /// A signed product's answer is pinned by its evaluations, with honest carries.
+    #[test]
+    fn a_signed_product_refuses_a_forged_answer() {
+        check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Field>(bn254());
+        check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Goldilocks>(
+            FieldConfig::goldilocks(),
+        );
+    }
+
+    fn check_a_signed_product_refuses_a_forged_answer<F: MavrosField>(field: FieldConfig) {
+        let id = field.id();
+        for bits in limbed_widths(field) {
+            let (a, b) = (BigInt::from(-3), BigInt::from(5));
+            let honest_product = twos_complement(bits, &(&a * &b));
+            let accepts = |answer: &BigUint| {
+                signed_product_accepts::<F>(field, bits, &a, &b, |ssa| {
+                    forge_answer(ssa, bits, answer)
+                })
+            };
+            assert!(
+                accepts(&honest_product),
+                "{id:?} int{bits}: the honest answer is refused"
+            );
+            let mask = (BigUint::one() << bits) - 1u8;
+            assert!(
+                !accepts(&((&honest_product + 1u8) & &mask)),
+                "{id:?} int{bits}: c + 1 is accepted"
+            );
+        }
+    }
+
+    /// A signed product's answer is pinned as an integer, not only in the field.
+    #[test]
+    fn a_signed_product_refuses_an_answer_off_by_the_modulus() {
+        check_an_answer_off_by_the_modulus::<mavros_artifacts::Field>(bn254(), 320);
+        check_an_answer_off_by_the_modulus::<mavros_artifacts::Goldilocks>(
+            FieldConfig::goldilocks(),
+            100,
+        );
+    }
+
+    fn check_an_answer_off_by_the_modulus<F: MavrosField>(field: FieldConfig, bits: usize) {
+        let id = field.id();
+        let modulus = biguint_of_limbs(field.modulus_limbs());
+        let limb_bits = witness_limb_bits(field);
+        let widths = limb_widths(bits, limb_bits);
+        let (a, b) = (BigInt::from(-3), BigInt::from(-5));
+        let forged_answer = &a * &b + BigInt::from(modulus.clone());
+
+        // `F = a·b − c'` coefficient by coefficient, over the offset limbs.
+        let (a_limbs, b_limbs, forged_answer_limbs) = (
+            signed_limbs(&a, &widths),
+            signed_limbs(&b, &widths),
+            signed_limbs(&forged_answer, &widths),
+        );
+        let mut f = vec![BigInt::zero(); 2 * widths.len() - 1];
+        for (i, a_limb) in a_limbs.iter().enumerate() {
+            for (j, b_limb) in b_limbs.iter().enumerate() {
+                f[i + j] += a_limb * b_limb;
+            }
+        }
+        for (j, forged_answer_limb) in forged_answer_limbs.iter().enumerate() {
+            f[j] -= forged_answer_limb;
+        }
+        let forged_carries = carries_over_the_field(&f, limb_bits, &modulus);
+        let forged_answer = forged_answer.to_biguint().expect("positive");
+
+        let accepted = signed_product_accepts::<F>(field, bits, &a, &b, |ssa| {
+            forge_answer(ssa, bits, &forged_answer);
+            let written_carries = calculate_product_carries(ssa);
+            assert_eq!(
+                written_carries.len(),
+                forged_carries.len(),
+                "{id:?} int{bits}: one written carry per column below the top"
+            );
+            let forged: Vec<ValueId> = forged_carries
+                .iter()
+                .map(|carry| {
+                    let element = field
+                        .from_canonical_limbs(&carry.to_u64_digits())
+                        .expect("below the modulus");
+                    ssa.add_const(Constant::Field(element))
+                })
+                .collect();
+            replace_hints(ssa, |op| match *op {
+                OpCode::WriteWitness {
+                    result: Some(result),
+                    pinned,
+                    ..
+                } => written_carries
+                    .iter()
+                    .position(|write| *write == result)
+                    .map(|column| OpCode::WriteWitness {
+                        result: Some(result),
+                        value: forged[column],
+                        pinned,
+                    }),
+                _ => None,
+            });
+        });
+        assert!(
+            !accepted,
+            "{id:?} int{bits}: c + p is accepted with carries solved over the field"
+        );
+    }
+
+    /// Replace the hint a signed product's answer limbs are cut from, the wrapped product, with `answer`.
+    fn forge_answer(ssa: &mut HLSSA, bits: usize, answer: &BigUint) {
+        // The wrapped product is the one cast to `bits` from a double-width product.
+        let double_width: Vec<ValueId> = forgery::all_ops(ssa)
+            .filter_map(|op| match op {
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UMul,
+                    result,
+                    ..
+                } => Some(result),
+                _ => None,
+            })
+            .collect();
+        let forged = ssa.add_const(Constant::Int(IntBits::from_biguint(bits, answer)));
+        let replaced = replace_hints(ssa, |op| match *op {
+            OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::Int(width),
+            } if width == bits && double_width.contains(&value) => Some(OpCode::Cast {
+                result,
+                value: forged,
+                target: CastTarget::Int(bits),
+            }),
+            _ => None,
+        });
+        assert_eq!(replaced, 1, "int{bits}: the answer is one hint");
+    }
+
+    /// The witnesses of a signed product's carries, in column order
+    fn calculate_product_carries(ssa: &HLSSA) -> Vec<ValueId> {
+        let ops: Vec<OpCode> = forgery::all_ops(ssa).collect();
+        let definitions: HashMap<ValueId, &OpCode> = ops
+            .iter()
+            .flat_map(|op| op.get_results().map(move |result| (*result, op)))
+            .collect();
+        let lowered_from_a_raised_carry = |value: ValueId| -> Option<()> {
+            let OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::USub,
+                lhs: raised,
+                ..
+            } = definitions.get(&value)?
+            else {
+                return None;
+            };
+            let OpCode::Cast {
+                value: sum,
+                target: CastTarget::Field,
+                ..
+            } = definitions.get(raised)?
+            else {
+                return None;
+            };
+            matches!(
+                definitions.get(sum)?,
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::SAdd,
+                    ..
+                }
+            )
+            .then_some(())
+        };
+        ops.iter()
+            .filter_map(|op| match op {
+                OpCode::WriteWitness {
+                    result: Some(result),
+                    value,
+                    ..
+                } => lowered_from_a_raised_carry(*value).map(|()| *result),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Two's complement `v` cut at `widths`.
+    fn signed_limbs(v: &BigInt, widths: &[usize]) -> Vec<BigInt> {
+        let pattern = BigInt::from(twos_complement(widths.iter().sum(), v));
+        let top_idx = widths.len() - 1;
+        let mut start = 0;
+        widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| {
+                let mask: BigInt = (BigInt::one() << *width) - 1;
+                let limb: BigInt = (&pattern >> start) & mask;
+                start += width;
+                if index == top_idx && limb.bit(*width as u64 - 1) {
+                    limb - (BigInt::one() << width)
+                } else {
+                    limb
+                }
+            })
+            .collect()
+    }
+
+    /// The `H` with `F(X) = (β − X)·H(X)` over the field.
+    /// Calculated as: `f_0 = β·h_0`, `f_j = β·h_j − h_{j−1}`, `f_d = −h_{d−1}`.
+    fn carries_over_the_field(f: &[BigInt], limb_bits: usize, modulus: &BigUint) -> Vec<BigUint> {
+        let p = BigInt::from(modulus.clone());
+        let reduce = |v: BigInt| ((v % &p) + &p) % &p;
+        let beta = reduce(BigInt::one() << limb_bits);
+        let beta_inv = beta.modpow(&(&p - 2), &p);
+        let mut carries = Vec::with_capacity(f.len() - 1);
+        let mut previous = BigInt::zero();
+        for coefficient in &f[..f.len() - 1] {
+            previous = reduce((coefficient + &previous) * &beta_inv);
+            carries.push(previous.clone());
+        }
+        assert!(
+            reduce(&f[f.len() - 1] + &previous).is_zero(),
+            "F(β) is not zero modulo the field, so no carries satisfy every evaluation"
+        );
+        carries
+            .into_iter()
+            .map(|carry| carry.to_biguint().expect("reduced"))
+            .collect()
+    }
+
+    /// `v` as a `bits`-wide two's complement pattern.
+    fn twos_complement(bits: usize, v: &BigInt) -> BigUint {
+        let modulus = BigInt::one() << bits;
+        (((v % &modulus) + &modulus) % &modulus)
+            .to_biguint()
+            .expect("reduced into `0..2^bits`")
+    }
+
+    /// Whether the circuit for a signed `a · b` accepts, with `forge` applied to the
+    /// witness-spilled program: witness generation finishes and every constraint holds.
+    ///
+    /// Operation is built as slightly more complex to force compiler to treat a and b as witnesses.
+    fn signed_product_accepts<F: MavrosField>(
+        field: FieldConfig,
+        bits: usize,
+        a: &BigInt,
+        b: &BigInt,
+        forge: impl FnOnce(&mut HLSSA),
+    ) -> bool {
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |builder| {
+            builder.function.add_return_type(Type::field());
+            let block_id = builder.function.get_entry_id();
+            let mut emitter = builder
+                .block(block_id)
+                .with_source_location(SourceLocation::synthetic("signed_product"));
+            let [lhs, rhs] = [a, b].map(|value| {
+                let input = emitter.add_parameter(Type::field());
+                let zero = emitter.cast_to(CastTarget::Int(bits), input);
+                let constant =
+                    emitter.int_const(IntBits::from_biguint(bits, &twos_complement(bits, value)));
+                emitter.uadd(zero, constant)
+            });
+            let product = emitter.smul(lhs, rhs);
+            let element = emitter.cast_to(CastTarget::Field, product);
+            emitter.terminate_return(vec![element]);
+        });
+        let zero = InputValueOrdered::Field(F::from_element(field.constant(0u128)));
+        forgery::accepts_the_forgery::<F>(ssa, &[zero.clone(), zero], forge)
+    }
+
+    /// The values a `bits`-wide signed product is tried at, with whether each product fits.
+    fn signed_product_cases(bits: usize) -> Vec<(BigInt, BigInt, bool)> {
+        let pow = |e: usize| BigInt::one() << e;
+        let min = -pow(bits - 1);
+        let half = bits / 2;
+        vec![
+            (BigInt::from(-3), BigInt::from(-5), true),
+            (BigInt::from(-3), BigInt::from(5), true),
+            (BigInt::from(-1), BigInt::from(-1), true),
+            (min.clone(), BigInt::one(), true),
+            (BigInt::zero(), min.clone(), true),
+            // Spans every limb, with a negative answer.
+            (pow(half - 2), -pow(half - 2) - 7, true),
+            // Exactly the most negative value.
+            (-pow(half), pow(bits - 1 - half), true),
+            // Exactly one past the most positive value.
+            (pow(half), pow(bits - 1 - half), false),
+            (min.clone(), BigInt::from(-1), false),
+            (min.clone(), min, false),
+        ]
+    }
+}
