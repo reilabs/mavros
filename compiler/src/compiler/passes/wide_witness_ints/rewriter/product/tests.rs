@@ -12,8 +12,10 @@ use crate::{
                     product::UnsignedProduct,
                 },
                 test_utils::{
-                    bn254, emitted, fields, guard_every_instruction, limbed_widths,
-                    operation_with_in, run_pass,
+                    IdentityWitnesses, bn254, carries_over_the_field, coefficients, emitted,
+                    fields, forge_hint, forge_writes, guard_every_instruction, identity_witnesses,
+                    is_wrapped_product, limbed_widths, limbs, operation_accepts, operation_with_in,
+                    run_pass, twos_complement,
                 },
             },
         },
@@ -25,9 +27,11 @@ use crate::{
 };
 
 use super::super::super::types::limb_widths;
-use crate::compiler::Field;
-use mavros_artifacts::FieldConfig;
+use crate::compiler::{Field, util::biguint_of_limbs};
+use mavros_artifacts::{FieldConfig, MavrosField};
 use mavros_int_semantics::int_bits::HOST_LIMB_BITS;
+use num_bigint::{BigInt, BigUint};
+use num_traits::{One, Zero};
 
 /// bn254 plans a schoolbook product, and the `q·d + r` of a division, at every width class it
 /// has, so neither ever reaches [`unsupported_on_this_field`].
@@ -414,4 +418,117 @@ pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Opti
     )
     .expect("the field holds the division's identity");
     planned_written_checks(&identity, widths, true)
+}
+
+/// Every identity's answer is pinned as an integer, not only in the field.
+#[test]
+fn every_identity_refuses_an_answer_off_by_the_modulus() {
+    check_off_by_the_modulus::<mavros_artifacts::Field>(bn254(), 320);
+    check_off_by_the_modulus::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks(), 100);
+}
+
+fn check_off_by_the_modulus<F: MavrosField>(field: FieldConfig, bits: usize) {
+    use BinaryArithOpKind::{SMul, UDiv, UMul};
+    let id = field.id();
+    let modulus = biguint_of_limbs(field.modulus_limbs());
+    let limb_bits = witness_limb_bits(field);
+    let widths = limb_widths(bits, limb_bits);
+    let num_limbs = widths.len();
+
+    let lifted_answer = BigInt::from(15) + BigInt::from(modulus.clone());
+    let forged_answer = twos_complement(bits, &lifted_answer);
+
+    // `−3·−5 = 15 + p`, with the wrapped product as its hint.
+    let forge_signed = |ssa: &mut HLSSA, _: &IdentityWitnesses| {
+        forge_hint(ssa, bits, &forged_answer, is_wrapped_product(bits))
+    };
+
+    // `15·1 = 15 + p`.
+    let forge_unsigned = |ssa: &mut HLSSA, writes: &IdentityWitnesses| {
+        assert_eq!(
+            writes.answer_limbs.len(),
+            num_limbs,
+            "one written answer limb per column"
+        );
+        let answer: Vec<BigUint> = limbs(&lifted_answer, &widths, false)
+            .iter()
+            .map(|limb| limb.to_biguint().expect("unsigned"))
+            .collect();
+        forge_writes(ssa, field, &writes.answer_limbs, &answer);
+    };
+
+    // `15 = 0·2^(bits − 20) + (15 + p)`.
+    let forge_division = |ssa: &mut HLSSA, _: &IdentityWitnesses| {
+        forge_hint(ssa, bits, &forged_answer, |op, definitions| {
+            matches!(op, OpCode::BinaryArithOp { kind: BinaryArithOpKind::URem, rhs, .. }
+                if definitions.contains_key(rhs))
+        })
+    };
+
+    type Forge<'a> = &'a dyn Fn(&mut HLSSA, &IdentityWitnesses);
+    let cases: [(BinaryArithOpKind, [BigInt; 2], usize, Forge); 3] = [
+        (
+            SMul,
+            [(-3).into(), (-5).into()],
+            2 * num_limbs - 2,
+            &forge_signed,
+        ),
+        (
+            UMul,
+            [15.into(), BigInt::one()],
+            num_limbs - 1,
+            &forge_unsigned,
+        ),
+        (
+            UDiv,
+            [15.into(), BigInt::one() << (bits - 20)],
+            num_limbs - 1,
+            &forge_division,
+        ),
+    ];
+    for (kind, [lhs, rhs], committed, forge_answer) in cases {
+        let what = format!("{id:?} int{bits} {kind:?}");
+        let f = match kind {
+            // `F = lhs·rhs − (15 + p)`.
+            SMul | UMul => {
+                let signed = kind == SMul;
+                coefficients(
+                    &limbs(&lhs, &widths, signed),
+                    &limbs(&rhs, &widths, signed),
+                    &[],
+                    &limbs(&lifted_answer, &widths, signed),
+                )
+            }
+            // `F = 0·rhs + (15 + p) − lhs`
+            UDiv => coefficients(
+                &limbs(&BigInt::zero(), &widths, false),
+                &limbs(&rhs, &widths, false),
+                &limbs(&lifted_answer, &widths, false),
+                &limbs(&lhs, &widths, false),
+            ),
+            _ => unreachable!("operation not configured to use polynomial representation"),
+        };
+
+        let carries = carries_over_the_field(&f, limb_bits, &modulus, committed);
+        let operands = (&twos_complement(bits, &lhs), &twos_complement(bits, &rhs));
+        let accepts = |forge: bool| {
+            operation_accepts::<F>(field, kind, bits, operands, None, |ssa| {
+                let writes = identity_witnesses(ssa, limb_bits);
+                assert_eq!(
+                    writes.carries.len(),
+                    committed,
+                    "{what}: one write per carry"
+                );
+                if forge {
+                    forge_answer(ssa, &writes);
+                    forge_writes(ssa, field, &writes.carries, &carries);
+                }
+            })
+        };
+        assert!(accepts(false), "{what}: the honest answer is refused");
+        assert!(
+            !accepts(true),
+            "{what}: an answer off by p is accepted with carries solved over the field"
+        );
+    }
 }
