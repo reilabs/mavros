@@ -96,7 +96,7 @@ impl Rewriter<'_> {
         shape: S,
         widths: &[usize],
         factors: S::Factors,
-    ) -> FPolynomial<'f, S> {
+    ) -> FPolynomial<'f> {
         build_f_polynomial(
             shape,
             widths,
@@ -144,9 +144,9 @@ impl Rewriter<'_> {
 
     /// Witnesses and checks `f_polynomial`,
     /// Returning the answer's limbs where it witnesses them.
-    pub(super) fn evaluate_f_poly<S: IdentityShape>(
+    pub(super) fn evaluate_f_poly(
         &mut self,
-        f_polynomial: &FPolynomial<'_, S>,
+        f_polynomial: &FPolynomial<'_>,
         guard: Option<ValueId>,
     ) -> Vec<ValueId> {
         let terms = &f_polynomial.terms[..];
@@ -166,7 +166,7 @@ impl Rewriter<'_> {
         self.check_block_carries(f_polynomial, &carries, guards.range_check_flag);
         let terms_as_felts = self.terms_as_fields(&f_polynomial, guards.answer_flag);
 
-        for point in 0..=f_polynomial.degree as u64 {
+        for point in 0..=f_polynomial.degree() as u64 {
             self.check_at_point(
                 point,
                 terms,
@@ -181,9 +181,9 @@ impl Rewriter<'_> {
 
     /// What the polynomial's carry chain witnesses:
     /// the answer's limbs, where they are solved, and each carry.
-    fn witness_columns<S: IdentityShape>(
+    fn witness_columns(
         &mut self,
-        f_polynomial: &FPolynomial<'_, S>,
+        f_polynomial: &FPolynomial<'_>,
         range_check_guard: Option<ValueId>,
         pure_range_check_guard: Option<ValueId>,
     ) -> (Vec<ValueId>, Vec<ValueId>) {
@@ -228,9 +228,9 @@ impl Rewriter<'_> {
     }
 
     /// The carry out of a column whose running sum is `running`, as its hint and its witness.
-    fn witness_carry<S: IdentityShape>(
+    fn witness_carry(
         &mut self,
-        identity: &FPolynomial<'_, S>,
+        identity: &FPolynomial<'_>,
         running: ValueId,
     ) -> (ValueId, ValueId) {
         match identity.carry_offset_bits() {
@@ -259,16 +259,16 @@ impl Rewriter<'_> {
     }
 
     /// Range check the carry out of each block.
-    fn check_block_carries<S: IdentityShape>(
+    fn check_block_carries(
         &mut self,
-        identity: &FPolynomial<'_, S>,
+        identity: &FPolynomial<'_>,
         carries: &[ValueId],
         check: Option<ValueId>,
     ) {
         let offset = identity
             .carry_offset_bits()
             .map(|offset_bits| self.field_const(self.field().two_pow(offset_bits)));
-        for block in &identity.blocks {
+        for block in identity.blocks() {
             if let Some(carry_bits) = block.carry_bits {
                 let carry = carries[block.last];
                 let value = match offset {
@@ -287,9 +287,9 @@ impl Rewriter<'_> {
     }
 
     /// The limbs of each term's factors as field elements, a gated term's left factor scaled by `flag`.
-    fn terms_as_fields<S: IdentityShape>(
+    fn terms_as_fields(
         &mut self,
-        f_polynomial: &FPolynomial<'_, S>,
+        f_polynomial: &FPolynomial<'_>,
         flag: Option<ValueId>,
     ) -> Vec<(Vec<ValueId>, Option<Vec<ValueId>>)> {
         let terms = &f_polynomial.terms[..];

@@ -8,7 +8,7 @@ use crate::{
             wide_witness_ints::{
                 rewriter::{
                     division::EuclideanDivision,
-                    f_poly::{FPolynomial, Factor, IdentityShape, build_f_polynomial},
+                    f_poly::{FPolynomial, Factor, build_f_polynomial},
                     product::UnsignedProduct,
                 },
                 test_utils::{
@@ -72,8 +72,8 @@ fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize
 /// The range check on each witness `identity` at limb `widths` writes after its operands, in the
 /// order they are written, [`None`] for one nothing checks. The answer's limbs are written too
 /// unless `pinned`.
-fn planned_written_checks<S: IdentityShape>(
-    identity: &FPolynomial<'_, S>,
+fn planned_written_checks(
+    identity: &FPolynomial<'_>,
     widths: &[usize],
     pinned: bool,
 ) -> Vec<Option<usize>> {
@@ -86,7 +86,7 @@ fn planned_written_checks<S: IdentityShape>(
         if column + 1 < count {
             expected.push(
                 identity
-                    .blocks
+                    .blocks()
                     .iter()
                     .find(|block| block.last == column)
                     .and_then(|block| block.carry_bits),

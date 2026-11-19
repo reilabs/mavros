@@ -7,13 +7,7 @@ use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
 #[derive(Clone)]
-pub(super) struct FPolynomial<'a, S: IdentityShape> {
-    /// The degree of the `F` polynomial
-    pub(super) degree: usize,
-
-    /// `k`: the number of limbs of each factor.
-    num_limbs: usize,
-
+pub(super) struct FPolynomial<'a> {
     /// The terms `F` sums, each `±lhs·rhs` or `±lhs` of factors.
     pub(super) terms: Vec<Term<'a>>,
 
@@ -21,14 +15,7 @@ pub(super) struct FPolynomial<'a, S: IdentityShape> {
     /// or [`None`] where every term of the polynomial is given.
     pub(super) answer: Option<Answer<'a>>,
 
-    /// The blocks `0..t` in order.
-    pub(super) blocks: Vec<Block>,
-
-    /// What the identity is checked with.
-    params: FPolynomialParams,
-
-    /// Which identity it is.
-    shape: S,
+    layout: Layout,
 }
 
 /// The shape of an identity. Used for finding sound parameters.
@@ -51,26 +38,8 @@ pub(in super::super) trait IdentityShape: fmt::Debug + Sync {
 
     /// Whether an identity of this shape holds at limb `widths`.
     fn admits(&self, widths: &[usize], injective: usize) -> bool {
-        shape_params(self, widths, injective).is_some()
+        layout(self, widths, injective).is_some()
     }
-}
-
-/// What an identity of `shape` at limb `widths` is checked with, or [`None`] where the field
-/// cannot hold it.
-fn shape_params<S: IdentityShape + ?Sized>(
-    shape: &S,
-    widths: &[usize],
-    injective: usize,
-) -> Option<FPolynomialParams> {
-    let params = f_polynomial_params(
-        widths,
-        injective,
-        shape.num_products(),
-        shape.num_linear_terms(),
-        shape.is_checked(),
-        shape.has_negative_terms(),
-    )?;
-    (params.t <= degree(shape.num_products(), widths.len()) + 1).then_some(params)
 }
 
 /// The degree of `F` at `k` limbs.
@@ -192,7 +161,7 @@ pub(super) enum Answer<'a> {
     Given(&'a Factor),
 }
 
-impl<S: IdentityShape> FPolynomial<'_, S> {
+impl FPolynomial<'_> {
     /// The columns the carry chain writes a witness from: a carry out of each committed one, and
     /// an answer limb from each of a witnessed answer's.
     pub(super) fn carry_chain_len(&self) -> usize {
@@ -203,25 +172,26 @@ impl<S: IdentityShape> FPolynomial<'_, S> {
         self.num_committed_carries().max(answer_limbs)
     }
 
-    pub(super) fn num_committed_carries(&self) -> usize {
-        if self.is_checked() {
-            self.num_limbs - 1
-        } else {
-            self.degree
-        }
+    /// The degree of the `F` polynomial.
+    pub(super) fn degree(&self) -> usize {
+        self.layout.degree
     }
 
-    /// Whether the identity is checked against a known answer.
-    fn is_checked(&self) -> bool {
-        self.shape.is_checked()
+    /// The blocks `0..t` in order.
+    pub(super) fn blocks(&self) -> &[Block] {
+        &self.layout.blocks
+    }
+
+    pub(super) fn num_committed_carries(&self) -> usize {
+        self.layout.num_committed_carries
     }
 
     pub(super) fn carry_offset_bits(&self) -> Option<usize> {
-        self.params.carry_offset_bits
+        self.layout.carry_offset_bits
     }
 
     pub(super) fn hint_bits(&self) -> usize {
-        self.params.pure_bits
+        self.layout.pure_bits
     }
 }
 
@@ -241,36 +211,81 @@ pub(super) fn build_f_polynomial<'a, S: Identity<'a>>(
     widths: &[usize],
     injective: usize,
     factors: S::Factors,
-) -> Option<FPolynomial<'a, S>> {
-    let params = shape_params(&shape, widths, injective)?;
+) -> Option<FPolynomial<'a>> {
+    let layout = layout(&shape, widths, injective)?;
     let (terms, answer) = shape.terms(factors);
     if !shape.has_negative_terms() && terms.iter().any(|t| t.polarity == Polarity::Negative) {
         ice!("{shape:?} subtracts a term, but its carries are planned as non-negative");
     }
-    let mut identity = FPolynomial {
-        degree: degree(shape.num_products(), widths.len()),
-        num_limbs: widths.len(),
+    Some(FPolynomial {
         terms,
         answer,
-        blocks: Vec::new(),
-        params,
-        shape,
+        layout,
+    })
+}
+
+/// How an identity is cut into blocks.
+#[derive(Clone)]
+struct Layout {
+    /// The degree of the `F` polynomial.
+    degree: usize,
+
+    /// The carries the chain commits.
+    num_committed_carries: usize,
+
+    /// The blocks `0..t`.
+    blocks: Vec<Block>,
+
+    /// `Some(c)` when a carry can be negative; carries are then witnessed raised by `2^c`.
+    carry_offset_bits: Option<usize>,
+
+    /// The integer width the pure side computes at.
+    pure_bits: usize,
+}
+
+/// The layout of an identity of `shape` at limb `widths`; or [`None`] where it is inadmissable.
+fn layout<S: IdentityShape + ?Sized>(
+    shape: &S,
+    widths: &[usize],
+    injective: usize,
+) -> Option<Layout> {
+    let params = f_polynomial_params(
+        widths,
+        injective,
+        shape.num_products(),
+        shape.num_linear_terms(),
+        shape.is_checked(),
+        shape.has_negative_terms(),
+    )?;
+    let degree = degree(shape.num_products(), widths.len());
+    if params.t > degree + 1 {
+        return None;
+    }
+    let num_committed_carries = if shape.is_checked() {
+        widths.len() - 1
+    } else {
+        degree
     };
-    let committed_carries = identity.num_committed_carries();
     let certified = params.t;
     let group_size = params.group_size.max(1);
-    identity.blocks = (0..certified)
+    let blocks = (0..certified)
         .step_by(group_size)
         .map(|first| {
             let last = (first + group_size).min(certified) - 1;
             Block {
                 first,
                 last,
-                carry_bits: (last < committed_carries).then_some(params.carry_check_bits),
+                carry_bits: (last < num_committed_carries).then_some(params.carry_check_bits),
             }
         })
         .collect();
-    Some(identity)
+    Some(Layout {
+        degree,
+        num_committed_carries,
+        blocks,
+        carry_offset_bits: params.carry_offset_bits,
+        pure_bits: params.pure_bits,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,4 +392,90 @@ fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
         .iter()
         .map(|width| (BigUint::one() << *width) - 1u8)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IdentityShape, Layout, layout};
+    use crate::compiler::passes::{
+        shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+        wide_witness_ints::{
+            rewriter::{
+                division::EuclideanDivision, product::UnsignedProduct, sign::SignedProduct,
+            },
+            test_utils::bn254,
+            types::limb_widths,
+        },
+    };
+    use mavros_artifacts::FieldConfig;
+
+    /// Every block of every identity, at every width, groups no more columns
+    /// than one element can sum together with the carry.
+    #[test]
+    fn every_block_of_an_identity_fits_an_element_with_its_carry() {
+        for field in [bn254(), FieldConfig::goldilocks()] {
+            let id = field.id();
+            let injective = widest_injective_int_bits(field);
+            let h = witness_limb_bits(field);
+            for bits in [h + 1, 2 * h, 3 * h - 1, 320, 1000, 16384] {
+                let widths = limb_widths(bits, h);
+                let shapes: [&dyn IdentityShape; 3] =
+                    [&UnsignedProduct, &SignedProduct, &EuclideanDivision];
+                for shape in shapes {
+                    check_blocks(
+                        layout(shape, &widths, injective),
+                        shape.is_checked(),
+                        injective,
+                        &widths,
+                        &format!("{id:?} int{bits} {shape:?}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Check the block invariants.
+    fn check_blocks(
+        layout: Option<Layout>,
+        is_checked: bool,
+        injective: usize,
+        widths: &[usize],
+        what: &str,
+    ) {
+        let layout = layout.unwrap_or_else(|| panic!("{what}: the field holds the identity"));
+        let limb_bits = widths[0];
+        let mut next = 0;
+        for block in &layout.blocks {
+            assert_eq!(
+                block.first, next,
+                "{what}: blocks are contiguous from column 0"
+            );
+            assert!(block.last >= block.first, "{what}: no block is empty");
+            next = block.last + 1;
+            assert_eq!(
+                block.carry_bits.is_some(),
+                block.last < layout.num_committed_carries,
+                "{what}: block {block:?} checks its carry exactly where one is committed"
+            );
+            if let Some(carry_bits) = block.carry_bits {
+                let columns = block.last - block.first + 1;
+                assert!(
+                    columns * limb_bits + carry_bits <= injective,
+                    "{what}: block {block:?} of {columns} columns with a {carry_bits}-bit carry \
+                     exceeds the {injective}-bit injective width"
+                );
+            }
+        }
+        if is_checked {
+            assert_eq!(
+                next,
+                widths.len(),
+                "{what}: a checked identity certifies every column"
+            );
+        }
+        assert!(
+            next <= layout.degree + 1,
+            "{what}: no more columns certified than F has"
+        );
+    }
 }
