@@ -7,23 +7,27 @@ use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
 #[derive(Clone)]
-pub(super) struct FPolynomial<'a> {
-    /// The terms `F` sums, each `±lhs·rhs` or `±lhs` of factors.
+/// The polynomial representation of a wide integer identity.
+/// The equivalent of `F(X)` in [this scheme](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding)
+pub(super) struct PolynomialIdentity<'a> {
+    /// The terms the identity sums, each of the form `±A(X)·B(X)` or `A(X)` of polynomial factors.
+    /// Each of these factors represents one wide integer.
     pub(super) terms: Vec<Term<'a>>,
 
-    /// What a polynomial identity solves for;
-    /// or [`None`] where every term of the polynomial is given.
-    pub(super) answer: Option<Answer<'a>>,
+    /// What a polynomial identity solves for: e.g C(x) when the identity of the `A(x)B(x) - C(x) = 0`;
+    /// or [`None`] where every term of the polynomial is given, and the idenity can be of any shape.
+    pub(super) target: Option<Target<'a>>,
 
-    layout: Layout,
+    /// How the carry chain is represented in R1CS.
+    layout: ChainLayout,
 }
 
 /// The shape of an identity. Used for finding sound parameters.
 pub(in super::super) trait IdentityShape: fmt::Debug + Sync {
-    /// The number of `±lhs·rhs` terms.
+    /// The number of `±A(X).B(X)` terms.
     fn num_products(&self) -> usize;
 
-    /// The number of `±lhs` terms.
+    /// The number of `±D(X)` terms.
     fn num_linear_terms(&self) -> usize;
 
     /// Whether it is checked against an answer.
@@ -38,18 +42,22 @@ pub(in super::super) trait IdentityShape: fmt::Debug + Sync {
 
     /// Whether an identity of this shape holds at limb `widths`.
     fn admits(&self, widths: &[usize], injective: usize) -> bool {
-        layout(self, widths, injective).is_some()
+        chain_layout(self, widths, injective).is_some()
     }
 }
 
 /// The degree of `F` at `k` limbs.
-fn degree(products: usize, k: usize) -> usize {
-    if products > 0 { 2 * k - 2 } else { k - 1 }
+fn degree(num_quadratic_terms: usize, k: usize) -> usize {
+    if num_quadratic_terms > 0 {
+        2 * k - 2
+    } else {
+        k - 1
+    }
 }
 
-/// What an identity is checked with, from [`f_polynomial_params`].
+/// What an identity is checked with, from [`check_params`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FPolynomialParams {
+struct CheckParams {
     /// The width each carry at a block boundary is range-checked at.
     carry_check_bits: usize,
 
@@ -64,21 +72,21 @@ struct FPolynomialParams {
     t: usize,
 
     /// The integer width the pure side computes at.
-    pure_bits: usize,
+    hint_bits: usize,
 }
 
 /// What an identity over integers at limb `widths` is checked with.
-fn f_polynomial_params(
+fn check_params(
     widths: &[usize],
     injective_integer_width: usize,
     num_quadratic_terms: usize,
     num_linear_terms: usize,
     is_checked: bool,
     has_negative_terms: bool,
-) -> Option<FPolynomialParams> {
+) -> Option<CheckParams> {
     let k = widths.len();
     if k < 2 {
-        ice_unreachable!("polynomial evluation expects multiple limbs");
+        ice_unreachable!("polynomial evaluation expects multiple limbs");
     }
     let get_max_limb_value = |width: usize| (BigUint::one() << width) - 1u8;
 
@@ -107,21 +115,21 @@ fn f_polynomial_params(
 
     if is_checked {
         let group_size = injective_integer_width.checked_sub(carry_check_bits)? / low_limbs_width;
-        (group_size > 0).then_some(FPolynomialParams {
+        (group_size > 0).then_some(CheckParams {
             carry_check_bits,
             carry_offset_bits,
             group_size,
             t: k,
-            pure_bits: low_limbs_width + carry_bits.max(low_limbs_width + 1) + sign_bits,
+            hint_bits: low_limbs_width + carry_bits.max(low_limbs_width + 1) + sign_bits,
         })
     } else {
         let group_size = injective_integer_width.saturating_sub(carry_check_bits) / low_limbs_width;
-        (t == 0 || group_size > 0).then_some(FPolynomialParams {
+        (t == 0 || group_size > 0).then_some(CheckParams {
             carry_check_bits,
             carry_offset_bits,
             group_size,
             t,
-            pure_bits: low_limbs_width + carry_bits.max(low_limbs_width) + sign_bits,
+            hint_bits: low_limbs_width + carry_bits.max(low_limbs_width) + sign_bits,
         })
     }
 }
@@ -129,9 +137,17 @@ fn f_polynomial_params(
 /// One term of an identity.
 #[derive(Clone, Copy)]
 pub(super) struct Term<'a> {
+    /// The sign of the term in the identity: positive or negative
     pub(super) polarity: Polarity,
+    /// Compulsory polynomial factor in the term.
     pub(super) lhs: &'a Factor,
+    /// The second factor of a quadratic term: `B(X)` in `A(X)·B(X)`; or [`None`] for a linear term.
     pub(super) rhs: Option<&'a Factor>,
+    /// The term should be zeroed out when the [`PolynomialIdentity`] it belongs to is run under a guard
+    /// and the guard is false.
+    ///
+    /// Some terms may be supplied as zero by design when the guard is false,
+    /// so no need to add extra operations to zero them out.
     pub(super) gated: bool,
 }
 
@@ -151,25 +167,25 @@ impl Polarity {
     }
 }
 
-/// What a checked polynomial solves for, either a given answer or on to be solved.
+/// What a checked polynomial is held to: a value it witnesses, or a given factor.
 #[derive(Clone, Copy)]
-pub(super) enum Answer<'a> {
-    /// The answer to be solved.
-    Unknown(&'a [usize]),
+pub(super) enum Target<'a> {
+    /// A value the carry chain witnesses.
+    Witnessed(&'a [usize]),
 
     /// A given factor, held to the columns by the polynomial.
     Given(&'a Factor),
 }
 
-impl FPolynomial<'_> {
+impl PolynomialIdentity<'_> {
     /// The columns the carry chain writes a witness from: a carry out of each committed one, and
-    /// an answer limb from each of a witnessed answer's.
+    /// a target limb from each of a witnessed target's.
     pub(super) fn carry_chain_len(&self) -> usize {
-        let answer_limbs = match self.answer {
-            Some(Answer::Unknown(widths)) => widths.len(),
-            Some(Answer::Given(_)) | None => 0,
+        let target_limbs = match self.target {
+            Some(Target::Witnessed(widths)) => widths.len(),
+            Some(Target::Given(_)) | None => 0,
         };
-        self.num_committed_carries().max(answer_limbs)
+        self.num_committed_carries().max(target_limbs)
     }
 
     /// The degree of the `F` polynomial.
@@ -182,6 +198,8 @@ impl FPolynomial<'_> {
         &self.layout.blocks
     }
 
+    /// The number of carries that are actually witnessed. `k - 1` for a checked identity,
+    /// or [`PolynomialIdentity::degree`] otherwise.
     pub(super) fn num_committed_carries(&self) -> usize {
         self.layout.num_committed_carries
     }
@@ -191,43 +209,43 @@ impl FPolynomial<'_> {
     }
 
     pub(super) fn hint_bits(&self) -> usize {
-        self.layout.pure_bits
+        self.layout.hint_bits
     }
 }
 
 /// An identity the lowering builds, which lays out its own terms, so they are of its shape.
-pub(super) trait Identity<'a>: IdentityShape + Copy {
+pub(super) trait IdentityTemplate<'a>: IdentityShape + Copy {
     /// What it is built from.
     type Factors;
 
-    /// Its terms over `factors`, and the answer they are held to.
-    fn terms(self, factors: Self::Factors) -> (Vec<Term<'a>>, Option<Answer<'a>>);
-}
+    /// Its terms over `factors`, and the target they are held to.
+    fn terms(self, factors: Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>);
 
-/// The identity `shape` lays out over `factors` at limb `widths`; or [`None`] exactly where
-/// `shape` does not [admit](IdentityShape::admits) `widths`.
-pub(super) fn build_f_polynomial<'a, S: Identity<'a>>(
-    shape: S,
-    widths: &[usize],
-    injective: usize,
-    factors: S::Factors,
-) -> Option<FPolynomial<'a>> {
-    let layout = layout(&shape, widths, injective)?;
-    let (terms, answer) = shape.terms(factors);
-    if !shape.has_negative_terms() && terms.iter().any(|t| t.polarity == Polarity::Negative) {
-        ice!("{shape:?} subtracts a term, but its carries are planned as non-negative");
+    /// The identity this lays out over `factors` at limb `widths`; or [`None`] exactly where
+    /// it does not [admit](IdentityShape::admits) `widths`.
+    fn instantiate(
+        self,
+        widths: &[usize],
+        injective: usize,
+        factors: Self::Factors,
+    ) -> Option<PolynomialIdentity<'a>> {
+        let layout = chain_layout(&self, widths, injective)?;
+        let (terms, target) = self.terms(factors);
+        if !self.has_negative_terms() && terms.iter().any(|t| t.polarity == Polarity::Negative) {
+            ice!("{self:?} subtracts a term, but its carries are planned as non-negative");
+        }
+        Some(PolynomialIdentity {
+            terms,
+            target,
+            layout,
+        })
     }
-    Some(FPolynomial {
-        terms,
-        answer,
-        layout,
-    })
 }
 
 /// How an identity is cut into blocks.
 #[derive(Clone)]
-struct Layout {
-    /// The degree of the `F` polynomial.
+struct ChainLayout {
+    /// The degree of the identity polynomial.
     degree: usize,
 
     /// The carries the chain commits.
@@ -240,16 +258,16 @@ struct Layout {
     carry_offset_bits: Option<usize>,
 
     /// The integer width the pure side computes at.
-    pure_bits: usize,
+    hint_bits: usize,
 }
 
 /// The layout of an identity of `shape` at limb `widths`; or [`None`] where it is inadmissable.
-fn layout<S: IdentityShape + ?Sized>(
+fn chain_layout<S: IdentityShape + ?Sized>(
     shape: &S,
     widths: &[usize],
     injective: usize,
-) -> Option<Layout> {
-    let params = f_polynomial_params(
+) -> Option<ChainLayout> {
+    let params = check_params(
         widths,
         injective,
         shape.num_products(),
@@ -279,24 +297,31 @@ fn layout<S: IdentityShape + ?Sized>(
             }
         })
         .collect();
-    Some(Layout {
+    Some(ChainLayout {
         degree,
         num_committed_carries,
         blocks,
         carry_offset_bits: params.carry_offset_bits,
-        pure_bits: params.pure_bits,
+        hint_bits: params.hint_bits,
     })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One block of columns
+/// Carries between columns in the block cancel; they are witnessed but not range-checked.
 pub(super) struct Block {
+    /// Index of first column in the block.
+    /// `a` in the notation of [this scheme](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding)
     pub(super) first: usize,
+    /// Index of last column in the block.
+    /// `b` in the notation of [this scheme](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding)
     pub(super) last: usize,
+    /// Number of bits allowed to be carried out of the block. [`None`] where the block ends at
+    /// the top column, which carries nothing out.
     pub(super) carry_bits: Option<usize>,
 }
 
 /// One operand of the schoolbook, limb by limb.
-#[allow(non_snake_case)]
 pub(super) struct Factor {
     /// Each limb at its width.
     pub(super) limbs: Vec<Limb>,
@@ -309,17 +334,16 @@ pub(super) struct Factor {
     pub(super) bounds: Vec<BigUint>,
 
     /// `L = 2^(w−1)` for a signed factor where `w` is the top limb width.
-    pub(super) L: Option<BigUint>,
+    pub(super) signed_offset: Option<BigUint>,
 }
 
 impl Factor {
     /// `limbs` at `widths` as a factor
-    #[allow(non_snake_case)]
     pub(super) fn new(
         limbs: Vec<Limb>,
         widths: &[usize],
         is_witnessed: bool,
-        L: Option<BigUint>,
+        signed_offset: Option<BigUint>,
     ) -> Self {
         let bounds = limbs
             .iter()
@@ -333,7 +357,7 @@ impl Factor {
             limbs,
             is_witnessed,
             bounds,
-            L,
+            signed_offset,
         }
     }
 
@@ -346,7 +370,9 @@ impl Factor {
 
     /// `L` where `limb` is the top limb and the factor is signed.
     pub(super) fn top_offset(&self, limb: usize) -> Option<&BigUint> {
-        self.L.as_ref().filter(|_| limb + 1 == self.limbs.len())
+        self.signed_offset
+            .as_ref()
+            .filter(|_| limb + 1 == self.limbs.len())
     }
 
     /// Whether coefficient `limb` is zero by construction: its limb's bound is zero and is not offset.
@@ -396,7 +422,7 @@ fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IdentityShape, Layout, layout};
+    use super::{ChainLayout, IdentityShape, chain_layout};
     use crate::compiler::passes::{
         shared::limbs::{widest_injective_int_bits, witness_limb_bits},
         wide_witness_ints::{
@@ -423,7 +449,7 @@ mod tests {
                     [&UnsignedProduct, &SignedProduct, &EuclideanDivision];
                 for shape in shapes {
                     check_blocks(
-                        layout(shape, &widths, injective),
+                        chain_layout(shape, &widths, injective),
                         shape.is_checked(),
                         injective,
                         &widths,
@@ -436,7 +462,7 @@ mod tests {
 
     /// Check the block invariants.
     fn check_blocks(
-        layout: Option<Layout>,
+        layout: Option<ChainLayout>,
         is_checked: bool,
         injective: usize,
         widths: &[usize],

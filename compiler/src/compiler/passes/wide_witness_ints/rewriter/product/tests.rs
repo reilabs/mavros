@@ -8,7 +8,7 @@ use crate::{
             wide_witness_ints::{
                 rewriter::{
                     division::EuclideanDivision,
-                    f_poly::{FPolynomial, Factor, build_f_polynomial},
+                    identity::{Factor, IdentityTemplate, PolynomialIdentity},
                     product::UnsignedProduct,
                 },
                 test_utils::{
@@ -64,12 +64,7 @@ fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
 /// widest injective width is `injective` cannot hold it.
 fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize>>> {
     let factor = Factor::full(widths);
-    let identity = build_f_polynomial(
-        UnsignedProduct,
-        widths,
-        injective,
-        (&factor, &factor, widths),
-    )?;
+    let identity = UnsignedProduct.instantiate(widths, injective, (&factor, &factor, widths))?;
     Some(planned_written_checks(&identity, widths, false))
 }
 
@@ -77,7 +72,7 @@ fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize
 /// order they are written, [`None`] for one nothing checks. The answer's limbs are written too
 /// unless `pinned`.
 fn planned_written_checks(
-    identity: &FPolynomial<'_>,
+    identity: &PolynomialIdentity<'_>,
     widths: &[usize],
     pinned: bool,
 ) -> Vec<Option<usize>> {
@@ -410,13 +405,13 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
 /// The range check on each witness the division's schoolbook writes, in order, at full operand ranges.
 pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Option<usize>> {
     let factor = Factor::full(widths);
-    let identity = build_f_polynomial(
-        EuclideanDivision,
-        widths,
-        widest_injective_int_bits(field),
-        (&factor, &factor, &factor, &factor),
-    )
-    .expect("the field holds the division's identity");
+    let identity = EuclideanDivision
+        .instantiate(
+            widths,
+            widest_injective_int_bits(field),
+            (&factor, &factor, &factor, &factor),
+        )
+        .expect("the field holds the division's identity");
     planned_written_checks(&identity, widths, true)
 }
 

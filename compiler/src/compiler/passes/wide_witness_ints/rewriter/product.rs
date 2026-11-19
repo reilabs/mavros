@@ -1,5 +1,5 @@
-use super::f_poly::{
-    Answer, FPolynomial, Factor, Identity, IdentityShape, Limb, Polarity, Term, build_f_polynomial,
+use super::identity::{
+    Factor, IdentityShape, IdentityTemplate, Limb, Polarity, PolynomialIdentity, Target, Term,
 };
 use super::{
     Operands, Rewriter, divided,
@@ -39,10 +39,10 @@ impl IdentityFlags {
     fn new(
         rewriter: &mut Rewriter<'_>,
         guard: Option<ValueId>,
-        answer: Option<Answer<'_>>,
+        target: Option<Target<'_>>,
     ) -> Self {
         Self {
-            range_check_flag: guard.filter(|_| !matches!(answer, Some(Answer::Given(_)))),
+            range_check_flag: guard.filter(|_| !matches!(target, Some(Target::Given(_)))),
             answer_flag: guard.map(|condition| rewriter.cast(condition, CastTarget::Field)),
         }
     }
@@ -91,19 +91,15 @@ impl Rewriter<'_> {
     ///
     /// [`LimbConfig`](super::super::limb_config::LimbConfig) admitted every identity the program
     /// lowers at this limb, so the field holds it.
-    pub(super) fn identity<'f, S: Identity<'f>>(
+    pub(super) fn identity<'f, S: IdentityTemplate<'f>>(
         &self,
         shape: S,
         widths: &[usize],
         factors: S::Factors,
-    ) -> FPolynomial<'f> {
-        build_f_polynomial(
-            shape,
-            widths,
-            widest_injective_int_bits(self.field()),
-            factors,
-        )
-        .unwrap_or_else(|| {
+    ) -> PolynomialIdentity<'f> {
+        shape
+            .instantiate(widths, widest_injective_int_bits(self.field()), factors)
+            .unwrap_or_else(|| {
             ice_unreachable!(
                 "the limb config admits every identity it lowers, but not {shape:?} at {widths:?}"
             )
@@ -146,12 +142,12 @@ impl Rewriter<'_> {
     /// Returning the answer's limbs where it witnesses them.
     pub(super) fn evaluate_f_poly(
         &mut self,
-        f_polynomial: &FPolynomial<'_>,
+        f_polynomial: &PolynomialIdentity<'_>,
         guard: Option<ValueId>,
     ) -> Vec<ValueId> {
         let terms = &f_polynomial.terms[..];
         let pure_integer_type = CastTarget::Int(f_polynomial.hint_bits());
-        let guards = IdentityFlags::new(self, guard, f_polynomial.answer);
+        let guards = IdentityFlags::new(self, guard, f_polynomial.target);
         let pure_range_check_guard = guards.pure_range_check_guard(self, pure_integer_type);
 
         let (witnessed_answer, carries) = self.witness_columns(
@@ -161,7 +157,7 @@ impl Rewriter<'_> {
         );
 
         let answer_as_felts =
-            self.ansswer_as_fields(f_polynomial.answer, &witnessed_answer, guards.answer_flag);
+            self.ansswer_as_fields(f_polynomial.target, &witnessed_answer, guards.answer_flag);
 
         self.check_block_carries(f_polynomial, &carries, guards.range_check_flag);
         let terms_as_felts = self.terms_as_fields(&f_polynomial, guards.answer_flag);
@@ -183,11 +179,11 @@ impl Rewriter<'_> {
     /// the answer's limbs, where they are solved, and each carry.
     fn witness_columns(
         &mut self,
-        f_polynomial: &FPolynomial<'_>,
+        f_polynomial: &PolynomialIdentity<'_>,
         range_check_guard: Option<ValueId>,
         pure_range_check_guard: Option<ValueId>,
     ) -> (Vec<ValueId>, Vec<ValueId>) {
-        let answer = f_polynomial.answer;
+        let target = f_polynomial.target;
         let hint_bits = f_polynomial.hint_bits();
 
         let mut witnessed_answer = Vec::new();
@@ -202,7 +198,7 @@ impl Rewriter<'_> {
             if let Some(carry) = carry_in {
                 running_sum = self.bin(BinaryArithOpKind::SAdd, running_sum, carry);
             }
-            if let Some(Answer::Unknown(widths)) = answer
+            if let Some(Target::Witnessed(widths)) = target
                 && column < widths.len()
             {
                 let low = self.cast(running_sum, CastTarget::Int(widths[column]));
@@ -230,7 +226,7 @@ impl Rewriter<'_> {
     /// The carry out of a column whose running sum is `running`, as its hint and its witness.
     fn witness_carry(
         &mut self,
-        identity: &FPolynomial<'_>,
+        identity: &PolynomialIdentity<'_>,
         running: ValueId,
     ) -> (ValueId, ValueId) {
         match identity.carry_offset_bits() {
@@ -261,7 +257,7 @@ impl Rewriter<'_> {
     /// Range check the carry out of each block.
     fn check_block_carries(
         &mut self,
-        identity: &FPolynomial<'_>,
+        identity: &PolynomialIdentity<'_>,
         carries: &[ValueId],
         check: Option<ValueId>,
     ) {
@@ -289,7 +285,7 @@ impl Rewriter<'_> {
     /// The limbs of each term's factors as field elements, a gated term's left factor scaled by `flag`.
     fn terms_as_fields(
         &mut self,
-        f_polynomial: &FPolynomial<'_>,
+        f_polynomial: &PolynomialIdentity<'_>,
         flag: Option<ValueId>,
     ) -> Vec<(Vec<ValueId>, Option<Vec<ValueId>>)> {
         let terms = &f_polynomial.terms[..];
@@ -321,17 +317,17 @@ impl Rewriter<'_> {
     /// The answer as field_elements
     fn ansswer_as_fields(
         &mut self,
-        answer: Option<Answer<'_>>,
+        target: Option<Target<'_>>,
         witnessed_answer_limbs: &[ValueId],
         flag: Option<ValueId>,
     ) -> Vec<ValueId> {
-        match answer {
+        match target {
             // No specific answer term in polynomial.
             None => Vec::new(),
             // Answer has been solved in previous stage: return.
-            Some(Answer::Unknown(_)) => witnessed_answer_limbs.to_vec(),
+            Some(Target::Witnessed(_)) => witnessed_answer_limbs.to_vec(),
             // Answer limbs were supplied as witnesses. Mask if needed.
-            Some(Answer::Given(target)) => target
+            Some(Target::Given(given)) => given
                 .limbs
                 .iter()
                 .map(|limb| {
@@ -627,18 +623,18 @@ impl IdentityShape for UnsignedProduct {
     }
 }
 
-impl<'a> Identity<'a> for UnsignedProduct {
+impl<'a> IdentityTemplate<'a> for UnsignedProduct {
     /// `a`, `b`, and the widths `c` is solved at.
     type Factors = (&'a Factor, &'a Factor, &'a [usize]);
 
-    fn terms(self, (a, b, widths): Self::Factors) -> (Vec<Term<'a>>, Option<Answer<'a>>) {
+    fn terms(self, (a, b, widths): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let product = Term {
             polarity: Polarity::Positive,
             lhs: a,
             rhs: Some(b),
             gated: true,
         };
-        (vec![product], Some(Answer::Unknown(widths)))
+        (vec![product], Some(Target::Witnessed(widths)))
     }
 }
 

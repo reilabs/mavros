@@ -10,7 +10,7 @@ use crate::compiler::{
 use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
-    f_poly::{Answer as PolynomialAnswer, Factor, Identity, IdentityShape, Limb, Polarity, Term},
+    identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
     product::past_the_single_cell_product,
     sign::Sign,
 };
@@ -40,11 +40,11 @@ impl IdentityShape for EuclideanDivision {
     }
 }
 
-impl<'a> Identity<'a> for EuclideanDivision {
+impl<'a> IdentityTemplate<'a> for EuclideanDivision {
     /// `q`, `d`, `r` and `n`.
     type Factors = (&'a Factor, &'a Factor, &'a Factor, &'a Factor);
 
-    fn terms(self, (q, d, r, n): Self::Factors) -> (Vec<Term<'a>>, Option<PolynomialAnswer<'a>>) {
+    fn terms(self, (q, d, r, n): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let terms = vec![
             Term {
                 polarity: Polarity::Positive,
@@ -59,7 +59,7 @@ impl<'a> Identity<'a> for EuclideanDivision {
                 gated: false,
             },
         ];
-        (terms, Some(PolynomialAnswer::Given(n)))
+        (terms, Some(Target::Given(n)))
     }
 }
 
@@ -294,7 +294,7 @@ impl Rewriter<'_> {
             limbs,
             is_witnessed: true,
             bounds,
-            L: None,
+            signed_offset: None,
         }
     }
 

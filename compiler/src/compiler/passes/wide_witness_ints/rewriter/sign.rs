@@ -2,7 +2,7 @@ use super::{
     super::types::limb_widths,
     CarryOut, Rewriter,
     division::Answer,
-    f_poly::{Answer as PolynomialAnswer, Factor, Identity, IdentityShape, Limb, Polarity, Term},
+    identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
 };
 
 use crate::compiler::{
@@ -34,11 +34,11 @@ impl IdentityShape for SignedProduct {
     }
 }
 
-impl<'a> Identity<'a> for SignedProduct {
+impl<'a> IdentityTemplate<'a> for SignedProduct {
     /// `a`, `b` and `c`.
     type Factors = (&'a Factor, &'a Factor, &'a Factor);
 
-    fn terms(self, (a, b, c): Self::Factors) -> (Vec<Term<'a>>, Option<PolynomialAnswer<'a>>) {
+    fn terms(self, (a, b, c): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let terms = vec![
             Term {
                 polarity: Polarity::Positive,

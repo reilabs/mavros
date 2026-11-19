@@ -27,8 +27,8 @@ use shift::shifted;
 mod cast;
 mod chain;
 mod division;
-mod f_poly;
 mod gadgets;
+mod identity;
 mod lower;
 mod product;
 mod shift;
@@ -38,7 +38,7 @@ mod spread;
 #[cfg(test)]
 pub(super) use division::EuclideanDivision;
 pub(super) use division::divided;
-pub(super) use f_poly::IdentityShape;
+pub(super) use identity::IdentityShape;
 #[cfg(test)]
 pub(super) use product::division_carries;
 pub(super) use product::{lowered_identity, multiplied};
