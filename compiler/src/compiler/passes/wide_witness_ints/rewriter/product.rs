@@ -1,3 +1,11 @@
+//! Products too wide for one field element, lowered to a schoolbook multiplication over limbs and checked by a
+//! [`PolynomialIdentity`].
+//!
+//! Each wide operan `a` is a [`Factor`] whose limbs are the coefficients of a polynomial `A(X)`, with
+//! `A(β) = a` at the radix `β = 2^limb_bits`. An identity such as `a·b = c` becomes
+//! `F(X) = A(X)·B(X) − C(X)`, which vanishes at `β` exactly when `F(X) = (β − X)·H(X)` for the
+//! carry polynomial `H`. We check that `A(X)·B(X) − C(X) = (β − X)·H(X)` at `deg F` points.
+
 use super::identity::{
     Factor, IdentityShape, IdentityTemplate, Limb, Polarity, PolynomialIdentity, Target, Term,
 };
@@ -28,10 +36,15 @@ use num_traits::One;
 pub(crate) use tests::division_carries;
 #[cfg(test)]
 mod tests;
+
+/// The forms an identity's guard takes.
 #[derive(Clone, Copy)]
 struct IdentityFlags {
-    range_check_flag: Option<ValueId>,
-
+    /// The guard on the range checks and on the pure side's columns. [`None`] for a
+    /// [`Target::Given`] identity: its witnesses are already zero where the guard is off, so its
+    /// checks hold unguarded.
+    range_check_guard: Option<ValueId>,
+    /// The guard as a field element, scaling the gated terms and a given target's limbs.
     answer_flag: Option<ValueId>,
 }
 
@@ -42,7 +55,7 @@ impl IdentityFlags {
         target: Option<Target<'_>>,
     ) -> Self {
         Self {
-            range_check_flag: guard.filter(|_| !matches!(target, Some(Target::Given(_)))),
+            range_check_guard: guard.filter(|_| !matches!(target, Some(Target::Given(_)))),
             answer_flag: guard.map(|condition| rewriter.cast(condition, CastTarget::Field)),
         }
     }
@@ -53,7 +66,7 @@ impl IdentityFlags {
         rewriter: &mut Rewriter<'_>,
         hint: CastTarget,
     ) -> Option<ValueId> {
-        self.range_check_flag.map(|condition| {
+        self.range_check_guard.map(|condition| {
             let pure = rewriter.pure_of(condition, rewriter.is_witness(condition));
             rewriter.cast(pure, hint)
         })
@@ -61,10 +74,10 @@ impl IdentityFlags {
 }
 
 impl Rewriter<'_> {
-    /// An unsigned product the single cell cannot hold. Returns whether `op` was one and was
-    /// lowered.
+    /// Lowers a product the single cell cannot hold. Returns whether `op` was one and was lowered.
     ///
-    /// A schoolbook at the witness limb, checked by the polynomial identity.
+    /// An unsigned product is a schoolbook at the witness limb, checked by the polynomial
+    /// identity. A signed one is handed to [`Self::lower_signed_product`].
     pub(super) fn lower_product(&mut self, op: &OpCode) -> bool {
         let Some(Operands { bits, lhs, rhs }) = multiplied(op, self.types, self.field()) else {
             return false;
@@ -82,7 +95,7 @@ impl Rewriter<'_> {
         let lhs = self.factor(lhs, bits, &widths);
         let rhs = self.factor(rhs, bits, &widths);
         let identity = self.identity(UnsignedProduct, &widths, (&lhs, &rhs, &widths));
-        let answer = self.evaluate_f_poly(&identity, guard);
+        let answer = self.lower_identity(&identity, guard);
         self.deliver(*result, answer, &widths, bits, guard);
         true
     }
@@ -138,31 +151,28 @@ impl Rewriter<'_> {
         Factor::new(limbs, widths, self.is_witness(value), None)
     }
 
-    /// Witnesses and checks `f_polynomial`,
-    /// Returning the answer's limbs where it witnesses them.
-    pub(super) fn evaluate_f_poly(
+    /// Witnesses and checks `identity`, returning the answer's limbs. These are empty unless the
+    /// target is [`Target::Witnessed`].
+    pub(super) fn lower_identity(
         &mut self,
-        f_polynomial: &PolynomialIdentity<'_>,
+        identity: &PolynomialIdentity<'_>,
         guard: Option<ValueId>,
     ) -> Vec<ValueId> {
-        let terms = &f_polynomial.terms[..];
-        let pure_integer_type = CastTarget::Int(f_polynomial.hint_bits());
-        let guards = IdentityFlags::new(self, guard, f_polynomial.target);
-        let pure_range_check_guard = guards.pure_range_check_guard(self, pure_integer_type);
+        let terms = &identity.terms[..];
+        let hint_type = CastTarget::Int(identity.hint_bits());
+        let flags = IdentityFlags::new(self, guard, identity.target);
+        let pure_range_check_guard = flags.pure_range_check_guard(self, hint_type);
 
-        let (witnessed_answer, carries) = self.witness_columns(
-            f_polynomial,
-            guards.range_check_flag,
-            pure_range_check_guard,
-        );
+        let (witnessed_answer, carries) =
+            self.witness_columns(identity, flags.range_check_guard, pure_range_check_guard);
 
         let answer_as_felts =
-            self.ansswer_as_fields(f_polynomial.target, &witnessed_answer, guards.answer_flag);
+            self.answer_as_felts(identity.target, &witnessed_answer, flags.answer_flag);
 
-        self.check_block_carries(f_polynomial, &carries, guards.range_check_flag);
-        let terms_as_felts = self.terms_as_fields(&f_polynomial, guards.answer_flag);
+        self.check_block_carries(identity, &carries, flags.range_check_guard);
+        let terms_as_felts = self.terms_as_felts(&identity, flags.answer_flag);
 
-        for point in 0..=f_polynomial.degree() as u64 {
+        for point in 0..=identity.degree() as u64 {
             self.check_at_point(
                 point,
                 terms,
@@ -175,25 +185,27 @@ impl Rewriter<'_> {
         witnessed_answer
     }
 
-    /// What the polynomial's carry chain witnesses:
-    /// the answer's limbs, where they are solved, and each carry.
+    /// What the polynomial's carry chain witnesses, as `(answer limbs, carries)`. The answer's
+    /// limbs are solved only for a [`Target::Witnessed`] identity.
     fn witness_columns(
         &mut self,
-        f_polynomial: &PolynomialIdentity<'_>,
+        identity: &PolynomialIdentity<'_>,
         range_check_guard: Option<ValueId>,
         pure_range_check_guard: Option<ValueId>,
     ) -> (Vec<ValueId>, Vec<ValueId>) {
-        let target = f_polynomial.target;
-        let hint_bits = f_polynomial.hint_bits();
+        let target = identity.target;
+        let hint_bits = identity.hint_bits();
 
         let mut witnessed_answer = Vec::new();
-        let mut carries = Vec::with_capacity(f_polynomial.num_committed_carries());
+        let mut carries = Vec::with_capacity(identity.num_committed_carries());
 
         let mut carry_in: Option<ValueId> = None;
-        for column in 0..f_polynomial.carry_chain_len() {
-            let mut running_sum = self.pure_column(&f_polynomial.terms, column, hint_bits);
-            if let Some(mask) = pure_range_check_guard {
-                running_sum = self.bin(BinaryArithOpKind::SMul, mask, running_sum);
+        for column in 0..identity.carry_chain_len() {
+            let mut running_sum = self.pure_column(&identity.terms, column, hint_bits);
+            // Where the guard is off, every hint is zero, so the guarded checks hold whatever the
+            // untaken branch left in the operands.
+            if let Some(pure_guard) = pure_range_check_guard {
+                running_sum = self.bin(BinaryArithOpKind::SMul, pure_guard, running_sum);
             }
             if let Some(carry) = carry_in {
                 running_sum = self.bin(BinaryArithOpKind::SAdd, running_sum, carry);
@@ -213,34 +225,36 @@ impl Rewriter<'_> {
                 );
                 witnessed_answer.push(written);
             }
-            if column >= f_polynomial.num_committed_carries() {
+            // The columns past the committed carries only solve answer limbs. Their carries are
+            // never witnessed.
+            if column >= identity.num_committed_carries() {
                 continue;
             }
-            let (carry, witnessed_carry) = self.witness_carry(f_polynomial, running_sum);
+            let (carry, witnessed_carry) = self.witness_carry(identity, running_sum);
             carries.push(witnessed_carry);
             carry_in = Some(carry);
         }
         (witnessed_answer, carries)
     }
 
-    /// The carry out of a column whose running sum is `running`, as its hint and its witness.
+    /// The carry out of a column whose running sum is `running_sum`, as its hint and its witness.
     fn witness_carry(
         &mut self,
         identity: &PolynomialIdentity<'_>,
-        running: ValueId,
+        running_sum: ValueId,
     ) -> (ValueId, ValueId) {
         match identity.carry_offset_bits() {
             None => {
-                let carry = self.shifted_down(running, identity.hint_bits(), self.limb_bits());
+                let carry = self.shifted_down(running_sum, identity.hint_bits(), self.limb_bits());
                 let carry_as_field = self.cast(carry, CastTarget::Field);
                 (carry, self.write_witness(carry_as_field))
             }
             Some(offset_bits) => {
-                let limb_bits = self.int_const(IntBits::from_u128(
+                let shift = self.int_const(IntBits::from_u128(
                     identity.hint_bits(),
                     self.limb_bits() as u128,
                 ));
-                let carry = self.bin(BinaryArithOpKind::SShr, running, limb_bits);
+                let carry = self.bin(BinaryArithOpKind::SShr, running_sum, shift);
                 let offset = self.int_const(IntBits::from_biguint(
                     identity.hint_bits(),
                     &(BigUint::one() << offset_bits),
@@ -259,7 +273,7 @@ impl Rewriter<'_> {
         &mut self,
         identity: &PolynomialIdentity<'_>,
         carries: &[ValueId],
-        check: Option<ValueId>,
+        range_check_guard: Option<ValueId>,
     ) {
         let offset = identity
             .carry_offset_bits()
@@ -272,7 +286,7 @@ impl Rewriter<'_> {
                     None => carry,
                 };
                 self.push_guarded(
-                    check,
+                    range_check_guard,
                     OpCode::Rangecheck {
                         value,
                         max_bits: carry_bits,
@@ -282,13 +296,14 @@ impl Rewriter<'_> {
         }
     }
 
-    /// The limbs of each term's factors as field elements, a gated term's left factor scaled by `flag`.
-    fn terms_as_fields(
+    /// The limbs of each term's factors as field elements, with a gated term's left factor scaled
+    /// by `flag`.
+    fn terms_as_felts(
         &mut self,
-        f_polynomial: &PolynomialIdentity<'_>,
+        identity: &PolynomialIdentity<'_>,
         flag: Option<ValueId>,
     ) -> Vec<(Vec<ValueId>, Option<Vec<ValueId>>)> {
-        let terms = &f_polynomial.terms[..];
+        let terms = &identity.terms[..];
         let mut fields: Vec<(Vec<ValueId>, Option<Vec<ValueId>>)> = Vec::with_capacity(terms.len());
         for term in terms {
             let lhs = (0..term.lhs.limbs.len())
@@ -314,19 +329,19 @@ impl Rewriter<'_> {
         fields
     }
 
-    /// The answer as field_elements
-    fn ansswer_as_fields(
+    /// The answer's limbs as field elements: the `C` of [`Self::check_at_point`].
+    fn answer_as_felts(
         &mut self,
         target: Option<Target<'_>>,
         witnessed_answer_limbs: &[ValueId],
         flag: Option<ValueId>,
     ) -> Vec<ValueId> {
         match target {
-            // No specific answer term in polynomial.
+            // The identity has no answer term.
             None => Vec::new(),
-            // Answer has been solved in previous stage: return.
+            // The answer's limbs were witnessed by `witness_columns`.
             Some(Target::Witnessed(_)) => witnessed_answer_limbs.to_vec(),
-            // Answer limbs were supplied as witnesses. Mask if needed.
+            // The answer is a given factor, zeroed by the guard where there is one.
             Some(Target::Given(given)) => given
                 .limbs
                 .iter()
@@ -341,9 +356,10 @@ impl Rewriter<'_> {
         }
     }
 
-    /// The identity's row at `point`: `Σ ±terms − (β − point)·H − C = 0`, with one product of
-    /// witnesses as the row's multiplication and each further one witnessed and pinned by a row of
-    /// its own.
+    /// The identity's row at `point`: `Σ ±terms − (β − point)·H − C = 0`, where `β` is the radix
+    /// `2^limb_bits`, `H` is the carry polynomial and `C` is the answer polynomial, all evaluated
+    /// at `point`. One product of witnesses is the row's multiplication. Each further one is
+    /// witnessed and pinned by a row of its own.
     fn check_at_point(
         &mut self,
         point: u64,
@@ -351,12 +367,12 @@ impl Rewriter<'_> {
         terms_as_felts: &[(Vec<ValueId>, Option<Vec<ValueId>>)],
         carries: &[ValueId],
         answer: &[ValueId],
-        mask: Option<ValueId>,
+        pure_guard: Option<ValueId>,
     ) {
         let radix = self.field().two_pow(self.limb_bits());
 
-        let mut quadratic = Vec::new();
-        let mut rest: Vec<(Polarity, ValueId)> = Vec::new();
+        let mut witness_products = Vec::new();
+        let mut linear: Vec<(Polarity, ValueId)> = Vec::new();
         for (term, (lhs, rhs)) in terms.iter().zip(terms_as_felts) {
             let a = self.evaluate_at(lhs, point);
             match rhs {
@@ -366,14 +382,14 @@ impl Rewriter<'_> {
                         .rhs
                         .filter(|rhs| term.lhs.is_witnessed && rhs.is_witnessed)
                     {
-                        Some(rhs) => quadratic.push((term, rhs, a, b)),
+                        Some(rhs) => witness_products.push((term, rhs, a, b)),
                         None => {
                             let product = self.bin(BinaryArithOpKind::UMul, a, b);
-                            rest.push((term.polarity, product));
+                            linear.push((term.polarity, product));
                         }
                     }
                 }
-                None => rest.push((term.polarity, a)),
+                None => linear.push((term.polarity, a)),
             }
         }
 
@@ -381,53 +397,53 @@ impl Rewriter<'_> {
             let h = self.evaluate_at(carries, point);
             let scale = self.field_const(radix - self.field().constant(point));
             let h = self.bin(BinaryArithOpKind::UMul, h, scale);
-            rest.push((Polarity::Negative, h));
+            linear.push((Polarity::Negative, h));
         }
 
         if !answer.is_empty() {
             let c = self.evaluate_at(answer, point);
-            rest.push((Polarity::Negative, c));
+            linear.push((Polarity::Negative, c));
         }
 
-        let head = quadratic
+        let row_product = witness_products
             .first()
             .map(|(term, _, a, b)| (term.polarity, *a, *b));
 
-        for (term, rhs, a, b) in quadratic.into_iter().skip(1) {
+        for (term, rhs, a, b) in witness_products.into_iter().skip(1) {
             // A second product of witnesses has no place in the row: it is witnessed from the pure
             // side and pinned by a row of its own.
-            let mask = mask.filter(|_| term.gated);
-            let written = self.witness_product_at(point, term.lhs, rhs, mask);
+            let pure_guard = pure_guard.filter(|_| term.gated);
+            let written = self.witness_product_at(point, term.lhs, rhs, pure_guard);
             self.push(OpCode::Constrain { a, b, c: written });
-            rest.push((term.polarity, written));
+            linear.push((term.polarity, written));
         }
 
-        match head {
+        match row_product {
             None => {
-                let sum = self.signed_sum(&rest, &CastTarget::Field);
+                let sum = self.signed_sum(&linear, &CastTarget::Field);
                 let zero = self.field_const(self.field().zero());
                 self.constrain_equal(sum, zero, None);
             }
             Some((polarity, a, b)) => {
                 if polarity == Polarity::Positive {
-                    for (polarity, _) in &mut rest {
+                    for (polarity, _) in &mut linear {
                         *polarity = polarity.flipped();
                     }
                 }
-                let c = self.signed_sum(&rest, &CastTarget::Field);
+                let c = self.signed_sum(&linear, &CastTarget::Field);
                 self.push(OpCode::Constrain { a, b, c });
             }
         }
     }
 
     /// The product of factors `lhs` and `rhs` at `point`, witnessed from the pure side, the left
-    /// one scaled by `mask` where there is one.
+    /// one scaled by `pure_guard` where there is one.
     fn witness_product_at(
         &mut self,
         point: u64,
         lhs: &Factor,
         rhs: &Factor,
-        mask: Option<ValueId>,
+        pure_guard: Option<ValueId>,
     ) -> ValueId {
         let pure_lhs: Vec<_> = (0..lhs.limbs.len())
             .map(|limb| self.factor_limb_pure(lhs, limb, &CastTarget::Field))
@@ -435,13 +451,13 @@ impl Rewriter<'_> {
         let pure_rhs: Vec<_> = (0..rhs.limbs.len())
             .map(|limb| self.factor_limb_pure(rhs, limb, &CastTarget::Field))
             .collect();
-        let mut pa = self.evaluate_at(&pure_lhs, point);
-        if let Some(mask) = mask {
-            let mask = self.cast(mask, CastTarget::Field);
-            pa = self.bin(BinaryArithOpKind::UMul, mask, pa);
+        let mut pure_lhs_at = self.evaluate_at(&pure_lhs, point);
+        if let Some(pure_guard) = pure_guard {
+            let flag = self.cast(pure_guard, CastTarget::Field);
+            pure_lhs_at = self.bin(BinaryArithOpKind::UMul, flag, pure_lhs_at);
         }
-        let pb = self.evaluate_at(&pure_rhs, point);
-        let product = self.bin(BinaryArithOpKind::UMul, pa, pb);
+        let pure_rhs_at = self.evaluate_at(&pure_rhs, point);
+        let product = self.bin(BinaryArithOpKind::UMul, pure_lhs_at, pure_rhs_at);
         self.write_witness(product)
     }
 
@@ -477,7 +493,8 @@ impl Rewriter<'_> {
         sum.unwrap_or_else(|| zero(self))
     }
 
-    /// Calculate column `column` of `terms`.
+    /// Column `column_idx` of the schoolbook over `terms` on the pure side: the signed sum of
+    /// every term that lands in it, as an integer of `hint_bits`.
     fn pure_column(&mut self, terms: &[Term<'_>], column_idx: usize, hint_bits: usize) -> ValueId {
         let hint_type = CastTarget::Int(hint_bits);
         let mut values: Vec<(Polarity, ValueId)> = Vec::new();
@@ -523,8 +540,8 @@ impl Rewriter<'_> {
             let term = if power == self.field().one() {
                 *coefficient
             } else {
-                let place = self.field_const(power);
-                self.bin(BinaryArithOpKind::UMul, *coefficient, place)
+                let power_const = self.field_const(power);
+                self.bin(BinaryArithOpKind::UMul, *coefficient, power_const)
             };
             sum = Some(match sum {
                 None => term,
@@ -578,6 +595,9 @@ impl Rewriter<'_> {
     }
 
     /// `value`, limb `limb` of `factor` as `target`, less the limb's offset where it has one.
+    ///
+    /// A signed factor's top limb is stored raised by `L = 2^(w−1)`, which keeps it non-negative.
+    /// Subtracting `L` recovers the signed coefficient.
     fn sub_offset(
         &mut self,
         factor: &Factor,
@@ -670,7 +690,7 @@ pub(in super::super) fn multiplied(
     types: &FunctionTypeInfo,
     field: FieldConfig,
 ) -> Option<Operands> {
-    past_the_single_cell_product(
+    exceeds_single_cell_product(
         op,
         types,
         field,
@@ -681,7 +701,7 @@ pub(in super::super) fn multiplied(
 /// A binary operation of one of `kinds`, guarded or not, with a witnessed operand, at a width whose
 /// product one element cannot hold: past [`single_cell_product_fits`] for an unsigned one, and
 /// past [`single_cell_signed_product_fits`] for a signed one.
-pub(super) fn past_the_single_cell_product(
+pub(super) fn exceeds_single_cell_product(
     op: &OpCode,
     types: &FunctionTypeInfo,
     field: FieldConfig,

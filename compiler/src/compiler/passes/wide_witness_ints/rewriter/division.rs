@@ -11,7 +11,7 @@ use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
     identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
-    product::past_the_single_cell_product,
+    product::exceeds_single_cell_product,
     sign::Sign,
 };
 use mavros_artifacts::FieldConfig;
@@ -220,7 +220,7 @@ impl Rewriter<'_> {
         let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
 
         let identity = self.identity(EuclideanDivision, widths, (&q, d, &r, n));
-        self.evaluate_f_poly(&identity, guard);
+        self.lower_identity(&identity, guard);
 
         // `r < d` reads only the limbs either side can reach, as above them both are zero.
         let reached = (0..widths.len())
@@ -341,7 +341,7 @@ pub(in super::super) fn divided(
     types: &FunctionTypeInfo,
     field: FieldConfig,
 ) -> Option<Operands> {
-    past_the_single_cell_product(
+    exceeds_single_cell_product(
         op,
         types,
         field,

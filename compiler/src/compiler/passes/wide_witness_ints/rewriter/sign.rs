@@ -98,7 +98,7 @@ impl Rewriter<'_> {
         let c_offset = self.offset_factor_of(c_limbs.clone(), &widths);
 
         let identity = self.identity(SignedProduct, &widths, (&a, b, &c_offset));
-        self.evaluate_f_poly(&identity, guard);
+        self.lower_identity(&identity, guard);
 
         let answer = self.limb_fields(c_limbs);
         self.deliver(result, answer, &widths, bits, guard);
