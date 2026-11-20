@@ -30,7 +30,7 @@ impl Rewriter<'_> {
     /// over the bits of how many whole limbs it moves. A signed right shift is either, with the
     /// vacated bits filled by [`Self::fill_with_sign`] or by complements around the shift.
     pub(super) fn lower_shift(&mut self, op: &OpCode) -> bool {
-        let Some(Operands { bits, lhs, rhs }) = shifted(op, self.types, self.field) else {
+        let Some(Operands { bits, lhs, rhs }) = shifted(op, self.types, self.field()) else {
             return false;
         };
         let (guard, inner) = self.split_guard(op);
@@ -77,8 +77,8 @@ impl Rewriter<'_> {
     /// is on. The answer is zero, so it is in range where the guard is off.
     fn shift_out_of_range(&mut self, result: ValueId, bits: usize, guard: Option<ValueId>) {
         let (zero, one) = (
-            self.field_const(self.field.zero()),
-            self.field_const(self.field.one()),
+            self.field_const(self.field().zero()),
+            self.field_const(self.field().one()),
         );
         self.push_guarded(
             guard,
@@ -196,7 +196,7 @@ impl Rewriter<'_> {
                 let scaled = if landed == start {
                     *piece
                 } else {
-                    let place = self.field_const(self.field.two_pow(landed - start));
+                    let place = self.field_const(self.field().two_pow(landed - start));
                     self.bin(BinaryArithOpKind::UMul, *piece, place)
                 };
                 sum = Some(match sum {
@@ -204,7 +204,7 @@ impl Rewriter<'_> {
                     Some(acc) => self.bin(BinaryArithOpKind::UAdd, acc, scaled),
                 });
             }
-            answer.push(sum.unwrap_or_else(|| self.field_const(self.field.zero())));
+            answer.push(sum.unwrap_or_else(|| self.field_const(self.field().zero())));
             start = end;
         }
 
@@ -249,7 +249,7 @@ impl Rewriter<'_> {
                 (None, Some(pure)) => self.witness_window(pure, width, low, piece_width),
                 (None, None) => ice_unreachable!("a segment is known or has a pure shadow"),
             };
-            let place = self.field_const(self.field.two_pow(low));
+            let place = self.field_const(self.field().two_pow(low));
             let scaled = self.bin(BinaryArithOpKind::UMul, piece, place);
             lowest = self.bin(BinaryArithOpKind::USub, lowest, scaled);
             pieces.push((window[0], piece_width, piece));
@@ -333,7 +333,7 @@ impl Rewriter<'_> {
         let (e, factor, factor_hint) = self.shift_amount(rhs, bits, stages, left, guard);
 
         // The split of every limb, as its two halves' field elements.
-        let two_pow_limb = self.field_const(self.field.two_pow(limb_bits));
+        let two_pow_limb = self.field_const(self.field().two_pow(limb_bits));
         let hint_width = CastTarget::Int(2 * limb_bits);
         let mut operand = self.chain_limbs(lhs, bits, count);
         let sign = signed.then(|| self.operand_sign(&operand, &widths));
@@ -349,7 +349,7 @@ impl Rewriter<'_> {
         let narrow_top = left && top_width < limb_bits;
         for (index, (&(limb, witnessed), width)) in operand.iter().zip(&widths).enumerate() {
             if self.known(limb).is_some_and(|pattern| pattern.is_zero()) {
-                let zero = self.field_const(self.field.zero());
+                let zero = self.field_const(self.field().zero());
                 halves.push((zero, zero));
                 continue;
             }
@@ -360,7 +360,7 @@ impl Rewriter<'_> {
             // narrow top limb's high half is discarded, and the cut below splits it anyway.
             let high_bits = if left { width - 1 } else { *width };
             if high_bits == 0 || (narrow_top && index + 1 == count) {
-                halves.push((self.field_const(self.field.zero()), product));
+                halves.push((self.field_const(self.field().zero()), product));
                 continue;
             }
             let pure = self.pure_of(limb, witnessed);
@@ -377,7 +377,7 @@ impl Rewriter<'_> {
         }
 
         // The answer's limbs before the whole limbs move.
-        let zero = self.field_const(self.field.zero());
+        let zero = self.field_const(self.field().zero());
         let mut limbs: Vec<ValueId> = (0..count)
             .map(|index| {
                 let (own, neighbour) = if left {
@@ -421,7 +421,7 @@ impl Rewriter<'_> {
             let pure = self.cast(top, CastTarget::ValueOf);
             let pure = self.cast(pure, CastTarget::Int(reach));
             let high = self.witness_window(pure, reach, top_width, limb_bits);
-            let place = self.field_const(self.field.two_pow(top_width));
+            let place = self.field_const(self.field().two_pow(top_width));
             let scaled = self.bin(BinaryArithOpKind::UMul, high, place);
             let low = self.bin(BinaryArithOpKind::USub, top, scaled);
             self.push(OpCode::Rangecheck {
@@ -459,7 +459,7 @@ impl Rewriter<'_> {
         let limb_bits = self.limb_bits();
         let log_limb = limb_bits.trailing_zeros() as usize;
         assert!(
-            limb_bits.is_power_of_two() && log_limb <= max_pow2_table_size(self.field),
+            limb_bits.is_power_of_two() && log_limb <= max_pow2_table_size(self.field()),
             "ICE: a {limb_bits}-bit limb has no powers-of-two table to split it at an amount"
         );
 
@@ -467,7 +467,7 @@ impl Rewriter<'_> {
             return self.pure_shift_amount(rhs, bits, stages, left, guard);
         }
         // The amount is as wide as the value, so it is held in limbs exactly where the value is.
-        let (low, rest, low_bits) = if bits > multi_cell_int_bits(self.field) {
+        let (low, rest, low_bits) = if bits > multi_cell_int_bits(self.field()) {
             let widths = limb_widths(bits, limb_bits);
             let limbs = self.operand_limbs(rhs, widths.len());
             (limbs[0], limbs[1..].to_vec(), widths[0])
@@ -477,7 +477,7 @@ impl Rewriter<'_> {
 
         // Every limb above the lowest is zero, or the amount is past any width: every width is
         // below `2^h`, the most the lowest limb holds.
-        let zero = self.field_const(self.field.zero());
+        let zero = self.field_const(self.field().zero());
         for limb in rest {
             let limb = self.cast(limb, CastTarget::Field);
             self.constrain_equal(limb, zero, guard);
@@ -507,7 +507,7 @@ impl Rewriter<'_> {
                 value: bit,
                 max_bits: 1,
             });
-            let place = self.field_const(self.field.two_pow(log_limb + stage));
+            let place = self.field_const(self.field().two_pow(log_limb + stage));
             let scaled = self.bin(BinaryArithOpKind::UMul, bit, place);
             sum = self.bin(BinaryArithOpKind::UAdd, sum, scaled);
             e.push(bit);
@@ -517,7 +517,7 @@ impl Rewriter<'_> {
         // Where `h·2^stages` is not the width, the decomposition alone does not bound the amount
         // below it, so it is checked explicitly.
         if limb_bits << stages != bits {
-            let largest = self.field_const(self.field.constant((bits - 1) as u64));
+            let largest = self.field_const(self.field().constant((bits - 1) as u64));
             let headroom = self.bin(BinaryArithOpKind::USub, largest, low_field);
             self.push(OpCode::Rangecheck {
                 value: headroom,
@@ -529,7 +529,7 @@ impl Rewriter<'_> {
         // `r` is already zero where the guard is off.
         let power_field = self.cast(hints.power, CastTarget::Field);
         let power = self.write_witness(power_field);
-        let one_flag = self.field_const(self.field.one());
+        let one_flag = self.field_const(self.field().one());
         self.push(OpCode::Lookup {
             target: LookupTarget::Pow2(log_limb as u8),
             args: vec![within_column, power],
@@ -544,7 +544,7 @@ impl Rewriter<'_> {
         let cofactor_hint = self.cofactor_hint(hints.power);
         let cofactor_field = self.cast(cofactor_hint, CastTarget::Field);
         let cofactor = self.write_witness(cofactor_field);
-        let two_pow_limb = self.field_const(self.field.two_pow(limb_bits));
+        let two_pow_limb = self.field_const(self.field().two_pow(limb_bits));
         self.push(OpCode::Constrain {
             a: power,
             b: cofactor,

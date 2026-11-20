@@ -2,8 +2,8 @@
 //! group of limbs.
 //!
 //! A `WitnessOf(Int(N))` with `N > multi_cell_int_bits` becomes `k = ceil(N/h)` little-endian
-//! values, where `h` is [`witness_limb_bits`]. Limbs `0..k-1` are `WitnessOf(Int(h))` and the top
-//! one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared width is correct.
+//! values, where `h` is configured to support the widest operation in the program, see [`limb_config.rs`].
+//! Limbs `0..k-1` are `WitnessOf(Int(h))` and the top one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared width is correct.
 //!
 //! A **pure** `Int(N)` **scalar** is untouched: it lives in the hint domain, where both backends
 //! compute at any width.
@@ -53,29 +53,46 @@
 //! the answer. A signed ordering is the unsigned ordering with the operands' top bits flipped
 //! (offset binary).
 //!
-//! # The Schoolbook Product
+//! # Products
 //!
 //! An unsigned product runs here wherever the single cell cannot hold it, past
 //! [`single_cell_product_fits`]: from the width where the single-cell division's `q·d + r`, which
 //! reaches past the product, passes the modulus, except for the double lane's two-limb product. A
-//! signed one runs here past [`single_cell_signed_product_fits`], with no such exception, as the
-//! product of the operands' magnitudes (see the sign, below). Each answer column sums its partial
-//! products and incoming carries, and is reduced into its limb, range-checked at the limb width,
-//! plus a witnessed carry range-checked at the width its bound needs. The top column carries
-//! nothing out, so it is range-checked at the top limb's width, and every partial product landing
-//! past it is held to zero, one constraint per left limb. [`plan_product`] decides where the
-//! reductions fall and why each identity holds as integers rather than modulo `p`.
+//! signed one runs here past [`single_cell_signed_product_fits`], with no such exception.
+//!
+//! The product is checked as one **polynomial identity** ([`rewriter::Rewriter::lower_identity`]), à la
+//! [this blogpost](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding).
+//! Limb `i` of an operand is the coefficient of `X^i`, so `a` is `A(β)` at the radix `β = 2^limb_width`.
+//! The answer `C(X)` and the carries `H(X)` are witnessed from a pure-side schoolbook,
+//! and `F(X) = A(X)·B(X) − C(X) == (β − X)·H(X)` is constrained at each point `0..=deg F`.
+//!
+//! The identity is checked modulo p and modulo β^t, so the identity holds over the integers.
+//! The columns are grouped into **blocks** of as many as fit together with a carry.
+//!
+//! An unsigned product is **checked**. Its `k` answer limbs are range-checked to their widths and
+//! `H` has only `k − 1` carries, so `(β − X)·H(X)` has degree `k − 1` and every column of `F` past
+//! the top one is held to zero. Those columns are sums of partial products of range-checked limbs,
+//! so each partial product is zero and an overflowing product is refused.
+//!
+//! A signed product is **unchecked**. The answer is witnessed as the wrapped product and given to
+//! the identity, each factor's top limb is read offset by `2^(w − 1)` so the factor is its two's
+//! complement value, and only the low `t` columns are certified: enough that `F(β) ≡ 0` modulo both
+//! `p` and `β^t` forces `F(β) = 0` over the integers.
 //!
 //! # The Division
 //!
 //! An unsigned division or remainder runs here wherever its single-cell lowering's `q·d + r` could
 //! pass the modulus, which is where the product does. The quotient and remainder are witnessed as
-//! limbs from a pure-side division and pinned by two checks: `q·d + r == n`, the schoolbook with
-//! `r` as one more term in each column and every column **held to the dividend's limb** rather than
-//! range-checked; and `r < d`, the carry chain with its top borrow forced out, which also refuses a
-//! zero divisor. Together they admit exactly the Euclidean pair. An operand's known limbs bound
-//! both answers, and a limb they cannot reach is a known zero rather than a column. A signed
-//! division is the unsigned one on the operands' magnitudes, past
+//! limbs from a pure-side division and pinned by two checks:
+//!
+//! - `q·d + r == n`: the product's identity with `r` as a linear term and the **dividend given as
+//!   the answer** `C(X)`, so `F(X) = Q(X)·D(X) + R(X) − N(X)`. It is checked like the unsigned
+//!   product.
+//! - `r < d`: the carry chain with its top borrow forced out, which also refuses a zero divisor.
+//!
+//! Together they admit exactly the Euclidean pair. An operand's known limbs bound both answers
+//! (`q ≤ n / d`, `r < d`), and a limb they cannot reach is a known zero that drops out of `F`.
+//! A signed division is the unsigned one on the operands' magnitudes, past
 //! [`single_cell_signed_product_fits`].
 //!
 //! # The Shift
@@ -117,8 +134,8 @@
 //! The rest is sign-magnitude. A limb complemented where the sign is one,
 //! [`Rewriter::complement`], is `x + s·(2^w - 1 - 2x)`: one product, and below `2^w` with no
 //! separate check. A value negated where the sign is one, [`Rewriter::negate_if`], is each limb
-//! complemented and the sign added through the chain, dropping its top carry. A product, quotient
-//! and remainder run the unsigned gadgets on the operands' magnitudes; the answer's magnitude is
+//! complemented and the sign added through the chain, dropping its top carry. A quotient and
+//! remainder run the unsigned gadgets on the operands' magnitudes; the answer's magnitude is
 //! held to `2^(N - 1) - 1 + s` for its sign `s` by one constraint on its top bit, then negated by
 //! it. A right shift by any other amount is the unsigned one between two complements by the
 //! operand's sign.
@@ -134,6 +151,7 @@
 //!    map, emitting the gadgets above where an instruction does more than move limbs.
 
 mod globals;
+mod limb_config;
 mod pass;
 mod plan;
 mod rewriter;

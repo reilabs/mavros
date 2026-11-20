@@ -2,7 +2,7 @@ use super::{
     super::types::limb_widths,
     CarryOut, Rewriter,
     division::Answer,
-    product::{Factor, Limb, Schoolbook, full_bounds},
+    identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
 };
 
 use crate::compiler::{
@@ -14,6 +14,48 @@ use crate::compiler::{
 };
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
+use num_traits::One;
+
+/// `a·b − c = 0` of two's complement factors, with `c` given.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SignedProduct;
+
+impl IdentityShape for SignedProduct {
+    fn num_products(&self) -> usize {
+        1
+    }
+
+    fn num_linear_terms(&self) -> usize {
+        1
+    }
+
+    fn has_negative_terms(&self) -> bool {
+        true
+    }
+}
+
+impl<'a> IdentityTemplate<'a> for SignedProduct {
+    /// `a`, `b` and `c`.
+    type Factors = (&'a Factor, &'a Factor, &'a Factor);
+
+    fn terms(self, (a, b, c): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+        let terms = vec![
+            Term {
+                polarity: Polarity::Positive,
+                lhs: a,
+                rhs: Some(b),
+                gated: true,
+            },
+            Term {
+                polarity: Polarity::Negative,
+                lhs: c,
+                rhs: None,
+                gated: true,
+            },
+        ];
+        (terms, None)
+    }
+}
 
 /// A sign bit as the signed gadgets read it.
 #[derive(Clone, Copy, Debug)]
@@ -27,12 +69,6 @@ pub(super) enum Sign {
 
 impl Rewriter<'_> {
     /// A signed product the single cell cannot hold.
-    ///
-    /// The unsigned schoolbook over the operands' magnitudes, whose overflow check keeps the
-    /// product below `2^N`; then [`Self::check_fits`] under the product's sign; then the product
-    /// negated by that sign. Every check past the operands is guarded, except the cut of the
-    /// product's top bit, which reads a product that is zero where the guard is off; the answer is
-    /// zero there too, as the unsigned product's is.
     pub(super) fn lower_signed_product(
         &mut self,
         result: ValueId,
@@ -42,54 +78,44 @@ impl Rewriter<'_> {
         guard: Option<ValueId>,
     ) {
         let widths = limb_widths(bits, self.limb_bits());
-        let (lhs_magnitude, lhs_sign, _) = self.magnitude(lhs, bits, &widths, guard);
-        let (rhs_magnitude, rhs_sign, _) = if lhs == rhs {
-            (lhs_magnitude.clone(), lhs_sign, None)
-        } else {
-            self.magnitude(rhs, bits, &widths, guard)
-        };
-        let lhs_factor = self.factor_of(&lhs_magnitude, &widths);
-        let rhs_factor = self.factor_of(&rhs_magnitude, &widths);
-        let product = self.schoolbook(
-            Schoolbook {
-                lhs: &lhs_factor,
-                rhs: &rhs_factor,
-                addend: None,
-                pinned: None,
-                widths: &widths,
-                bits,
-                operation: "multiplication",
-            },
-            guard,
-        );
 
-        // Off the guard the schoolbook's checks are off, so a top column the untaken branch
-        // overflowed is past its width. The negation reads that column through a cast to a limb's
-        // width, which truncates on the pure side while the constraints carry it whole, so the
-        // negation's products would disagree with their columns. The product is zero there
-        // instead.
-        let product = match guard {
-            Some(condition) => {
-                let zero = self.field_const(self.field.zero());
-                product
-                    .into_iter()
-                    .map(|limb| self.select(condition, limb, zero))
-                    .collect()
-            }
-            None => product,
-        };
-        let product = self.answer_limbs(product, &widths);
+        let a = self.offset_factor(lhs, bits, &widths);
+        let b = (lhs != rhs).then(|| self.offset_factor(rhs, bits, &widths));
+        let b = b.as_ref().unwrap_or(&a);
 
-        // A square is never negative.
-        let sign = if lhs == rhs {
-            Sign::Known(false)
-        } else {
-            self.xor_signs(lhs_sign, rhs_sign)
-        };
-        self.check_fits(&product, &widths, sign, guard);
-        let answer = self.negate_if(product, &widths, sign, guard);
-        let answer = self.limb_fields(answer);
+        let wide_integer_type = CastTarget::Int(2 * bits);
+        let pure_lhs = self.pure_whole(lhs, bits);
+        let pure_wide_lhs = self.cast(pure_lhs, wide_integer_type.clone());
+        let pure_rhs = self.pure_whole(rhs, bits);
+        let pure_wide_rhs = self.cast(pure_rhs, wide_integer_type);
+
+        let product = self.bin(BinaryArithOpKind::UMul, pure_wide_lhs, pure_wide_rhs);
+        let narrow_product = self.cast(product, CastTarget::Int(bits));
+
+        let max_value = (BigUint::one() << bits) - 1u8;
+        let c = self.witness_hinted(narrow_product, bits, &widths, &max_value);
+        let c_limbs = self.chain_limbs_of(&c, widths.len());
+        let c_offset = self.offset_factor_of(c_limbs.clone(), &widths);
+
+        let identity = self.identity(SignedProduct, &widths, (&a, b, &c_offset));
+        self.lower_identity(&identity, guard);
+
+        let answer = self.limb_fields(c_limbs);
         self.deliver(result, answer, &widths, bits, guard);
+    }
+
+    /// A two's complement `bits`-wide operand as a factor.
+    fn offset_factor(&mut self, value: ValueId, bits: usize, widths: &[usize]) -> Factor {
+        let limbs = self.chain_limbs(value, bits, widths.len());
+        self.offset_factor_of(limbs, widths)
+    }
+
+    /// Two's complement `limbs` at `widths` as a factor.
+    fn offset_factor_of(&mut self, mut limbs: Vec<(ValueId, bool)>, widths: &[usize]) -> Factor {
+        let top_limb_idx = widths.len() - 1;
+        limbs[top_limb_idx] = self.flip_top_bit(limbs[top_limb_idx], widths[top_limb_idx]);
+        let offset = BigUint::one() << (widths[top_limb_idx] - 1);
+        self.factor_of(&limbs, widths, Some(offset))
     }
 
     /// The signed quotient and remainder of `dividend / divisor`, each as its magnitude and the
@@ -110,8 +136,8 @@ impl Rewriter<'_> {
     ) -> (Answer, Answer) {
         let (n, dividend_sign, pure_dividend) = self.magnitude(dividend, bits, widths, guard);
         let (d, divisor_sign, pure_divisor) = self.magnitude(divisor, bits, widths, guard);
-        let n = self.factor_of(&n, widths);
-        let d = self.factor_of(&d, widths);
+        let n = self.factor_of(&n, widths, None);
+        let d = self.factor_of(&d, widths, None);
         let mut pure_side = |operand: ValueId, magnitude: Option<ValueId>| {
             magnitude.unwrap_or_else(|| {
                 let whole = self.pure_whole(operand, bits);
@@ -258,8 +284,8 @@ impl Rewriter<'_> {
     /// A sign as a field element that is zero or one.
     fn sign_field(&self, sign: Sign) -> ValueId {
         match sign {
-            Sign::Known(true) => self.field_const(self.field.one()),
-            Sign::Known(false) => self.field_const(self.field.zero()),
+            Sign::Known(true) => self.field_const(self.field().one()),
+            Sign::Known(false) => self.field_const(self.field().zero()),
             Sign::Bit(bit, _) => bit,
         }
     }
@@ -272,7 +298,7 @@ impl Rewriter<'_> {
             (Sign::Known(false), other) | (other, Sign::Known(false)) => other,
             (Sign::Known(true), Sign::Bit(bit, witnessed))
             | (Sign::Bit(bit, witnessed), Sign::Known(true)) => {
-                let one = self.field_const(self.field.one());
+                let one = self.field_const(self.field().one());
                 Sign::Bit(self.bin(BinaryArithOpKind::USub, one, bit), witnessed)
             }
             (Sign::Bit(a, a_witnessed), Sign::Bit(b, b_witnessed)) => {
@@ -352,49 +378,42 @@ impl Rewriter<'_> {
             t => self.sign_field(t),
         };
         let whole = self.cast(limbs[top].0, CastTarget::Field);
-        let half = self.field_const(self.field.two_pow(width - 1));
+        let half = self.field_const(self.field().two_pow(width - 1));
         let high = self.bin(BinaryArithOpKind::UMul, t, half);
         let mut sum = self.bin(BinaryArithOpKind::USub, whole, high);
         for &(limb, _) in &limbs[..top] {
             let limb = self.cast(limb, CastTarget::Field);
             sum = self.bin(BinaryArithOpKind::UAdd, sum, limb);
         }
-        let one = self.field_const(self.field.one());
+        let one = self.field_const(self.field().one());
         let sign = self.sign_field(sign);
         let positive = self.bin(BinaryArithOpKind::USub, one, sign);
         sum = self.bin(BinaryArithOpKind::UAdd, sum, positive);
         let product = self.bin(BinaryArithOpKind::UMul, t, sum);
-        let zero = self.field_const(self.field.zero());
+        let zero = self.field_const(self.field().zero());
         self.constrain_equal(product, zero, guard);
     }
 
-    /// Limbs at `widths` as a schoolbook [`Factor`]: a known limb is a constant with its value as
-    /// its bound, and any other is bounded by its width.
-    fn factor_of(&mut self, limbs: &[(ValueId, bool)], widths: &[usize]) -> Factor {
-        let mut witnessed = false;
-        let (limbs, bounds) = limbs
+    /// Limbs at `widths` as a [`Factor`].
+    fn factor_of(
+        &mut self,
+        limbs: &[(ValueId, bool)],
+        widths: &[usize],
+        offset: Option<BigUint>,
+    ) -> Factor {
+        let mut is_witnessed = false;
+        let limbs = limbs
             .iter()
-            .zip(full_bounds(widths))
             .zip(widths)
-            .map(
-                |((&(limb, limb_witnessed), full), width)| match self.known(limb) {
-                    Some(pattern) => {
-                        let pattern = pattern.cast(*width);
-                        let bound = BigUint::from(&pattern);
-                        (Limb::Constant(pattern), bound)
-                    }
-                    None => {
-                        witnessed |= limb_witnessed;
-                        (Limb::Value(limb), full)
-                    }
-                },
-            )
-            .unzip();
-        Factor {
-            limbs,
-            witnessed,
-            bounds,
-        }
+            .map(|(&(limb, limb_witnessed), width)| match self.known(limb) {
+                Some(pattern) => Limb::Constant(pattern.cast(*width)),
+                None => {
+                    is_witnessed |= limb_witnessed;
+                    Limb::Value(limb)
+                }
+            })
+            .collect();
+        Factor::new(limbs, widths, is_witnessed, offset)
     }
 
     /// A gadget's answer, one field element per limb of `widths`, as limbs the chain and the
@@ -463,5 +482,111 @@ impl Rewriter<'_> {
                 (self.relabel(flipped, width), witnessed)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::compiler::passes::wide_witness_ints::test_utils::{
+        bn254, forge_hint, is_wrapped_product, limbed_widths, operation_accepts, twos_complement,
+    };
+    use crate::compiler::ssa::hlssa::{BinaryArithOpKind, HLSSA};
+    use mavros_artifacts::{FieldConfig, MavrosField};
+    use num_bigint::{BigInt, BigUint};
+    use num_traits::{One, Zero};
+
+    /// A signed product accepts exactly the products that fit its width.
+    #[test]
+    fn a_signed_product_accepts_only_within_bounds_where_its_guard_holds() {
+        check_signed_product_bounds::<mavros_artifacts::Field>(bn254());
+        check_signed_product_bounds::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks());
+    }
+
+    fn check_signed_product_bounds<F: MavrosField>(field: FieldConfig) {
+        let id = field.id();
+        for bits in limbed_widths(field) {
+            for (a, b, fits) in signed_product_cases(bits) {
+                for (guard, expected) in [(None, fits), (Some(true), fits), (Some(false), true)] {
+                    assert_eq!(
+                        signed_product_accepts::<F>(field, bits, &a, &b, guard, |_| {}),
+                        expected,
+                        "{id:?} int{bits}: {a} · {b}, guard {guard:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A signed product's answer is pinned by its evaluations, with honest carries.
+    #[test]
+    fn a_signed_product_refuses_a_forged_answer() {
+        check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Field>(bn254());
+        check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Goldilocks>(
+            FieldConfig::goldilocks(),
+        );
+    }
+
+    fn check_a_signed_product_refuses_a_forged_answer<F: MavrosField>(field: FieldConfig) {
+        let id = field.id();
+        for bits in limbed_widths(field) {
+            let (a, b) = (BigInt::from(-3), BigInt::from(5));
+            let honest_product = twos_complement(bits, &(&a * &b));
+            let accepts = |answer: &BigUint| {
+                signed_product_accepts::<F>(field, bits, &a, &b, None, |ssa| {
+                    forge_hint(ssa, bits, answer, is_wrapped_product(bits))
+                })
+            };
+            assert!(
+                accepts(&honest_product),
+                "{id:?} int{bits}: the honest answer is refused"
+            );
+            let mask = (BigUint::one() << bits) - 1u8;
+            assert!(
+                !accepts(&((&honest_product + 1u8) & &mask)),
+                "{id:?} int{bits}: c + 1 is accepted"
+            );
+        }
+    }
+
+    /// Whether the circuit for a signed `a · b` accepts, under a guard that is on or off where
+    /// `guard` is given, with `forge` applied to the witness-spilled program.
+    fn signed_product_accepts<F: MavrosField>(
+        field: FieldConfig,
+        bits: usize,
+        a: &BigInt,
+        b: &BigInt,
+        guard: Option<bool>,
+        forge: impl FnOnce(&mut HLSSA),
+    ) -> bool {
+        operation_accepts::<F>(
+            field,
+            BinaryArithOpKind::SMul,
+            bits,
+            (&twos_complement(bits, a), &twos_complement(bits, b)),
+            guard,
+            forge,
+        )
+    }
+
+    /// The values a `bits`-wide signed product is tried at, with whether each product fits.
+    fn signed_product_cases(bits: usize) -> Vec<(BigInt, BigInt, bool)> {
+        let pow = |e: usize| BigInt::one() << e;
+        let min = -pow(bits - 1);
+        let half = bits / 2;
+        vec![
+            (BigInt::from(-3), BigInt::from(-5), true),
+            (BigInt::from(-3), BigInt::from(5), true),
+            (BigInt::from(-1), BigInt::from(-1), true),
+            (min.clone(), BigInt::one(), true),
+            (BigInt::zero(), min.clone(), true),
+            // Spans every limb, with a negative answer.
+            (pow(half - 2), -pow(half - 2) - 7, true),
+            // Exactly the most negative value.
+            (-pow(half), pow(bits - 1 - half), true),
+            // Exactly one past the most positive value.
+            (pow(half), pow(bits - 1 - half), false),
+            (min.clone(), BigInt::from(-1), false),
+            (min.clone(), min, false),
+        ]
     }
 }

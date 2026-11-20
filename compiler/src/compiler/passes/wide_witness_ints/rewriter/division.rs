@@ -10,8 +10,8 @@ use crate::compiler::{
 use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
-    product::Schoolbook,
-    product::{Factor, Limb, past_the_single_cell_product},
+    identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
+    lower::exceeds_single_cell_product,
     sign::Sign,
 };
 use mavros_artifacts::FieldConfig;
@@ -21,6 +21,47 @@ use num_traits::{One, Zero};
 
 /// What decides both answers of a division: dividend, divisor, guard, and whether it is signed.
 pub(super) type Division = (ValueId, ValueId, Option<ValueId>, bool);
+
+/// `q·d + r = n`, held to the dividend.
+#[derive(Clone, Copy, Debug)]
+pub(in super::super) struct EuclideanDivision;
+
+impl IdentityShape for EuclideanDivision {
+    fn num_products(&self) -> usize {
+        1
+    }
+
+    fn num_linear_terms(&self) -> usize {
+        1
+    }
+
+    fn is_checked(&self) -> bool {
+        true
+    }
+}
+
+impl<'a> IdentityTemplate<'a> for EuclideanDivision {
+    /// `q`, `d`, `r` and `n`.
+    type Factors = (&'a Factor, &'a Factor, &'a Factor, &'a Factor);
+
+    fn terms(self, (q, d, r, n): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+        let terms = vec![
+            Term {
+                polarity: Polarity::Positive,
+                lhs: q,
+                rhs: Some(d),
+                gated: false,
+            },
+            Term {
+                polarity: Polarity::Positive,
+                lhs: r,
+                rhs: None,
+                gated: false,
+            },
+        ];
+        (terms, Some(Target::Given(n)))
+    }
+}
 
 /// One answer of a division, as far as it has been built.
 #[derive(Clone)]
@@ -57,7 +98,7 @@ impl Rewriter<'_> {
             bits,
             lhs: dividend,
             rhs: divisor,
-        }) = divided(op, self.types, self.field)
+        }) = divided(op, self.types, self.field())
         else {
             return false;
         };
@@ -178,19 +219,8 @@ impl Rewriter<'_> {
         let q = self.witness_hinted(quotient_hint, bits, widths, &quotient_max);
         let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
 
-        let target: Vec<ValueId> = n.limbs.iter().map(|limb| self.limb_field(limb)).collect();
-        self.schoolbook(
-            Schoolbook {
-                lhs: &q,
-                rhs: d,
-                addend: Some(&r),
-                pinned: Some(&target),
-                widths,
-                bits,
-                operation: "division",
-            },
-            guard,
-        );
+        let identity = self.identity(EuclideanDivision, widths, (&q, d, &r, n));
+        self.lower_identity(&identity, guard);
 
         // `r < d` reads only the limbs either side can reach, as above them both are zero.
         let reached = (0..widths.len())
@@ -227,8 +257,8 @@ impl Rewriter<'_> {
         self.carry_chain_over(true, &zero, &divisor, widths.to_vec(), CarryOut::One, guard);
 
         let (zero, one) = (
-            self.field_const(self.field.zero()),
-            self.field_const(self.field.one()),
+            self.field_const(self.field().zero()),
+            self.field_const(self.field().one()),
         );
         let mut quotient = vec![zero; widths.len()];
         quotient[0] = one;
@@ -238,7 +268,7 @@ impl Rewriter<'_> {
     /// A pure `bits`-wide `hint` witnessed as limbs at `widths`, each range-checked no wider than
     /// `max` allows for it. A limb `max` does not reach is a constant zero, which drops out of the
     /// schoolbook's plan. Only the caller's constraints tie the limbs to anything.
-    fn witness_hinted(
+    pub(super) fn witness_hinted(
         &mut self,
         hint: ValueId,
         bits: usize,
@@ -262,8 +292,9 @@ impl Rewriter<'_> {
         }
         Factor {
             limbs,
-            witnessed: true,
+            is_witnessed: true,
             bounds,
+            signed_offset: None,
         }
     }
 
@@ -286,7 +317,7 @@ impl Rewriter<'_> {
         match limb {
             Limb::Value(limb) => self.cast(*limb, CastTarget::Field),
             // A witness limb is never wider than the host word, so its pattern is one host limb.
-            Limb::Constant(pattern) => self.field_const(self.field.constant(pattern.limbs()[0])),
+            Limb::Constant(pattern) => self.field_const(self.field().constant(pattern.limbs()[0])),
         }
     }
 
@@ -295,7 +326,7 @@ impl Rewriter<'_> {
         factor.limbs[..count]
             .iter()
             .map(|limb| match limb {
-                Limb::Value(limb) => (*limb, factor.witnessed),
+                Limb::Value(limb) => (*limb, factor.is_witnessed),
                 Limb::Constant(pattern) => (self.int_const(pattern.clone()), false),
             })
             .collect()
@@ -305,12 +336,12 @@ impl Rewriter<'_> {
 /// The division the representation lowers, if `op` is one: a division or remainder under either
 /// reading, guarded or not, with a witnessed operand, past [`single_cell_product_fits`], where the
 /// single-cell lowering's `q·d + r` could wrap the modulus.
-pub(super) fn divided(
+pub(in super::super) fn divided(
     op: &OpCode,
     types: &FunctionTypeInfo,
     field: FieldConfig,
 ) -> Option<Operands> {
-    past_the_single_cell_product(
+    exceeds_single_cell_product(
         op,
         types,
         field,

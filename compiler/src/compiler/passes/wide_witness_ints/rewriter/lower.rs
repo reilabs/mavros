@@ -1,15 +1,19 @@
 use super::{
     super::types::{element_types, flat_limbs, limb_types, limb_widths, paired},
-    FunctionTypeInfo, Rewriter,
+    FunctionTypeInfo, Operands, Rewriter,
 };
 
-use crate::compiler::ssa::{
-    Instruction, ValueId,
-    hlssa::{
-        BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, LookupTarget, OpCode,
-        builder::HLEmitter,
+use crate::compiler::{
+    passes::shared::limbs::{single_cell_product_fits, single_cell_signed_product_fits},
+    ssa::{
+        Instruction, ValueId,
+        hlssa::{
+            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, LookupTarget, OpCode,
+            builder::HLEmitter,
+        },
     },
 };
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
@@ -123,7 +127,7 @@ impl Rewriter<'_> {
             } => {
                 let results = self.limbs(*result);
                 let count = results.len();
-                let elem_types = element_types(elem_type, self.field, count);
+                let elem_types = element_types(elem_type, self.limb_config(), count);
                 let per_element: Vec<Vec<ValueId>> = elems
                     .iter()
                     .map(|elem| self.operand_limbs(*elem, count))
@@ -194,7 +198,7 @@ impl Rewriter<'_> {
                     .int_width()
                     .unwrap_or_else(|| ice!("a wide blob sequence of {element_type}"));
                 let widths = limb_widths(bits, self.limb_bits());
-                let elem_types = element_types(element_type, self.field, results.len());
+                let elem_types = element_types(element_type, self.limb_config(), results.len());
                 for (index, ((result, width), element_type)) in
                     results.into_iter().zip(&widths).zip(elem_types).enumerate()
                 {
@@ -228,7 +232,7 @@ impl Rewriter<'_> {
                 elem_type,
             } => {
                 let results = self.limbs(*result);
-                let elem_types = element_types(elem_type, self.field, results.len());
+                let elem_types = element_types(elem_type, self.limb_config(), results.len());
                 let elements = self.operand_limbs(*element, results.len());
                 for ((result, element), elem_type) in
                     results.into_iter().zip(elements).zip(elem_types)
@@ -444,7 +448,7 @@ impl Rewriter<'_> {
                 result,
                 result_type,
             } => {
-                let types = limb_types(result_type, self.field);
+                let types = limb_types(result_type, self.limb_config());
                 let results = self.limbs(*result);
                 assert_eq!(
                     results.len(),
@@ -495,7 +499,7 @@ impl Rewriter<'_> {
             } => {
                 let base = self.globals.offsets[*offset as usize];
                 let results = self.limbs(*result);
-                let types = limb_types(result_type, self.field);
+                let types = limb_types(result_type, self.limb_config());
                 assert_eq!(
                     results.len(),
                     types.len(),
@@ -514,7 +518,7 @@ impl Rewriter<'_> {
             OpCode::InitGlobal { global, value } => {
                 let base = self.globals.offsets[*global];
                 let values = self.limbs(*value);
-                let slots = limb_types(&self.globals.old_types[*global], self.field).len();
+                let slots = limb_types(&self.globals.old_types[*global], self.limb_config()).len();
                 assert_eq!(
                     values.len(),
                     slots,
@@ -530,7 +534,7 @@ impl Rewriter<'_> {
             }
             OpCode::DropGlobal { global } => {
                 let base = self.globals.offsets[*global];
-                for (slot, ty) in limb_types(&self.globals.old_types[*global], self.field)
+                for (slot, ty) in limb_types(&self.globals.old_types[*global], self.limb_config())
                     .into_iter()
                     .enumerate()
                 {
@@ -699,4 +703,32 @@ pub(super) fn witnessed_width(
     let bits = types.get_value_type(lhs).int_width()?;
     (types.get_value_type(lhs).is_witness_of() || types.get_value_type(rhs).is_witness_of())
         .then_some(bits)
+}
+
+/// A binary operation of one of `kinds`, guarded or not, with a witnessed operand, at a width whose
+/// product one element cannot hold: past [`single_cell_product_fits`] for an unsigned one, and
+/// past [`single_cell_signed_product_fits`] for a signed one.
+pub(super) fn exceeds_single_cell_product(
+    op: &OpCode,
+    types: &FunctionTypeInfo,
+    field: FieldConfig,
+    kinds: &[BinaryArithOpKind],
+) -> Option<Operands> {
+    let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = unguarded(op) else {
+        return None;
+    };
+    if !kinds.contains(kind) {
+        return None;
+    }
+    let bits = witnessed_width(types, *lhs, *rhs)?;
+    let fits = if kind.is_signed() {
+        single_cell_signed_product_fits(field, bits)
+    } else {
+        single_cell_product_fits(field, bits)
+    };
+    (!fits).then_some(Operands {
+        bits,
+        lhs: *lhs,
+        rhs: *rhs,
+    })
 }
