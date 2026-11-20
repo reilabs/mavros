@@ -4,7 +4,9 @@ fn id(p: &mut Field) -> &mut Field {
     p
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     let mut value = 0;
     let r = id(&mut value);
     *r = x;

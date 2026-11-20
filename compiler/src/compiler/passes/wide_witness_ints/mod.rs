@@ -18,17 +18,24 @@
 //! read's limbs remain cached for any later consumer in the block that needs them, including
 //! arithmetic and lookups. A global holding such a sequence takes a slot per limb sequence.
 //!
-//! The representation is sound because **every limb is range-checked** to its declared width when
-//! it is created or modified. `2^h` is invertible mod `p`, so a single unbounded limb would let a
-//! prover solve for any value.
+//! The representation is sound because **every limb is bounded** to its declared width when it is
+//! created or modified, by a range check everywhere but the pinned write below. `2^h` is invertible
+//! mod `p`, so a single unbounded limb would let a prover solve for any value.
 //!
-//! Limbs are created in two shapes:
+//! Limbs are created in four shapes:
 //!
 //! - **A single value becoming limbs** ([`Rewriter::decompose`]): each limb is witnessed from the
 //!   pure shadow and range-checked to its width, and the limbs are constrained to recombine to the
 //!   source value. Without that constraint the limbs would be unrelated to the source.
 //! - **A value that is limbs from the start** (a widening cast, a pure-to-witness injection) has
 //!   no source to agree with, so its limbs are only range-checked.
+//! - **An `IntFromLimbs`** (an entry-point parameter) is its limbs, unchanged. Their emitter,
+//!   `prepare_entry_point`, range-checks each one; this pass adds nothing.
+//! - **A pinned write of a wide value** (an entry-point return) writes one column per limb with no
+//!   range check: a check there would interleave its columns with the return's, which must be
+//!   contiguous. `prepare_entry_point::bind_return_deep` asserts the written value equal to the
+//!   returned one, and that equality, lowered limb by limb, ties each column to a bounded limb. A
+//!   pinned wide write without that equality is unsound.
 //!
 //! Everything else either moves limbs or, like the bitwise operations, acts on each limb within its
 //! width, so the limbs stay constrained. The exceptions, below, are the carry chain, the schoolbook
@@ -141,6 +148,7 @@ mod types;
 mod utils;
 
 pub use pass::WideWitnessInts;
+pub use types::int_limb_widths;
 pub use utils::multi_cell_int_bits;
 
 #[cfg(test)]

@@ -3,7 +3,12 @@
 // at the *witness* cursor `start + log_len`, which sits strictly inside the physical slice
 // whenever the first guard was off (the appended copy becomes garbage). Expected values are
 // public inputs so the same circuit checks different guard worlds.
-fn main(w1: Field, w2: Field, expected1: pub Field, expected_len: pub Field) {
+fn main(w1: u8, w2: u8, expected1: pub u8, expected_len: pub u8) {
+    let w1 = w1 as Field;
+    let w2 = w2 as Field;
+    let expected1 = expected1 as Field;
+    let expected_len = expected_len as Field;
+
     let mut s: [Field] = [10];
     if w1 == 1 {
         s = s.push_back(20);

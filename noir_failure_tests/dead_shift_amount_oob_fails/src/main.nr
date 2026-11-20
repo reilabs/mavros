@@ -22,7 +22,9 @@ fn shl_and_ignore(v: u8, n: u8) -> u8 {
     v
 }
 
-fn main(w: Field) {
+fn main(w: u8) {
+    let w = w as Field;
+
     // Keeps `main` from folding away entirely; the shift inside the call is what is under test.
     assert(w != 0);
     // `9` is above the eight bits of a `u8`. The equality itself holds -- `shl_and_ignore` returns

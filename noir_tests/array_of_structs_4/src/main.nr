@@ -1,5 +1,5 @@
 pub struct G {
-    val: Field,
+    val: u8,
 }
 
 pub struct F {
@@ -13,27 +13,27 @@ pub struct E {
 
 // D is the deepest level (level 4)
 pub struct D {
-    pub d_field: Field,
+    pub d_field: u8,
     pub e_arr: [E; 2],
 }
 
 // C contains D (level 3)
 pub struct C {
     pub d: D,
-    pub c_field: Field,
+    pub c_field: u8,
 }
 
 // B contains an ARRAY of C structs (level 2)
 // This tests arrays of structs within structs
 pub struct B {
     pub c_arr: [C; 2],
-    pub b_field: Field,
+    pub b_field: u8,
 }
 
 // A is the top level (level 1)
 // Contains B and also has an array of D structs
 pub struct A {
-    pub a_field: Field,
+    pub a_field: u8,
     pub b: B,
     pub d_arr: [D; 2],
 }

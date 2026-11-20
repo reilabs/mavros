@@ -23,7 +23,9 @@ fn dynamic_vector(value: Field) -> [Field] {
     [value; 4].as_vector()
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     forwards_constant(11);
     forwards_constant(12);
     assert_constant(plus_one(20));

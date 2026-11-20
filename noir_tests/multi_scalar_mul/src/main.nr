@@ -1,14 +1,22 @@
 use std::embedded_curve_ops::{EmbeddedCurvePoint, EmbeddedCurveScalar, multi_scalar_mul};
 
 fn main(
-    scalar: Field,
-    expected_x: pub Field,
-    expected_y: pub Field,
-    expected_double_x: pub Field,
-    expected_double_y: pub Field,
-    expected_high_limb_x: pub Field,
-    expected_high_limb_y: pub Field,
+    scalar: u8,
+    expected_x: pub u8,
+    expected_y: pub [u8; 32],
+    expected_double_x: pub [u8; 32],
+    expected_double_y: pub [u8; 32],
+    expected_high_limb_x: pub [u8; 32],
+    expected_high_limb_y: pub [u8; 32],
 ) {
+    let scalar = scalar as Field;
+    let expected_x = expected_x as Field;
+    let expected_y = Field::from_le_bytes_checked(expected_y);
+    let expected_double_x = Field::from_le_bytes_checked(expected_double_x);
+    let expected_double_y = Field::from_le_bytes_checked(expected_double_y);
+    let expected_high_limb_x = Field::from_le_bytes_checked(expected_high_limb_x);
+    let expected_high_limb_y = Field::from_le_bytes_checked(expected_high_limb_y);
+
     let point = EmbeddedCurvePoint::generator();
     let scalar = EmbeddedCurveScalar { lo: scalar, hi: 0 };
     let result = multi_scalar_mul([point], [scalar]);

@@ -10,7 +10,10 @@ use crate::compiler::{
     pass_manager::{AnalysisId, AnalysisStore, Pass},
     passes::shared::value_replacements::ValueReplacements,
     ssa::hlssa::{HLSSA, OpCode, Type},
-    util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+    util::{
+        ice_int_from_limbs_after_wide_witness_ints, ice_non_elided_tuple,
+        ice_unvalidated_assert_constant,
+    },
 };
 
 pub struct StripWitnessOf {}
@@ -107,6 +110,7 @@ impl StripWitnessOf {
             OpCode::MkTuple { .. } | OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } => {
                 ice_non_elided_tuple()
             }
+            OpCode::IntFromLimbs { .. } => ice_int_from_limbs_after_wide_witness_ints(),
             OpCode::ReadGlobal { result_type, .. } => {
                 *result_type = result_type.strip_all_witness();
             }

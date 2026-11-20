@@ -12,7 +12,9 @@ fn mix(i: u32, x: Field) -> Field {
     t + x * x
 }
 
-fn main(x: Field, a: u32, b: u32) {
+fn main(x: u8, a: u32, b: u32) {
+    let x = x as Field;
+
     let mut acc: Field = 0;
     for i in 0..4 {
         acc += mix(i, x);

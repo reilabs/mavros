@@ -17,7 +17,7 @@ fn frontend(source: &str, field: FieldConfig) -> Result<(), Error> {
 fn portable_stdlib_replacements_compile_on_both_fields() {
     for field in [FieldConfig::bn254(), FieldConfig::goldilocks()] {
         for source in [
-            "fn main(x: Field) -> pub Field { x + 1 }",
+            "fn main(x: u8) -> pub u8 { x + 1 }",
             "fn main(x: [u8; 3]) -> pub [u8; 32] { std::hash::blake2s(x) }",
             "fn main(x: [u8; 3]) -> pub [u8; 32] { std::hash::blake3(x) }",
             "fn main(x: [u8; 16], iv: [u8; 16], key: [u8; 16]) -> pub [u8; 32] {
@@ -45,8 +45,8 @@ fn bn254_crypto_stays_available_and_is_unresolved_on_goldilocks() {
             "ecdsa_secp256r1",
         ),
         (
-            "fn main(x: [Field; 4]) -> pub [Field; 4] {
-                std::hash::poseidon2_permutation(x)
+            "fn main(x: [u8; 4]) -> pub bool {
+                std::hash::poseidon2_permutation(x.map(|v| v as Field))[0] != 0
             }",
             "poseidon2_permutation",
         ),
@@ -201,7 +201,7 @@ fn blake_goldilocks_witnesses_match_reference_digests() {
 #[test]
 fn unsafe_cast_is_internal_to_the_standard_library() {
     common::assert_frontend_refused(
-        "use std::mavros::unsafe_cast;\n\nfn main(x: Field) -> pub u8 {\n    unsafe_cast(x)\n}",
+        "use std::mavros::unsafe_cast;\n\nfn main(x: u8) -> pub u8 {\n    unsafe_cast(x as Field)\n}",
         "unsafe_cast is private and not visible from the current module",
     );
 }
@@ -213,10 +213,12 @@ fn unsafe_cast_is_internal_to_the_standard_library() {
 #[test]
 fn field_narrowing_casts_truncate_on_both_fields() {
     // 2^40 + 456, which both fields carry: the low byte is 200, or -56 as an `i8`.
-    let inputs = ["x = 1099511628232\nreturn = [200, 456, 4294967240]\n".to_owned()];
+    let x = common::le_bytes(&1099511628232u64.into(), 8);
+    let inputs = [format!("x = {x}\nreturn = [200, 456, 4294967240]\n")];
     for mode in ["", "unconstrained "] {
         let source = format!(
-            "{mode}fn main(x: Field) -> pub [u32; 3] {{ \
+            "{mode}fn main(x: [u8; 8]) -> pub [u32; 3] {{ \
+             let x = Field::from_le_bytes_checked(x); \
              [(x as u8) as u32, x as u32, (x as i8) as u32] }}"
         );
         check_program::<Field>(&source, &inputs, !mode.is_empty());
@@ -229,13 +231,39 @@ fn field_narrowing_casts_truncate_on_both_fields() {
 #[test]
 fn field_to_u128_truncates_above_the_host_word() {
     // 2^130 + 2^127 + 2^32 + 200.
-    let inputs =
-        ["x = \"1531270651144223085585185733447251919048\"\nreturn = [1, 200]\n".to_owned()];
+    let x: num_bigint::BigUint = "1531270651144223085585185733447251919048".parse().unwrap();
+    let inputs = [format!(
+        "x = {}\nreturn = [1, 200]\n",
+        common::le_bytes(&x, 32)
+    )];
     for mode in ["", "unconstrained "] {
         let source = format!(
-            "{mode}fn main(x: Field) -> pub [u32; 2] {{ \
-             let w = x as u128; [(w >> 127) as u32, w as u32] }}"
+            "{mode}fn main(x: [u8; 32]) -> pub [u32; 2] {{ \
+             let w = Field::from_le_bytes_checked(x) as u128; [(w >> 127) as u32, w as u32] }}"
         );
         check_program::<Field>(&source, &inputs, !mode.is_empty());
     }
+}
+
+/// An unconstrained byte decomposition into more bytes than a field element holds compiles on
+/// every field, and fails at the standard library's `static_assert` on the byte count.
+#[test]
+fn to_le_bytes_past_the_element_compiles_and_fails_at_its_bound() {
+    fn check<F: MavrosField>() {
+        let source = "unconstrained fn decompose(x: Field) -> [u8; 40] { x.to_le_bytes() }
+            fn main(x: u8) -> pub u8 {
+                // Safety: the decomposition fails before its bytes are used.
+                let bytes = unsafe { decompose(x as Field) };
+                bytes[0]
+            }";
+        let dir = common::noir_project(source);
+        std::fs::write(dir.path().join("Prover.toml"), "x = 7\n").unwrap();
+        let (mut driver, r1cs) =
+            api::compile_to_r1cs::<F>(dir.path().to_path_buf(), false).unwrap();
+        let mut binary = driver.compile_bytecode(CodeGenOptions::default()).unwrap();
+        let (params, _) = api::read_prover_inputs::<F>(dir.path(), driver.abi()).unwrap();
+        assert!(api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).is_err());
+    }
+    check::<Field>();
+    check::<Goldilocks>();
 }

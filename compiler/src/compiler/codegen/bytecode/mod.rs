@@ -1730,8 +1730,6 @@ impl CodeGen {
                         type_info.get_value_type(*v).is_field(),
                         "TODO: Implement toRadix for U-values"
                     );
-                    let max_bytes = emitter.field.canonical_limbs() * 8;
-                    assert!(*c <= max_bytes, "ToRadix byte count must be <= {max_bytes}");
                     let res = layouter.alloc_value(*r, &type_info.get_value_type(*r));
                     match endianness {
                         Endianness::Big => {

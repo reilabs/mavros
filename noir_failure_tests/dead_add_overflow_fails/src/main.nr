@@ -24,7 +24,9 @@ fn add_and_ignore(a: u8, b: u8) -> u8 {
     a
 }
 
-fn main(w: Field) {
+fn main(w: u8) {
+    let w = w as Field;
+
     // Keeps `main` from folding away entirely; the add inside the call is what is under test.
     assert(w != 0);
     // 200 + 100 overflows a `u8`. The equality itself holds -- `add_and_ignore` returns its first

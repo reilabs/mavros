@@ -14,7 +14,13 @@ fn shift(p: &mut P, d: Field) {
     p.y = p.y - d;
 }
 
-fn main(x: Field, y: Field, d: Field, ex: pub Field, ey: pub Field) {
+fn main(x: u8, y: u8, d: u8, ex: pub u8, ey: pub u8) {
+    let x = x as Field;
+    let y = y as Field;
+    let d = d as Field;
+    let ex = ex as Field;
+    let ey = ey as Field;
+
     let mut p = P { x, y };
     shift(&mut p, d);
     assert_eq(p.x, ex);

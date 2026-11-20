@@ -3,7 +3,10 @@
 // parameter and indexed by the dynamic loop counter, so the points-to analysis
 // must track it across the loop (the array group stays collapsed, not peeled);
 // mem2reg promotes the scalar `sum` accumulator. End-to-end correctness guard.
-fn main(seed: Field, expected: pub Field) {
+fn main(seed: u8, expected: pub u8) {
+    let seed = seed as Field;
+    let expected = expected as Field;
+
     let mut acc = [seed, seed + 1, seed + 2, seed + 3];
     for i in 0..4 {
         acc[i] = acc[i] * 2;

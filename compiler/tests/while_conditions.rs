@@ -37,7 +37,7 @@ fn break_in_while_condition_preserves_the_enclosing_loops_live_values() {
     // mutating a copy of it. The break belongs to the outer while.
     check(
         r#"
-unconstrained fn main(cond: bool) -> pub [Field; 2] {
+unconstrained fn main(cond: bool) -> pub [u8; 2] {
     let mut x = [1, 2];
     let mut z = [0, 0];
     let mut i = 0;

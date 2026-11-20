@@ -28,7 +28,7 @@ fn fibonacci(x: u32) -> u32 {
 #[test]
 fn nonrecursive_fold_is_also_refused() {
     assert_refused(
-        r#"fn main(x: Field) { assert(folded(x) == x); }
+        r#"fn main(x: u8) { assert(folded(x as Field) == x as Field); }
 #[fold]
 fn folded(x: Field) -> Field { x }
 "#,
@@ -42,8 +42,8 @@ fn oracle_calls_and_function_values_are_refused() {
         for body in ["oracle(x)", "let f = oracle; f(x)"] {
             assert_refused(
                 &format!(
-                    "#[oracle(barnacle)]\n{attribute}\nunconstrained fn oracle(x: Field) -> Field {{}}\n\
-                     unconstrained fn main(x: Field) -> pub Field {{ {body} }}\n"
+                    "#[oracle(barnacle)]\n{attribute}\nunconstrained fn oracle(x: u8) -> u8 {{}}\n\
+                     unconstrained fn main(x: u8) -> pub u8 {{ {body} }}\n"
                 ),
                 "Oracle `barnacle` is not supported",
             );
@@ -53,7 +53,7 @@ fn oracle_calls_and_function_values_are_refused() {
 
 #[test]
 fn print_oracles_remain_ignored() {
-    let dir = common::noir_project("fn main(x: Field) { print(x); println(x); assert(x == 1); }");
+    let dir = common::noir_project("fn main(x: u8) { print(x); println(x); assert(x == 1); }");
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
     driver.run_noir_compiler(FieldConfig::bn254()).unwrap();
     driver.make_struct_access_static().unwrap();

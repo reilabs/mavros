@@ -74,15 +74,24 @@ fn count_odd(n: u32, x: Field) -> (Field, Field) {
 }
 
 fn main(
-    x: Field,
-    a: Field,
-    b: Field,
-    expected_fact: pub Field,
-    expected_sum: pub Field,
-    expected_ping: pub Field,
-    expected_even: pub Field,
-    expected_odd: pub Field,
+    x: u8,
+    a: u8,
+    b: u8,
+    expected_fact: pub u16,
+    expected_sum: pub u8,
+    expected_ping: pub u8,
+    expected_even: pub u8,
+    expected_odd: pub u8,
 ) {
+    let x = x as Field;
+    let a = a as Field;
+    let b = b as Field;
+    let expected_fact = expected_fact as Field;
+    let expected_sum = expected_sum as Field;
+    let expected_ping = expected_ping as Field;
+    let expected_even = expected_even as Field;
+    let expected_odd = expected_odd as Field;
+
     // --- Direct recursion ---
     // factorial(5, x) = 120 * x
     let f = factorial(5, x);

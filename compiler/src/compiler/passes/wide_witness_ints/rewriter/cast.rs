@@ -112,6 +112,7 @@ impl Rewriter<'_> {
                     value: sum,
                     target: CastTarget::Nop,
                 });
+                self.read_limbs.insert(result, stripped);
             }
 
             CastTarget::Nop => {

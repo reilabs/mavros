@@ -1,5 +1,5 @@
 use super::{
-    multi_cell_int_bits,
+    int_limb_widths, multi_cell_int_bits,
     test_utils::{
         bn254, emitted, fields, guard_every_instruction, limbed_widths, operation_with,
         operation_with_in, run_pass,
@@ -17,7 +17,7 @@ use num_traits::{One, Zero};
 
 use crate::collections::HashMap;
 use crate::compiler::{
-    analysis::value_range_analysis::field_modulus,
+    analysis::{flow_analysis::FlowAnalysis, types::Types, value_range_analysis::field_modulus},
     passes::{
         shared::limbs::{
             ceil_log2, widest_cell_sum_bits, widest_injective_int_bits, witness_half_limb_bits,
@@ -296,6 +296,165 @@ fn a_pure_value_injected_into_the_representation_is_bounded_per_limb() {
     }
 }
 
+/// `main(limbs..)` answering the `int(bits)` its limbs spell, all witnessed or all pure.
+fn program_spelling(field: FieldConfig, bits: usize, witnessed: bool) -> (HLSSA, Vec<ValueId>) {
+    let wrap = |ty: Type| if witnessed { Type::witness_of(ty) } else { ty };
+    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let main = ssa.get_unique_entrypoint_id();
+    let limbs: Vec<ValueId> = int_limb_widths(bits, field)
+        .iter()
+        .map(|_| ssa.fresh_value())
+        .collect();
+    let mut builder = HLSSABuilder::new(&mut ssa);
+    builder.modify_function(main, |fb| {
+        fb.function.add_return_type(wrap(Type::int(bits)));
+        let entry = fb.function.get_entry_id();
+        for (limb, width) in limbs.iter().zip(int_limb_widths(bits, field)) {
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(*limb, wrap(Type::int(width)));
+        }
+        let mut block = fb.test_block(entry);
+        let value = block.int_from_limbs(limbs.clone(), bits);
+        block.terminate_return(vec![value]);
+    });
+    (ssa, limbs)
+}
+
+/// Witnessed limbs **are** the value: each answer limb is its operand, and nothing is written,
+/// bounded or constrained, as the limbs' emitter bounds them.
+#[test]
+fn witnessed_limbs_are_the_value_they_spell() {
+    for field in fields() {
+        for bits in limbed_widths(field) {
+            let (mut ssa, limbs) = program_spelling(field, bits, true);
+            run_pass(&mut ssa);
+
+            let ops = emitted(&ssa);
+            let sources: Vec<ValueId> = ops
+                .iter()
+                .map(|op| match op {
+                    OpCode::Cast {
+                        value,
+                        target: CastTarget::Nop,
+                        ..
+                    } => *value,
+                    other => panic!("{:?}: int{bits} spelled by {other:?}", field.id()),
+                })
+                .collect();
+            assert_eq!(sources, limbs, "{:?}: int{bits}", field.id());
+
+            let main = ssa.get_function(ssa.get_unique_entrypoint_id());
+            let Some(Terminator::Return(returned)) =
+                main.get_block(main.get_entry_id()).get_terminator()
+            else {
+                panic!("main returns the value");
+            };
+            let results: Vec<ValueId> = ops
+                .iter()
+                .flat_map(|op| op.get_results().copied().collect::<Vec<_>>())
+                .collect();
+            assert_eq!(returned, &results, "{:?}: int{bits}", field.id());
+        }
+    }
+}
+
+/// Pure limbs are recombined, as the pure lane holds a value whole: each widened to the value's
+/// width, shifted to its place and or-ed in, with nothing witnessed.
+#[test]
+fn pure_limbs_are_recombined_into_the_value_they_spell() {
+    for field in fields() {
+        for bits in limbed_widths(field) {
+            let id = field.id();
+            let (mut ssa, limbs) = program_spelling(field, bits, false);
+            run_pass(&mut ssa);
+
+            let ops = emitted(&ssa);
+            assert!(
+                !ops.iter().any(|op| matches!(
+                    op,
+                    OpCode::IntFromLimbs { .. }
+                        | OpCode::WriteWitness { .. }
+                        | OpCode::Rangecheck { .. }
+                        | OpCode::Constrain { .. }
+                )),
+                "{id:?}: int{bits}: {ops:?}"
+            );
+            let widened: Vec<ValueId> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::Cast {
+                        value,
+                        target: CastTarget::Int(to),
+                        ..
+                    } if *to == bits => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(widened, limbs, "{id:?}: int{bits}: each limb, in order");
+            let places: Vec<usize> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::UShl,
+                        rhs,
+                        ..
+                    } => match ssa.get_const(*rhs).as_deref() {
+                        Some(Constant::Int(amount)) => Some(amount.limbs()[0] as usize),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            let h = witness_limb_bits(field);
+            let expected: Vec<usize> = (1..limbs.len()).map(|index| index * h).collect();
+            assert_eq!(
+                places, expected,
+                "{id:?}: int{bits}: each limb at its place"
+            );
+            let ors = ops
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op,
+                        OpCode::BinaryArithOp {
+                            kind: BinaryArithOpKind::Or,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert_eq!(ors, limbs.len() - 1, "{id:?}: int{bits}");
+        }
+    }
+}
+
+/// The limbs must be those of the width they spell, on the program's field.
+#[test]
+fn limbs_spell_only_the_width_they_are_limbs_of() {
+    let field = bn254();
+    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let main = ssa.get_unique_entrypoint_id();
+    let limb = ssa.fresh_value();
+    let mut builder = HLSSABuilder::new(&mut ssa);
+    builder.modify_function(main, |fb| {
+        let entry = fb.function.get_entry_id();
+        fb.function
+            .get_block_mut(entry)
+            .push_parameter(limb, Type::witness_of(Type::int(64)));
+        let mut block = fb.test_block(entry);
+        let value = block.int_from_limbs(vec![limb; 3], 320);
+        block.terminate_return(vec![value]);
+    });
+    let flow = FlowAnalysis::run(&ssa);
+    let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Types::new().run(&ssa, &flow);
+    }))
+    .expect_err("three limbs do not spell an int320");
+    let message = refusal.downcast_ref::<String>().map_or("", String::as_str);
+    assert!(message.contains("an int320 is 5 limbs, not 3"), "{message}");
+}
+
 /// `main(shadow, table, index, flag)`, the part of `witness_array_access`'s output that this
 /// arm reads: a hint out of the pure shadow, across the field boundary, into a column, and a
 /// lookup tying that column to the table.
@@ -444,6 +603,92 @@ fn the_field_image_of_a_pure_read_is_cast_from_the_limbs_it_was_read_as() {
         )),
         "no logical right shift or division re-splits the recombined value into limbs"
     );
+}
+
+/// A pinned write of a value stripped from a wide witness, which every entry-point return is,
+/// writes each limb from the limb it was stripped from.
+///
+/// The strip recombines the limbs for users that want the whole value. Splitting it again would
+/// cost a logical right shift and a narrowing per limb at the full width, all in witness
+/// generation, so the write takes the stripped limbs: every `Field` cast takes one of the strip's
+/// own results, and nothing shifts right or divides.
+#[test]
+fn a_pinned_write_of_a_stripped_witness_writes_the_limbs_it_was_stripped_from() {
+    for field in fields() {
+        let id = field.id();
+        let bits = limbed_widths(field)[0];
+        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let main = ssa.get_unique_entrypoint_id();
+        let (witness, pure) = (ssa.fresh_value(), ssa.fresh_value());
+        let written = ssa.fresh_value();
+        HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
+            let entry = fb.function.get_entry_id();
+            fb.function
+                .get_block_mut(entry)
+                .push_parameter(witness, Type::witness_of(Type::int(bits)));
+            let mut block = fb.test_block(entry);
+            block.emit(OpCode::Cast {
+                result: pure,
+                value: witness,
+                target: CastTarget::ValueOf,
+            });
+            block.emit(OpCode::WriteWitness {
+                result: Some(written),
+                value: pure,
+                pinned: true,
+            });
+            block.terminate_return(vec![]);
+        });
+        run_pass(&mut ssa);
+        let ops = emitted(&ssa);
+
+        let stripped: Vec<ValueId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::Cast {
+                    result,
+                    target: CastTarget::ValueOf,
+                    ..
+                } => Some(*result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stripped.len(),
+            limb_widths(bits, witness_limb_bits(field)).len(),
+            "{id:?}: one strip per limb"
+        );
+        let imaged: Vec<ValueId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                OpCode::Cast {
+                    value,
+                    target: CastTarget::Field,
+                    ..
+                } => Some(*value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            imaged, stripped,
+            "{id:?}: each written limb is cast from a stripped limb, not split out of the whole value"
+        );
+        let pinned = ops
+            .iter()
+            .filter(|op| matches!(op, OpCode::WriteWitness { pinned: true, .. }))
+            .count();
+        assert_eq!(pinned, stripped.len(), "{id:?}: one pinned column per limb");
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                OpCode::BinaryArithOp {
+                    kind: BinaryArithOpKind::UShr | BinaryArithOpKind::UDiv,
+                    ..
+                }
+            )),
+            "{id:?}: no logical right shift or division re-splits the recombined value"
+        );
+    }
 }
 
 /// A `Field` cast of a wide witnessed value is its residue as one element: the sum of the limbs at

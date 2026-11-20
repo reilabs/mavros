@@ -13,7 +13,9 @@ fn mul_u8(a: u8, b: u8) -> u8 {
     a * b
 }
 
-fn main(w: Field) {
+fn main(w: u8) {
+    let w = w as Field;
+
     // Keeps `main` from folding away entirely; the multiplication below is what is under test.
     assert(w != 0);
     // 200 * 2 is 400, above the 255 a `u8` holds. `144` is the wrapped answer.

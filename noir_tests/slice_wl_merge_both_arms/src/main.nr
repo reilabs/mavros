@@ -1,7 +1,11 @@
 // Differing-length merge where both arms are slice literals (an if-expression, no mutation
 // and no pushes). The merged slice is then read through a witness index and, under a guard
 // that is only live for the longer arm, at a pure index past the shorter arm's length.
-fn main(w: Field, e_last: pub Field, elen: pub Field) {
+fn main(w: u8, e_last: pub u8, elen: pub u8) {
+    let w = w as Field;
+    let e_last = e_last as Field;
+    let elen = elen as Field;
+
     // `as_vector` on each arm: the arms are unified with each other before the `let` annotation
     // is consulted, so two array literals of different lengths would not type-check.
     let s: [Field] = if w == 1 { [1, 2].as_vector() } else { [5, 6, 7].as_vector() };

@@ -1,6 +1,9 @@
 use std::mavros::{spread, unspread};
 
-fn main(x: u32, y: u32, a: u32, b: u32, cast_x: Field, cast_big: Field) {
+fn main(x: u32, y: u32, a: u32, b: u32, cast_x: [u8; 8], cast_big: [u8; 8]) {
+    let cast_x = Field::from_le_bytes_checked(cast_x);
+    let cast_big = Field::from_le_bytes_checked(cast_big);
+
     // --- narrowing casts from Field ---
 
     let x_u8 = cast_x as u8;

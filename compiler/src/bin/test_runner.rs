@@ -113,7 +113,21 @@ fn main() {
     // for it.
     let analyze = args.iter().any(|a| a == "--analyze-r1cs");
     let fields = parse_fields_arg(&args);
-    run_parent(&output_path, jobs, DEFAULT_IGNORED_TESTS, analyze, &fields);
+    // `--only <test>`, repeatable: run only the tests each names, as `DEFAULT_IGNORED_TESTS` names
+    // them. The report then covers those tests alone, so it may not land in the default STATUS.md.
+    let only = parse_only_args(&args);
+    assert!(
+        only.is_empty() || args.iter().any(|arg| arg == "--output"),
+        "--only writes a partial report, so it needs --output"
+    );
+    run_parent(
+        &output_path,
+        jobs,
+        DEFAULT_IGNORED_TESTS,
+        &only,
+        analyze,
+        &fields,
+    );
 }
 
 const DEFAULT_IGNORED_TESTS: &[&str] = &[
@@ -148,6 +162,40 @@ const TEST_EXPECTATION_OVERRIDES: &[(&str, TestExpectation)] = &[
     ),
 ];
 
+/// Expectations that hold on one field only. Each overrides the entry's expectation on its field.
+const FIELD_EXPECTATION_OVERRIDES: &[(&str, FieldId, TestExpectation)] = &[
+    // `(0 - 1) as u64` depends on the field, and the fixture's `return` holds bn254's value.
+    (
+        "noir/test_programs/execution_success/cast_regression_7776",
+        FieldId::Goldilocks,
+        TestExpectation::ReturnMismatch,
+    ),
+];
+
+/// The fixture file naming the frontend error the fixture is written to provoke.
+const EXPECTED_ERROR_FILE: &str = "expected_error.txt";
+
+/// Whether a frontend rejection of the fixture at `root`, reading `error`, is the one it is written
+/// to provoke. A fixture with an [`EXPECTED_ERROR_FILE`] is held to that text on every field. On any
+/// other fixture a frontend rejection counts on bn254 only: off bn254 it can mean a missing builtin.
+fn frontend_rejection_expected(root: &Path, field: FieldId, error: &str) -> bool {
+    match fs::read_to_string(root.join(EXPECTED_ERROR_FILE)) {
+        Ok(expected) => {
+            let expected = expected.trim();
+            !expected.is_empty() && error.contains(expected)
+        }
+        Err(_) => field == FieldId::Bn254,
+    }
+}
+
+/// The expectation for `entry` on `field`.
+fn expectation_on(entry: &TestEntry, field: FieldId) -> TestExpectation {
+    FIELD_EXPECTATION_OVERRIDES
+        .iter()
+        .find(|(name, on, _)| *name == entry.display_name && *on == field)
+        .map_or(entry.expectation, |(_, _, expectation)| *expectation)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestExpectation {
     ExecutionSuccess,
@@ -180,6 +228,18 @@ fn parse_jobs_arg(args: &[String]) -> usize {
         i += 1;
     }
     1
+}
+
+fn parse_only_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == "--only")
+        .map(|(i, _)| {
+            args.get(i + 1)
+                .unwrap_or_else(|| panic!("--only requires a test name"))
+                .clone()
+        })
+        .collect()
 }
 
 fn parse_field_arg(args: &[String]) -> FieldId {
@@ -297,13 +357,13 @@ fn run_single_vm<F: MavrosField>(
         // real regression is never masked.
         Err(error @ DriverError::NoirCompilerError { .. }) => {
             eprintln!("Noir compiler rejected program: {error}");
-            // A foreign-field frontend error can mean an unsupported ABI or builtin,
-            // rather than the runtime failure this fixture intends to exercise.
-            emit(if F::ID == FieldId::Bn254 {
-                "END:COMPILED:reject"
-            } else {
-                "END:COMPILED:fail"
-            });
+            emit(
+                if frontend_rejection_expected(&root, F::ID, &error.to_string()) {
+                    "END:COMPILED:reject"
+                } else {
+                    "END:COMPILED:fail"
+                },
+            );
             return None;
         }
         Err(
@@ -971,6 +1031,7 @@ fn run_parent(
     output_path: &Path,
     jobs: usize,
     ignored_tests: &[&str],
+    only: &[String],
     analyze: bool,
     fields: &[FieldId],
 ) {
@@ -1023,6 +1084,7 @@ fn run_parent(
 
     assert!(!entries.is_empty(), "No test directories found");
     apply_test_expectation_overrides(&mut entries);
+    select_tests(&mut entries, only);
 
     // Build the wasm runtime once before spawning workers and hand children the artifact path.
     // If children built it themselves, their `cargo metadata`/`cargo build` invocations would
@@ -1061,6 +1123,7 @@ fn run_parent(
                     // one package sequentially so they never delete each other's dumps.
                     for (field_idx, &field) in fields.iter().enumerate() {
                         let ignored = is_ignored_test(entry, ignored_tests);
+                        let expectation = expectation_on(entry, field);
                         let mut result = if ignored {
                             ignored_test_result(&entry.display_name)
                         } else {
@@ -1068,7 +1131,7 @@ fn run_parent(
                             cmd.arg("--run-single")
                                 .arg(&entry.path)
                                 .args(["--field", field.name()]);
-                            if entry.expectation != TestExpectation::ExecutionSuccess {
+                            if expectation != TestExpectation::ExecutionSuccess {
                                 cmd.arg("--expect-failure");
                             }
                             if analyze {
@@ -1088,7 +1151,7 @@ fn run_parent(
                                 .map_while(Result::ok)
                                 .collect();
                             let _ = child.wait();
-                            parse_child_output(&entry.display_name, entry.expectation, &lines)
+                            parse_child_output(&entry.display_name, expectation, &lines)
                         };
                         result.field = field;
                         let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1127,17 +1190,41 @@ fn run_parent(
 }
 
 fn is_ignored_test(entry: &TestEntry, ignored_tests: &[&str]) -> bool {
-    ignored_tests.iter().any(|ignored| {
-        let ignored = Path::new(ignored.trim_matches('/'));
-        !ignored.as_os_str().is_empty()
-            && [&entry.fixture_name, &entry.display_name]
-                .iter()
-                .any(|name| {
-                    Path::new(name)
-                        .ancestors()
-                        .any(|ancestor| ancestor.ends_with(ignored))
-                })
-    })
+    ignored_tests
+        .iter()
+        .any(|ignored| names_test(entry, ignored))
+}
+
+/// Whether `name` names `entry`: it is a trailing run of path components of the entry's fixture
+/// or display name, or of one of their ancestors, so a workspace's name names each member.
+fn names_test(entry: &TestEntry, name: &str) -> bool {
+    let name = Path::new(name.trim_matches('/'));
+    !name.as_os_str().is_empty()
+        && [&entry.fixture_name, &entry.display_name]
+            .iter()
+            .any(|entry_name| {
+                Path::new(entry_name)
+                    .ancestors()
+                    .any(|ancestor| ancestor.ends_with(name))
+            })
+}
+
+/// Keeps only the entries some name in `only` names, unless `only` is empty.
+///
+/// # Panics
+///
+/// If a name in `only` names no entry.
+fn select_tests(entries: &mut Vec<TestEntry>, only: &[String]) {
+    if only.is_empty() {
+        return;
+    }
+    for name in only {
+        assert!(
+            entries.iter().any(|entry| names_test(entry, name)),
+            "--only {name}: no test has this name"
+        );
+    }
+    entries.retain(|entry| only.iter().any(|name| names_test(entry, name)));
 }
 
 fn ignored_test_result(name: &str) -> TestResult {
@@ -2824,6 +2911,73 @@ mod tests {
     }
 
     #[test]
+    fn a_named_frontend_error_is_held_to_its_text_on_every_field() {
+        let error = "error: break is only allowed in unconstrained functions";
+        let unnamed = tempfile::tempdir().unwrap();
+        assert!(frontend_rejection_expected(
+            unnamed.path(),
+            FieldId::Bn254,
+            error
+        ));
+        assert!(!frontend_rejection_expected(
+            unnamed.path(),
+            FieldId::Goldilocks,
+            error
+        ));
+
+        let named = tempfile::tempdir().unwrap();
+        fs::write(
+            named.path().join(EXPECTED_ERROR_FILE),
+            "break is only allowed in unconstrained functions\n",
+        )
+        .unwrap();
+        let missing_builtin = "error: Could not resolve 'embedded_curve_ops' in path";
+        for field in [FieldId::Bn254, FieldId::Goldilocks] {
+            assert!(frontend_rejection_expected(named.path(), field, error));
+            assert!(!frontend_rejection_expected(
+                named.path(),
+                field,
+                missing_builtin
+            ));
+        }
+
+        fs::write(named.path().join(EXPECTED_ERROR_FILE), " \n").unwrap();
+        assert!(!frontend_rejection_expected(
+            named.path(),
+            FieldId::Bn254,
+            error
+        ));
+    }
+
+    #[test]
+    fn a_field_expectation_override_applies_on_its_field_only() {
+        let (name, field, expectation) = FIELD_EXPECTATION_OVERRIDES[0];
+        let entry = TestEntry {
+            path: PathBuf::from(name),
+            fixture_name: name.to_string(),
+            display_name: name.to_string(),
+            expectation: TestExpectation::ExecutionSuccess,
+        };
+        assert_eq!(expectation_on(&entry, field), expectation);
+        for other in [FieldId::Bn254, FieldId::Goldilocks] {
+            if other != field {
+                assert_eq!(
+                    expectation_on(&entry, other),
+                    TestExpectation::ExecutionSuccess
+                );
+            }
+        }
+        let other_entry = TestEntry {
+            display_name: format!("{name}_other"),
+            ..entry
+        };
+        assert_eq!(
+            expectation_on(&other_entry, field),
+            TestExpectation::ExecutionSuccess
+        );
+    }
+
+    #[test]
     fn workspace_ignore_matches_whole_fixtures_or_individual_members() {
         let tmp = tempfile::tempdir().unwrap();
         write_discovery_workspace(tmp.path(), "workspace");
@@ -2849,6 +3003,63 @@ mod tests {
         for ignored in ["work", "space", "", "/"] {
             assert!(!entries.iter().any(|e| is_ignored_test(e, &[ignored])));
         }
+    }
+
+    #[test]
+    fn only_keeps_the_tests_it_names() {
+        let args: Vec<String> = ["runner", "--only", "a", "--jobs", "2", "--only", "b"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(parse_only_args(&args), ["a", "b"]);
+        assert!(parse_only_args(&args[..1]).is_empty());
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_discovery_workspace(tmp.path(), "workspace");
+        write_discovery_workspace(tmp.path(), "workspace_extra");
+        let discover =
+            || collect_test_dirs(tmp.path(), "tests/", TestExpectation::ExecutionSuccess);
+        let names = |entries: &[TestEntry]| {
+            entries
+                .iter()
+                .map(|e| e.display_name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut entries = discover();
+        let all = names(&entries);
+        select_tests(&mut entries, &[]);
+        assert_eq!(names(&entries), all);
+
+        let mut entries = discover();
+        select_tests(&mut entries, &["workspace/crates/a".to_string()]);
+        assert_eq!(names(&entries), ["tests/workspace/crates/a"]);
+
+        let mut entries = discover();
+        select_tests(
+            &mut entries,
+            &[
+                "workspace_extra".to_string(),
+                "workspace/crates/b".to_string(),
+            ],
+        );
+        assert_eq!(
+            names(&entries),
+            [
+                "tests/workspace/crates/b",
+                "tests/workspace_extra/crates/a",
+                "tests/workspace_extra/crates/b"
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "--only work: no test has this name")]
+    fn only_refuses_a_name_that_names_no_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_discovery_workspace(tmp.path(), "workspace");
+        let mut entries =
+            collect_test_dirs(tmp.path(), "tests/", TestExpectation::ExecutionSuccess);
+        select_tests(&mut entries, &["work".to_string()]);
     }
 
     #[test]

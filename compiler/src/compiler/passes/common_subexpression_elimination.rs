@@ -657,6 +657,7 @@ impl CSE {
                     | OpCode::AssertR1C { .. }
                     | OpCode::Call { .. }
                     | OpCode::MkSeq { .. }
+                    | OpCode::IntFromLimbs { .. }
                     | OpCode::MkSeqOfBlob { .. }
                     | OpCode::MkRepeated { .. }
                     | OpCode::ArraySet { .. }
