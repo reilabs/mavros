@@ -1,7 +1,7 @@
 //! Products too wide for one field element, lowered to a schoolbook multiplication over limbs and checked by a
 //! [`PolynomialIdentity`].
 //!
-//! Each wide operan `a` is a [`Factor`] whose limbs are the coefficients of a polynomial `A(X)`, with
+//! Each wide operand `a` is a [`Factor`] whose limbs are the coefficients of a polynomial `A(X)`, with
 //! `A(β) = a` at the radix `β = 2^limb_bits`. An identity such as `a·b = c` becomes
 //! `F(X) = A(X)·B(X) − C(X)`, which vanishes at `β` exactly when `F(X) = (β − X)·H(X)` for the
 //! carry polynomial `H`. We check that `A(X)·B(X) − C(X) = (β − X)·H(X)` at `deg F` points.

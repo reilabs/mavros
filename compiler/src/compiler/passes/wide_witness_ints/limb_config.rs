@@ -48,7 +48,7 @@ impl LimbConfig {
         self.limb_bits
     }
 
-    /// The widest limb of `field` at which every all identities are sound.
+    /// The widest limb of `field` at which every identity is sound.
     fn admitting(field: FieldConfig, required: &[Identity]) -> Self {
         let modulus = field_modulus(field);
         let limb_bits = choose_limb_bits_for_modulus(&modulus, required).unwrap_or_else(

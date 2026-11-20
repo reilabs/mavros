@@ -68,7 +68,7 @@ pub(super) struct PolynomialIdentity<'a> {
     pub(super) terms: Vec<Term<'a>>,
 
     /// What a polynomial identity solves for: e.g C(x) when the identity of the `A(x)B(x) - C(x) = 0`;
-    /// or [`None`] where every term of the polynomial is given, and the idenity can be of any shape.
+    /// or [`None`] where every term of the polynomial is given, and the identity can be of any shape.
     pub(super) target: Option<Target<'a>>,
 
     /// How the carry chain is represented in R1CS.
@@ -287,7 +287,7 @@ pub(super) struct Block {
     pub(super) carry_bits: Option<usize>,
 }
 
-/// The layout of an identity of `shape` at limb `widths`; or [`None`] where it is inadmissable.
+/// The layout of an identity of `shape` at limb `widths`; or [`None`] where it is inadmissible.
 fn chain_layout<S: IdentityShape + ?Sized>(
     shape: &S,
     widths: &[usize],

@@ -60,13 +60,13 @@
 //! reaches past the product, passes the modulus, except for the double lane's two-limb product. A
 //! signed one runs here past [`single_cell_signed_product_fits`], with no such exception.
 //!
-//! The product is checked as one **polynomial identity** ([`rewriter::Rewriter::evaluate_f_poly`]), a la
+//! The product is checked as one **polynomial identity** ([`rewriter::Rewriter::lower_identity`]), à la
 //! [this blogpost](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding).
 //! Limb `i` of an operand is the coefficient of `X^i`, so `a` is `A(β)` at the radix `β = 2^limb_width`.
 //! The answer `C(X)` and the carries `H(X)` are witnessed from a pure-side schoolbook,
 //! and `F(X) = A(X)·B(X) − C(X) == (β − X)·H(X)` is constrained at each point `0..=deg F`.
 //!
-//! The identity is checked modulo p  and modulo β^t, so the identity holds over the integers
+//! The identity is checked modulo p and modulo β^t, so the identity holds over the integers.
 //! The columns are grouped into **blocks** of as many as fit together with a carry.
 //!
 //! An unsigned product is **checked**. Its `k` answer limbs are range-checked to their widths and
