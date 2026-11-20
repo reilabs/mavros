@@ -6,6 +6,8 @@ use num_traits::{One, Zero};
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
+mod lower;
+
 /// The shape of an identity. Used for finding sound parameters.
 pub(in super::super) trait IdentityShape: fmt::Debug + Sync {
     /// The number of `±A(X).B(X)` terms.

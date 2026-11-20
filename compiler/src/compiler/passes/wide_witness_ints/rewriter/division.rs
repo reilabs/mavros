@@ -11,7 +11,7 @@ use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
     identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
-    product::exceeds_single_cell_product,
+    lower::exceeds_single_cell_product,
     sign::Sign,
 };
 use mavros_artifacts::FieldConfig;

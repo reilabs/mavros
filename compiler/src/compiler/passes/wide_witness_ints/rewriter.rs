@@ -20,9 +20,14 @@ use crate::compiler::{
     },
     util::field_constant,
 };
+
 use chain::{CarryOut, chained};
 use division::{Answer, Division};
+use lower::unguarded;
+use product::UnsignedProduct;
 use shift::shifted;
+use sign::SignedProduct;
+
 mod cast;
 mod chain;
 mod division;
@@ -34,13 +39,12 @@ mod shift;
 mod sign;
 mod spread;
 
-#[cfg(test)]
 pub(super) use division::EuclideanDivision;
 pub(super) use division::divided;
 pub(super) use identity::IdentityShape;
 #[cfg(test)]
 pub(super) use product::division_carries;
-pub(super) use product::{lowered_identity, multiplied};
+pub(super) use product::multiplied;
 /// One instruction's worth of rewriting, plus the minting the gadgets need.
 ///
 /// `ssa` is borrowed immutably, which is enough to mint a value or intern a constant: the function
@@ -533,6 +537,21 @@ impl<'a> Rewriter<'a> {
             })
             .collect()
     }
+
+    /// `lhs == rhs` as field elements, where `guard` holds.
+    fn constrain_equal(&mut self, lhs: ValueId, rhs: ValueId, guard: Option<ValueId>) {
+        let difference = self.bin(BinaryArithOpKind::USub, lhs, rhs);
+        let flag = match guard {
+            Some(condition) => self.cast(condition, CastTarget::Field),
+            None => self.field_const(self.field().one()),
+        };
+        let zero = self.field_const(self.field().zero());
+        self.push(OpCode::Constrain {
+            a: flag,
+            b: difference,
+            c: zero,
+        });
+    }
 }
 
 /// The rewriter is an emitter, so the shared lowering helpers can build into it. Everything it
@@ -581,4 +600,29 @@ pub(super) fn lowers_a_gadget(op: &OpCode, fti: &FunctionTypeInfo, field: FieldC
         || multiplied(op, fti, field).is_some()
         || divided(op, fti, field).is_some()
         || shifted(op, fti, field).is_some()
+}
+
+/// The identity `op` lowers to, if it lowers to one, at the width of its operands.
+///
+/// A signed division divides the magnitudes, so it is the unsigned division's identity.
+pub(super) fn lowered_identity(
+    op: &OpCode,
+    types: &FunctionTypeInfo,
+    field: FieldConfig,
+) -> Option<(usize, &'static dyn IdentityShape)> {
+    let Operands { bits, .. } =
+        multiplied(op, types, field).or_else(|| divided(op, types, field))?;
+    let OpCode::BinaryArithOp { kind, .. } = unguarded(op) else {
+        ice_unreachable!("`multiplied` and `divided` match only a binary operation");
+    };
+    let shape: &'static dyn IdentityShape = match kind {
+        BinaryArithOpKind::UMul => &UnsignedProduct,
+        BinaryArithOpKind::SMul => &SignedProduct,
+        BinaryArithOpKind::UDiv
+        | BinaryArithOpKind::URem
+        | BinaryArithOpKind::SDiv
+        | BinaryArithOpKind::SRem => &EuclideanDivision,
+        _ => ice_unreachable!("`multiplied` and `divided` match only products and divisions"),
+    };
+    Some((bits, shape))
 }

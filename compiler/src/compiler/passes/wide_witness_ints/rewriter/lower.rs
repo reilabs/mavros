@@ -1,15 +1,19 @@
 use super::{
     super::types::{element_types, flat_limbs, limb_types, limb_widths, paired},
-    FunctionTypeInfo, Rewriter,
+    FunctionTypeInfo, Operands, Rewriter,
 };
 
-use crate::compiler::ssa::{
-    Instruction, ValueId,
-    hlssa::{
-        BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, LookupTarget, OpCode,
-        builder::HLEmitter,
+use crate::compiler::{
+    passes::shared::limbs::{single_cell_product_fits, single_cell_signed_product_fits},
+    ssa::{
+        Instruction, ValueId,
+        hlssa::{
+            BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, LookupTarget, OpCode,
+            builder::HLEmitter,
+        },
     },
 };
+use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
@@ -699,4 +703,32 @@ pub(super) fn witnessed_width(
     let bits = types.get_value_type(lhs).int_width()?;
     (types.get_value_type(lhs).is_witness_of() || types.get_value_type(rhs).is_witness_of())
         .then_some(bits)
+}
+
+/// A binary operation of one of `kinds`, guarded or not, with a witnessed operand, at a width whose
+/// product one element cannot hold: past [`single_cell_product_fits`] for an unsigned one, and
+/// past [`single_cell_signed_product_fits`] for a signed one.
+pub(super) fn exceeds_single_cell_product(
+    op: &OpCode,
+    types: &FunctionTypeInfo,
+    field: FieldConfig,
+    kinds: &[BinaryArithOpKind],
+) -> Option<Operands> {
+    let OpCode::BinaryArithOp { kind, lhs, rhs, .. } = unguarded(op) else {
+        return None;
+    };
+    if !kinds.contains(kind) {
+        return None;
+    }
+    let bits = witnessed_width(types, *lhs, *rhs)?;
+    let fits = if kind.is_signed() {
+        single_cell_signed_product_fits(field, bits)
+    } else {
+        single_cell_product_fits(field, bits)
+    };
+    (!fits).then_some(Operands {
+        bits,
+        lhs: *lhs,
+        rhs: *rhs,
+    })
 }
