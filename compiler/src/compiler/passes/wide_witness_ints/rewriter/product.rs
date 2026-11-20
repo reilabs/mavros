@@ -18,9 +18,7 @@ use super::{
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     passes::{
-        shared::limbs::{
-            single_cell_product_fits, single_cell_signed_product_fits, widest_injective_int_bits,
-        },
+        shared::limbs::{single_cell_product_fits, single_cell_signed_product_fits},
         wide_witness_ints::types::limb_widths,
     },
     ssa::{
@@ -111,7 +109,7 @@ impl Rewriter<'_> {
         factors: S::Factors,
     ) -> PolynomialIdentity<'f> {
         shape
-            .instantiate(widths, widest_injective_int_bits(self.field()), factors)
+            .instantiate(widths, self.injective_bits(), factors)
             .unwrap_or_else(|| {
             ice_unreachable!(
                 "the limb config admits every identity it lowers, but not {shape:?} at {widths:?}"

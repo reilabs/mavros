@@ -27,6 +27,7 @@ pub(super) use tests::default_limb_config;
 pub(super) struct LimbConfig {
     field: FieldConfig,
     limb_bits: usize,
+    injective_bits: usize,
 }
 
 impl Analysis for LimbConfig {
@@ -48,6 +49,10 @@ impl LimbConfig {
         self.limb_bits
     }
 
+    pub(super) fn injective_bits(&self) -> usize {
+        self.injective_bits
+    }
+
     /// The widest limb of `field` at which every identity is sound.
     fn admitting(field: FieldConfig, required: &[Identity]) -> Self {
         let modulus = field_modulus(field);
@@ -63,7 +68,11 @@ impl LimbConfig {
             )
         },
         );
-        Self { field, limb_bits }
+        Self {
+            field,
+            limb_bits,
+            injective_bits: widest_injective_int_bits_for_modulus(&modulus),
+        }
     }
 }
 

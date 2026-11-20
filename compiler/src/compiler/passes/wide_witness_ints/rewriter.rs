@@ -11,7 +11,6 @@ use crate::compiler::{
         types::{FunctionTypeInfo, TypeInfo},
         value_range_analysis::field_modulus,
     },
-    passes::shared::limbs::widest_injective_int_bits,
     ssa::{
         BlockId, FunctionId, Located, Terminator, ValueId,
         hlssa::{
@@ -170,6 +169,11 @@ impl<'a> Rewriter<'a> {
     fn field(&self) -> FieldConfig {
         self.limb_config().field()
     }
+
+    fn injective_bits(&self) -> usize {
+        self.limb_config().injective_bits()
+    }
+
     fn limbs(&self, value: ValueId) -> Vec<ValueId> {
         limbs_of(self.value_map, value)
     }
@@ -312,7 +316,7 @@ impl<'a> Rewriter<'a> {
         if offset == 0 {
             return value;
         }
-        if bits > widest_injective_int_bits(self.field()) {
+        if bits > self.injective_bits() {
             let amount = self.int_const(IntBits::from_u128(bits, offset as u128));
             return self.bin(BinaryArithOpKind::UShr, value, amount);
         }
