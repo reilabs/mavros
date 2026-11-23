@@ -149,6 +149,7 @@ impl StripWitnessOf {
             | OpCode::DropGlobal { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. } => {}
+            OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
             OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
             OpCode::Guard { .. } => {
                 ice!("Found Guard but `LowerGuards` should have removed them")

@@ -963,6 +963,30 @@ impl Types {
                 function_info.values.insert(*result_even, even_type);
                 Ok(())
             }
+            OpCode::MulMod {
+                result,
+                lhs,
+                rhs,
+                modulus,
+            } => {
+                let operand_types = [lhs, rhs, modulus]
+                    .into_iter()
+                    .map(|v| {
+                        function_info.values.get(v).ok_or_else(|| {
+                            format!("MulMod operand {:?} not found in type assignments", v)
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                // `lhs`'s type, witnessed if any operand is.
+                let base = operand_types[0].strip_witness();
+                let result_type = if operand_types.iter().any(|t| t.is_witness_of()) {
+                    Type::witness_of(base)
+                } else {
+                    base
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
             OpCode::Guard { inner, .. } => {
                 self.run_opcode(inner, function_info, function_types, field)
             }

@@ -757,6 +757,7 @@ impl RCInsertion {
                         new_instructions.push(instruction);
                     }
                     OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
+                    OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
                     OpCode::Select {
                         result: _,
                         cond: _,

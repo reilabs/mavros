@@ -496,6 +496,7 @@ impl WitnessLowering {
                         | OpCode::Unspread { .. } => {
                             emitter.emit(instruction);
                         }
+                        OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
                         OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                         OpCode::MkTuple { .. }
                         | OpCode::TupleProj { .. }

@@ -720,6 +720,7 @@ impl SymbolicExecutor {
                         scope.insert(*result_odd, odd_val);
                         scope.insert(*result_even, even_val);
                     }
+                    OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
                     OpCode::Guard { condition, inner } => {
                         let condition_val = &scope[condition];
                         let inputs: Vec<&V> = inner.get_inputs().map(|id| &scope[id]).collect();

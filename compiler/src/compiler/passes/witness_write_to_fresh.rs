@@ -98,6 +98,7 @@ impl WitnessWriteToFresh {
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. }
                         | OpCode::Guard { .. } => instruction.clone(),
+                        OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
                         OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                         OpCode::TupleProj { .. }
                         | OpCode::TupleRefProj { .. }

@@ -306,6 +306,13 @@ pub enum OpCode {
         /// The low bits read across both streams, `2..=m`: `2N` for Noir's `unspread::<N>`.
         value_bits: usize,
     },
+    /// `(lhs * rhs) mod modulus`, with all three operands and the result of the same integer type.
+    MulMod {
+        result: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
+        modulus: ValueId,
+    },
     Guard {
         condition: ValueId,
         inner: Box<OpCode>,
@@ -402,6 +409,7 @@ impl OpCode {
             | OpCode::DropGlobal { .. }
             | OpCode::Spread { .. }
             | OpCode::Unspread { .. }
+            | OpCode::MulMod { .. }
             | OpCode::Guard { .. } => None,
         }
     }
@@ -982,6 +990,21 @@ impl Instruction for OpCode {
                     value.0,
                 )
             }
+            OpCode::MulMod {
+                result,
+                lhs,
+                rhs,
+                modulus,
+            } => {
+                format!(
+                    "v{}{} = mul_mod(v{}, v{}, v{})",
+                    result.0,
+                    annotate_value(*result),
+                    lhs.0,
+                    rhs.0,
+                    modulus.0
+                )
+            }
             OpCode::Guard { condition, inner } => {
                 format!(
                     "guard(v{}) {{ {} }}",
@@ -1043,6 +1066,12 @@ impl Instruction for OpCode {
                 index: i,
                 value: v,
             } => vec![s, i, v].into_iter(),
+            Self::MulMod {
+                result: _,
+                lhs,
+                rhs,
+                modulus,
+            } => vec![lhs, rhs, modulus].into_iter(),
             Self::SliceRemove {
                 result_slice: _,
                 result_elem: _,
@@ -1264,7 +1293,9 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. }
+            | Self::Spread { result: r, .. }
+            | Self::MulMod { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1332,7 +1363,9 @@ impl Instruction for OpCode {
             | Self::AssertCmp { .. }
             | Self::AssertR1C { a: _, b: _, c: _ }
             | Self::Rangecheck { .. } => vec![].into_iter(),
-            Self::Not { result: r, .. } | Self::Spread { result: r, .. } => vec![r].into_iter(),
+            Self::Not { result: r, .. }
+            | Self::Spread { result: r, .. }
+            | Self::MulMod { result: r, .. } => vec![r].into_iter(),
             Self::Unspread {
                 result_odd,
                 result_even,
@@ -1419,6 +1452,12 @@ impl Instruction for OpCode {
                 index: i,
                 value: v,
             } => vec![s, i, v].into_iter(),
+            Self::MulMod {
+                result: _,
+                lhs,
+                rhs,
+                modulus,
+            } => vec![lhs, rhs, modulus].into_iter(),
             Self::SliceRemove {
                 result_slice: _,
                 result_elem: _,
@@ -1778,6 +1817,12 @@ impl Instruction for OpCode {
                 index: i,
                 value: v,
             } => vec![a, b, i, v].into_iter(),
+            Self::MulMod {
+                result,
+                lhs,
+                rhs,
+                modulus,
+            } => vec![result, lhs, rhs, modulus].into_iter(),
             Self::SliceRemove {
                 result_slice: a,
                 result_elem: b,

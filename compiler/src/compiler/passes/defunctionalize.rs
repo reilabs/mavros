@@ -1043,6 +1043,7 @@ fn compute_reaching_fn_ptrs(ssa: &HLSSA, types: Option<&TypeInfo>) -> ReachingFn
                         | OpCode::DropGlobal { .. }
                         | OpCode::Spread { .. }
                         | OpCode::Unspread { .. } => {}
+                        OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
                         OpCode::Todo { result_types, .. } => {
                             if result_types.iter().any(contains_function) {
                                 ice!(

@@ -302,6 +302,7 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             let ty = builder.value_type(*result_even);
             builder.copy_taint(*result_even, *value, ty);
         }
+        OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
         OpCode::Select {
             result,
             cond,
@@ -768,6 +769,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::DLookup { .. }
         | OpCode::Todo { .. }
         | OpCode::Alloc { .. } => false,
+        OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
     }
 }
 
