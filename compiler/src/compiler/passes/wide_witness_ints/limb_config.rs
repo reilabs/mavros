@@ -107,9 +107,8 @@ fn choose_limb_bits_for_modulus(
     let injective = widest_injective_int_bits_for_modulus(modulus);
     let mut refused = None;
     for limb_bits in limb_candidates(modulus) {
-        let is_unsound = |(bits, shape): &&Identity| {
-            !shape.does_identity_hold(*bits, limb_bits, injective)
-        };
+        let is_unsound =
+            |(bits, shape): &&Identity| !shape.does_identity_hold(*bits, limb_bits, injective);
         match required.iter().find(is_unsound) {
             None => return Ok(limb_bits),
             Some(identity) => refused = Some((limb_bits, *identity)),

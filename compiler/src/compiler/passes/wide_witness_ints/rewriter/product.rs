@@ -1,9 +1,7 @@
 //! Products too wide for one field element, lowered to a schoolbook multiplication over limbs and checked by a
 //! [`PolynomialIdentity`].
 
-use super::identity::{
-    ChainLayout, Factor, IdentityTemplate, LimbLayout, Polarity, Target, Term,
-};
+use super::identity::{ChainLayout, Factor, IdentityTemplate, LimbLayout, Polarity, Target, Term};
 use super::lower::exceeds_single_cell_product;
 use super::{Operands, Rewriter};
 use crate::compiler::{
