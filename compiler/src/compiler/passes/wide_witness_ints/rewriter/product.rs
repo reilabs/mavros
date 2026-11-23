@@ -1,7 +1,9 @@
 //! Products too wide for one field element, lowered to a schoolbook multiplication over limbs and checked by a
 //! [`PolynomialIdentity`].
 
-use super::identity::{Factor, IdentityTemplate, LimbLayout, Polarity, Target, Term};
+use super::identity::{
+    ChainLayout, Factor, IdentityTemplate, LimbLayout, Polarity, Target, Term,
+};
 use super::lower::exceeds_single_cell_product;
 use super::{Operands, Rewriter};
 use crate::compiler::{
@@ -63,8 +65,16 @@ impl IdentityTemplate for UnsignedProduct {
         (vec![product], Some(c))
     }
 
-    fn largest_terms<'a>(self, full: &'a Factor) -> (Vec<Term<'a>>, Option<Target<'a>>) {
-        self.terms((full, full, Target::Witnessed(full.layout)))
+    fn largest_layout(
+        self,
+        bits: usize,
+        limb_bits: usize,
+        injective: usize,
+    ) -> Option<ChainLayout> {
+        let layout = LimbLayout::new(bits, limb_bits);
+        let full = Factor::full(layout);
+        let identity = self.instantiate(injective, (&full, &full, Target::Witnessed(layout)))?;
+        Some(identity.into_layout())
     }
 }
 

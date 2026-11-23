@@ -12,7 +12,7 @@ use crate::compiler::{
             limbs::{limb_bits_for_modulus, widest_injective_int_bits_for_modulus},
             unsupported::unsupported_on_this_field,
         },
-        wide_witness_ints::rewriter::{IdentityShape, LimbLayout, lowered_identity},
+        wide_witness_ints::rewriter::{IdentityShape, lowered_identity},
     },
     ssa::hlssa::HLSSA,
 };
@@ -108,7 +108,7 @@ fn choose_limb_bits_for_modulus(
     let mut refused = None;
     for limb_bits in limb_candidates(modulus) {
         let is_unsound = |(bits, shape): &&Identity| {
-            !shape.does_identity_hold(LimbLayout::new(*bits, limb_bits), injective)
+            !shape.does_identity_hold(*bits, limb_bits, injective)
         };
         match required.iter().find(is_unsound) {
             None => return Ok(limb_bits),

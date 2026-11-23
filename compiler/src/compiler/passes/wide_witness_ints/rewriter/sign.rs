@@ -2,7 +2,7 @@ use super::{
     super::types::limb_widths,
     CarryOut, Rewriter,
     division::Answer,
-    identity::{Factor, IdentityTemplate, Limb, LimbLayout, Polarity, Target, Term},
+    identity::{ChainLayout, Factor, IdentityTemplate, Limb, LimbLayout, Polarity, Target, Term},
 };
 
 use crate::compiler::{
@@ -42,8 +42,15 @@ impl IdentityTemplate for SignedProduct {
         (terms, None)
     }
 
-    fn largest_terms<'a>(self, full: &'a Factor) -> (Vec<Term<'a>>, Option<Target<'a>>) {
-        self.terms((full, full, full))
+    fn largest_layout(
+        self,
+        bits: usize,
+        limb_bits: usize,
+        injective: usize,
+    ) -> Option<ChainLayout> {
+        let full = Factor::full(LimbLayout::new(bits, limb_bits));
+        let identity = self.instantiate(injective, (&full, &full, &full))?;
+        Some(identity.into_layout())
     }
 }
 

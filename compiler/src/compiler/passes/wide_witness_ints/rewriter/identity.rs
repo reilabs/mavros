@@ -10,16 +10,14 @@ mod lower;
 
 /// An identity as the limb config judges it.
 pub(in super::super) trait IdentityShape: Debug + Sync {
-    /// Whether the identity holds over operands cut as `layout`.
-    fn does_identity_hold(&self, layout: LimbLayout, injective: usize) -> bool;
+    /// Whether the identity holds over operands of `bits`, cut into limbs of `limb_bits`.
+    fn does_identity_hold(&self, bits: usize, limb_bits: usize, injective: usize) -> bool;
 }
 
 /// Every identity is judged by laying out its own terms, over full-range factors.
 impl<T: IdentityTemplate> IdentityShape for T {
-    fn does_identity_hold(&self, layout: LimbLayout, injective: usize) -> bool {
-        let full = Factor::full(layout);
-        let (terms, target) = self.largest_terms(&full);
-        chain_layout(&terms, target, injective).is_some()
+    fn does_identity_hold(&self, bits: usize, limb_bits: usize, injective: usize) -> bool {
+        self.largest_layout(bits, limb_bits, injective).is_some()
     }
 }
 
@@ -32,8 +30,9 @@ pub(super) trait IdentityTemplate: Copy + Debug + Sync {
     /// Its terms over `factors`, and the target they are held to.
     fn terms<'a>(self, factors: Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>);
 
-    /// Its terms at their largest, over `full`, a full-range factor.
-    fn largest_terms<'a>(self, full: &'a Factor) -> (Vec<Term<'a>>, Option<Target<'a>>);
+    /// Its layout at its largest, or [`None`] where the field cannot hold it.
+    fn largest_layout(self, bits: usize, limb_bits: usize, injective: usize)
+    -> Option<ChainLayout>;
 
     /// The identity this lays out over `factors`; or [`None`] where the field cannot hold it.
     fn instantiate<'a>(
@@ -100,6 +99,11 @@ impl PolynomialIdentity<'_> {
 
     pub(super) fn hint_bits(&self) -> usize {
         self.layout.hint_bits
+    }
+
+    /// How its carry chain is laid out, outliving the factors it was built over.
+    pub(super) fn into_layout(self) -> ChainLayout {
+        self.layout
     }
 }
 
@@ -330,7 +334,7 @@ pub(super) enum Limb {
 
 /// How an identity is cut into blocks.
 #[derive(Clone)]
-struct ChainLayout {
+pub(super) struct ChainLayout {
     /// The degree of the identity polynomial.
     degree: usize,
 
@@ -511,7 +515,7 @@ fn degree(terms: &[Term<'_>]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainLayout, Factor, IdentityTemplate, LimbLayout, chain_layout};
+    use super::{ChainLayout, IdentityTemplate, LimbLayout};
     use crate::compiler::passes::{
         shared::limbs::{widest_injective_int_bits, witness_limb_bits},
         wide_witness_ints::{
@@ -534,20 +538,25 @@ mod tests {
             for bits in [h + 1, 2 * h, 3 * h - 1, 320, 1000, 16384] {
                 let limbs = LimbLayout::new(bits, h);
                 let what = format!("{id:?} int{bits}");
-                check_shape(UnsignedProduct, injective, limbs, &what);
-                check_shape(SignedProduct, injective, limbs, &what);
-                check_shape(EuclideanDivision, injective, limbs, &what);
+                check_shape(UnsignedProduct, true, injective, limbs, &what);
+                check_shape(SignedProduct, false, injective, limbs, &what);
+                check_shape(EuclideanDivision, true, injective, limbs, &what);
             }
         }
     }
 
-    /// Check the block invariants of `shape` laid out over full-range factors cut as `limbs`.
-    fn check_shape<T: IdentityTemplate>(shape: T, injective: usize, limbs: LimbLayout, what: &str) {
-        let full = Factor::full(limbs);
-        let (terms, target) = shape.largest_terms(&full);
+    /// Check the block invariants of `shape`, held to a target where `is_checked`, laid out over
+    /// full-range factors for operands cut as `limbs`.
+    fn check_shape<T: IdentityTemplate>(
+        shape: T,
+        is_checked: bool,
+        injective: usize,
+        limbs: LimbLayout,
+        what: &str,
+    ) {
         check_blocks(
-            chain_layout(&terms, target, injective),
-            target.is_some(),
+            shape.largest_layout(limbs.bits, limbs.low_limb_bits, injective),
+            is_checked,
             injective,
             limbs,
             &format!("{what} {shape:?}"),
