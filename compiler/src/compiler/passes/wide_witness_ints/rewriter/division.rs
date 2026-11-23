@@ -10,7 +10,7 @@ use crate::compiler::{
 use super::{
     super::types::limb_widths,
     CarryOut, Operands, Rewriter,
-    identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
+    identity::{Factor, IdentityTemplate, Limb, LimbLayout, Polarity, Target, Term},
     lower::exceeds_single_cell_product,
     sign::Sign,
 };
@@ -26,25 +26,11 @@ pub(super) type Division = (ValueId, ValueId, Option<ValueId>, bool);
 #[derive(Clone, Copy, Debug)]
 pub(in super::super) struct EuclideanDivision;
 
-impl IdentityShape for EuclideanDivision {
-    fn num_products(&self) -> usize {
-        1
-    }
-
-    fn num_linear_terms(&self) -> usize {
-        1
-    }
-
-    fn is_checked(&self) -> bool {
-        true
-    }
-}
-
-impl<'a> IdentityTemplate<'a> for EuclideanDivision {
+impl IdentityTemplate for EuclideanDivision {
     /// `q`, `d`, `r` and `n`.
-    type Factors = (&'a Factor, &'a Factor, &'a Factor, &'a Factor);
+    type Factors<'a> = (&'a Factor, &'a Factor, &'a Factor, &'a Factor);
 
-    fn terms(self, (q, d, r, n): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+    fn terms<'a>(self, (q, d, r, n): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let terms = vec![
             Term {
                 polarity: Polarity::Positive,
@@ -60,6 +46,10 @@ impl<'a> IdentityTemplate<'a> for EuclideanDivision {
             },
         ];
         (terms, Some(Target::Given(n)))
+    }
+
+    fn largest_terms<'a>(self, full: &'a Factor) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+        self.terms((full, full, full, full))
     }
 }
 
@@ -169,8 +159,8 @@ impl Rewriter<'_> {
         widths: &[usize],
         guard: Option<ValueId>,
     ) -> (Vec<ValueId>, Vec<ValueId>) {
-        let n = self.factor(dividend, bits, widths);
-        let d = self.factor(divisor, bits, widths);
+        let n = self.factor(dividend, bits);
+        let d = self.factor(divisor, bits);
         let pure_dividend = self.pure_whole(dividend, bits);
         let pure_divisor = self.pure_whole(divisor, bits);
         let (q, r) = self.divide_factors(&n, &d, pure_dividend, pure_divisor, bits, widths, guard);
@@ -195,10 +185,9 @@ impl Rewriter<'_> {
         // Bound the answers by `q <= n / d` and `r < d`; only known limbs, and most of all a
         // constant divisor, tighten the width's bound. The chain below refuses a zero divisor, so
         // the bounds need only hold for `d >= 1`.
-        let limb_bits = self.limb_bits();
-        let dividend_max = n.largest(limb_bits);
-        let divisor_max = d.largest(limb_bits);
-        let divisor_min = d.smallest(limb_bits).max(BigUint::one());
+        let dividend_max = n.largest();
+        let divisor_max = d.largest();
+        let divisor_min = d.smallest().max(BigUint::one());
         let quotient_max = &dividend_max / divisor_min;
         let remainder_max = if divisor_max.is_zero() {
             BigUint::zero()
@@ -219,7 +208,7 @@ impl Rewriter<'_> {
         let q = self.witness_hinted(quotient_hint, bits, widths, &quotient_max);
         let r = self.witness_hinted(remainder_hint, bits, widths, &remainder_max);
 
-        let identity = self.identity(EuclideanDivision, widths, (&q, d, &r, n));
+        let identity = self.identity(EuclideanDivision, (&q, d, &r, n));
         self.lower_identity(&identity, guard);
 
         // `r < d` reads only the limbs either side can reach, as above them both are zero.
@@ -290,12 +279,8 @@ impl Rewriter<'_> {
             limbs.push(Limb::Value(limb));
             bounds.push((BigUint::one() << checked) - 1u8);
         }
-        Factor {
-            limbs,
-            is_witnessed: true,
-            bounds,
-            signed_offset: None,
-        }
+        let layout = LimbLayout::new(bits, self.limb_bits());
+        Factor::new(layout, limbs, true, None).with_bounds(bounds)
     }
 
     /// A value as one pure integer of `bits`, which is what the pure side divides.

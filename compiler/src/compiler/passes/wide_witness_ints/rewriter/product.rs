@@ -1,7 +1,7 @@
 //! Products too wide for one field element, lowered to a schoolbook multiplication over limbs and checked by a
 //! [`PolynomialIdentity`].
 
-use super::identity::{Factor, IdentityShape, IdentityTemplate, Polarity, Target, Term};
+use super::identity::{Factor, IdentityTemplate, LimbLayout, Polarity, Target, Term};
 use super::lower::exceeds_single_cell_product;
 use super::{Operands, Rewriter};
 use crate::compiler::{
@@ -35,9 +35,10 @@ impl Rewriter<'_> {
         }
 
         let widths = limb_widths(bits, self.limb_bits());
-        let lhs = self.factor(lhs, bits, &widths);
-        let rhs = self.factor(rhs, bits, &widths);
-        let identity = self.identity(UnsignedProduct, &widths, (&lhs, &rhs, &widths));
+        let lhs = self.factor(lhs, bits);
+        let rhs = self.factor(rhs, bits);
+        let answer = LimbLayout::new(bits, self.limb_bits());
+        let identity = self.identity(UnsignedProduct, (&lhs, &rhs, Target::Witnessed(answer)));
         let answer = self.lower_identity(&identity, guard);
         self.deliver(*result, answer, &widths, bits, guard);
         true
@@ -48,32 +49,22 @@ impl Rewriter<'_> {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct UnsignedProduct;
 
-impl IdentityShape for UnsignedProduct {
-    fn num_products(&self) -> usize {
-        1
-    }
+impl IdentityTemplate for UnsignedProduct {
+    /// `a`, `b`, and `c`.
+    type Factors<'a> = (&'a Factor, &'a Factor, Target<'a>);
 
-    fn num_linear_terms(&self) -> usize {
-        0
-    }
-
-    fn is_checked(&self) -> bool {
-        true
-    }
-}
-
-impl<'a> IdentityTemplate<'a> for UnsignedProduct {
-    /// `a`, `b`, and the widths `c` is solved at.
-    type Factors = (&'a Factor, &'a Factor, &'a [usize]);
-
-    fn terms(self, (a, b, widths): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+    fn terms<'a>(self, (a, b, c): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let product = Term {
             polarity: Polarity::Positive,
             lhs: a,
             rhs: Some(b),
             gated: true,
         };
-        (vec![product], Some(Target::Witnessed(widths)))
+        (vec![product], Some(c))
+    }
+
+    fn largest_terms<'a>(self, full: &'a Factor) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+        self.terms((full, full, Target::Witnessed(full.layout)))
     }
 }
 

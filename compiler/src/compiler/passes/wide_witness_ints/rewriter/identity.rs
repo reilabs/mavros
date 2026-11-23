@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt::Debug, iter::once};
 
 use crate::compiler::ssa::ValueId;
 use num_traits::{One, Zero};
@@ -8,51 +8,41 @@ use num_bigint::BigUint;
 
 mod lower;
 
-/// The shape of an identity. Used for finding sound parameters.
-pub(in super::super) trait IdentityShape: fmt::Debug + Sync {
-    /// The number of `±A(X).B(X)` terms.
-    fn num_products(&self) -> usize;
+/// An identity as the limb config judges it.
+pub(in super::super) trait IdentityShape: Debug + Sync {
+    /// Whether the identity holds over operands cut as `layout`.
+    fn does_identity_hold(&self, layout: LimbLayout, injective: usize) -> bool;
+}
 
-    /// The number of `±D(X)` terms.
-    fn num_linear_terms(&self) -> usize;
-
-    /// Whether it is checked against an answer.
-    fn is_checked(&self) -> bool {
-        false
-    }
-
-    /// Whether any of its terms is subtracted, so that a carry can be negative.
-    fn has_negative_terms(&self) -> bool {
-        false
-    }
-
-    /// Whether an identity of this shape holds at limb `widths`.
-    fn admits(&self, widths: &[usize], injective: usize) -> bool {
-        chain_layout(self, widths, injective).is_some()
+/// Every identity is judged by laying out its own terms, over full-range factors.
+impl<T: IdentityTemplate> IdentityShape for T {
+    fn does_identity_hold(&self, layout: LimbLayout, injective: usize) -> bool {
+        let full = Factor::full(layout);
+        let (terms, target) = self.largest_terms(&full);
+        chain_layout(&terms, target, injective).is_some()
     }
 }
 
-/// An identity the lowering builds, which lays out its own terms, so they are of its shape.
-pub(super) trait IdentityTemplate<'a>: IdentityShape + Copy {
-    /// What it is built from.
-    type Factors;
+/// An identity the lowering builds.
+pub(super) trait IdentityTemplate: Copy + Debug + Sync {
+    /// What it is built from: the factors known before it is lowered, and the [`Target`] it is
+    /// held to.
+    type Factors<'a>;
 
     /// Its terms over `factors`, and the target they are held to.
-    fn terms(self, factors: Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>);
+    fn terms<'a>(self, factors: Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>);
 
-    /// The identity this lays out over `factors` at limb `widths`; or [`None`] exactly where
-    /// it does not [admit](IdentityShape::admits) `widths`.
-    fn instantiate(
+    /// Its terms at their largest, over `full`, a full-range factor.
+    fn largest_terms<'a>(self, full: &'a Factor) -> (Vec<Term<'a>>, Option<Target<'a>>);
+
+    /// The identity this lays out over `factors`; or [`None`] where the field cannot hold it.
+    fn instantiate<'a>(
         self,
-        widths: &[usize],
         injective: usize,
-        factors: Self::Factors,
+        factors: Self::Factors<'a>,
     ) -> Option<PolynomialIdentity<'a>> {
-        let layout = chain_layout(&self, widths, injective)?;
         let (terms, target) = self.terms(factors);
-        if !self.has_negative_terms() && terms.iter().any(|t| t.polarity == Polarity::Negative) {
-            ice!("{self:?} subtracts a term, but its carries are planned as non-negative");
-        }
+        let layout = chain_layout(&terms, target, injective)?;
         Some(PolynomialIdentity {
             terms,
             target,
@@ -82,7 +72,7 @@ impl PolynomialIdentity<'_> {
     /// a target limb from each of a witnessed target's.
     pub(super) fn carry_chain_len(&self) -> usize {
         let target_limbs = match self.target {
-            Some(Target::Witnessed(widths)) => widths.len(),
+            Some(Target::Witnessed(answer)) => answer.num_limbs(),
             Some(Target::Given(_)) | None => 0,
         };
         self.num_committed_carries().max(target_limbs)
@@ -130,6 +120,37 @@ pub(super) struct Term<'a> {
     pub(super) gated: bool,
 }
 
+impl Term<'_> {
+    /// Its factors: `A`, and `B` where it is a product.
+    fn factors(&self) -> impl Iterator<Item = &Factor> {
+        once(self.lhs).chain(self.rhs)
+    }
+
+    /// The degree of its polynomial.
+    fn degree(&self) -> usize {
+        self.factors()
+            .map(|factor| factor.layout.num_limbs() - 1)
+            .sum()
+    }
+
+    /// The largest value it can take, at full range.
+    fn largest(&self) -> BigUint {
+        self.factors()
+            .map(|factor| max_limb_value(factor.layout.bits))
+            .product()
+    }
+
+    /// The most it can carry out of any column.
+    fn max_carry(&self) -> BigUint {
+        match self.rhs {
+            Some(rhs) => max_product_carry(self.lhs.layout, rhs.layout),
+            // A linear term's limbs below a column, read at their places, are below the column's
+            // place, so it carries less than one out of it.
+            None => BigUint::one(),
+        }
+    }
+}
+
 /// Whether a term of an identity is added or subtracted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Polarity {
@@ -150,15 +171,62 @@ impl Polarity {
 #[derive(Clone, Copy)]
 pub(super) enum Target<'a> {
     /// A value the carry chain witnesses.
-    Witnessed(&'a [usize]),
+    Witnessed(LimbLayout),
 
     /// A given factor, held to the columns by the polynomial.
     Given(&'a Factor),
 }
 
+impl Target<'_> {
+    /// How the value the identity is held to is cut into limbs.
+    fn layout(&self) -> LimbLayout {
+        match *self {
+            Target::Witnessed(layout) => layout,
+            Target::Given(factor) => factor.layout,
+        }
+    }
+}
+
+/// How an integer of `bits` is cut into limbs of `limb_bits`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in super::super) struct LimbLayout {
+    /// The width of the whole integer.
+    pub(super) bits: usize,
+
+    /// The width of every limb but the top one.
+    pub(super) low_limb_bits: usize,
+}
+
+impl LimbLayout {
+    pub(in super::super) fn new(bits: usize, low_limb_bits: usize) -> Self {
+        LimbLayout {
+            bits,
+            low_limb_bits,
+        }
+    }
+
+    /// The number of limbs.
+    fn num_limbs(self) -> usize {
+        self.bits.div_ceil(self.low_limb_bits)
+    }
+
+    /// The place of `limb`: the power of two it is scaled by.
+    fn place(self, limb: usize) -> usize {
+        limb * self.low_limb_bits
+    }
+
+    /// The width of `limb`: `limb_bits`, or what is left of `bits` for the top one.
+    fn width(self, limb: usize) -> usize {
+        (self.bits - self.place(limb)).min(self.low_limb_bits)
+    }
+}
+
 /// One operand of the schoolbook, limb by limb.
 pub(super) struct Factor {
-    /// Each limb at its width.
+    /// How the operand is cut into limbs.
+    pub(super) layout: LimbLayout,
+
+    /// Each limb, at its place in `layout`.
     pub(super) limbs: Vec<Limb>,
 
     /// Whether the operand is witnessed, which decides how the hints of its [`Limb::Value`]s are
@@ -173,22 +241,30 @@ pub(super) struct Factor {
 }
 
 impl Factor {
-    /// `limbs` at `widths` as a factor
+    /// `limbs`, cut as `layout`, as a factor.
     pub(super) fn new(
+        layout: LimbLayout,
         limbs: Vec<Limb>,
-        widths: &[usize],
         is_witnessed: bool,
         signed_offset: Option<BigUint>,
     ) -> Self {
+        if limbs.len() != layout.num_limbs() {
+            ice_unreachable!(
+                "a factor of {} limbs cut as {layout:?}, which has {}",
+                limbs.len(),
+                layout.num_limbs()
+            );
+        }
         let bounds = limbs
             .iter()
-            .zip(full_bounds(widths))
-            .map(|(limb, full)| match limb {
+            .enumerate()
+            .map(|(index, limb)| match limb {
                 Limb::Constant(pattern) => BigUint::from(pattern),
-                Limb::Value(_) => full,
+                Limb::Value(_) => max_limb_value(layout.width(index)),
             })
             .collect();
         Factor {
+            layout,
             limbs,
             is_witnessed,
             bounds,
@@ -196,11 +272,17 @@ impl Factor {
         }
     }
 
-    /// A full-range witnessed factor at limb `widths`.
-    #[cfg(test)]
-    pub(super) fn full(widths: &[usize]) -> Self {
-        let limbs = widths.iter().map(|_| Limb::Value(ValueId(0))).collect();
-        Factor::new(limbs, widths, true, None)
+    /// A full-range witnessed factor cut as `layout`.
+    pub(super) fn full(layout: LimbLayout) -> Self {
+        let limbs = (0..layout.num_limbs())
+            .map(|_| Limb::Value(ValueId(0)))
+            .collect();
+        Factor::new(layout, limbs, true, None)
+    }
+
+    /// It with each limb bounded by `bounds`, narrower than its width.
+    pub(super) fn with_bounds(self, bounds: Vec<BigUint>) -> Self {
+        Factor { bounds, ..self }
     }
 
     /// `L` where `limb` is the top limb and the factor is signed.
@@ -215,22 +297,22 @@ impl Factor {
         self.bounds[limb].is_zero() && self.top_offset(limb).is_none()
     }
 
-    /// The largest value the whole operand can take, from its limbs' bounds at `limb_bits` apart.
-    pub(super) fn largest(&self, limb_bits: usize) -> BigUint {
+    /// The largest value the whole operand can take, from its limbs' bounds at their places.
+    pub(super) fn largest(&self) -> BigUint {
         self.bounds
             .iter()
             .enumerate()
-            .map(|(index, bound)| bound << (index * limb_bits))
+            .map(|(index, bound)| bound << self.layout.place(index))
             .sum()
     }
 
     /// The smallest value the whole operand can take: its known limbs, with every other at zero.
-    pub(super) fn smallest(&self, limb_bits: usize) -> BigUint {
+    pub(super) fn smallest(&self) -> BigUint {
         self.limbs
             .iter()
             .enumerate()
             .filter_map(|(index, limb)| match limb {
-                Limb::Constant(pattern) => Some(BigUint::from(pattern) << (index * limb_bits)),
+                Limb::Constant(pattern) => Some(BigUint::from(pattern) << self.layout.place(index)),
                 Limb::Value(_) => None,
             })
             .sum()
@@ -244,15 +326,6 @@ pub(super) enum Limb {
 
     /// A limb of a constant operand, interned only where the plan reads it.
     Constant(IntBits),
-}
-
-/// The bound of each limb at `widths` when nothing narrower is known: the largest value its width
-/// holds.
-fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
-    widths
-        .iter()
-        .map(|width| (BigUint::one() << *width) - 1u8)
-        .collect()
 }
 
 /// How an identity is cut into blocks.
@@ -289,28 +362,20 @@ pub(super) struct Block {
     pub(super) carry_bits: Option<usize>,
 }
 
-/// The layout of an identity of `shape` at limb `widths`; or [`None`] where it is inadmissible.
-fn chain_layout<S: IdentityShape + ?Sized>(
-    shape: &S,
-    widths: &[usize],
+/// The layout of the identity of `terms` held to `target`; or [`None`] where it is inadmissible.
+fn chain_layout(
+    terms: &[Term<'_>],
+    target: Option<Target<'_>>,
     injective: usize,
 ) -> Option<ChainLayout> {
-    let params = check_params(
-        widths,
-        injective,
-        shape.num_products(),
-        shape.num_linear_terms(),
-        shape.is_checked(),
-        shape.has_negative_terms(),
-    )?;
-    let degree = degree(shape.num_products(), widths.len());
+    let params = check_params(terms, target, injective)?;
+    let degree = degree(terms);
     if params.t > degree + 1 {
         return None;
     }
-    let num_committed_carries = if shape.is_checked() {
-        widths.len() - 1
-    } else {
-        degree
+    let num_committed_carries = match target {
+        Some(target) => target.layout().num_limbs() - 1,
+        None => degree,
     };
     let certified = params.t;
     let group_size = params.group_size.max(1);
@@ -354,77 +419,99 @@ struct CheckParams {
     hint_bits: usize,
 }
 
-/// What an identity over integers at limb `widths` is checked with.
+/// What the identity of `terms` held to `target` is checked with.
 fn check_params(
-    widths: &[usize],
+    terms: &[Term<'_>],
+    target: Option<Target<'_>>,
     injective_integer_width: usize,
-    num_quadratic_terms: usize,
-    num_linear_terms: usize,
-    is_checked: bool,
-    has_negative_terms: bool,
 ) -> Option<CheckParams> {
-    let k = widths.len();
-    if k < 2 {
-        ice_unreachable!("polynomial evaluation expects multiple limbs");
+    let limb_bits = terms
+        .first()
+        .expect("an identity has a term")
+        .lhs
+        .layout
+        .low_limb_bits;
+    let mut layouts = terms
+        .iter()
+        .flat_map(Term::factors)
+        .map(|factor| factor.layout)
+        .chain(target.map(|target| target.layout()));
+    if !layouts.all(|layout| layout.low_limb_bits == limb_bits && layout.num_limbs() >= 2) {
+        ice_unreachable!(
+            "polynomial evaluation expects every factor in multiple limbs at one limb width"
+        );
     }
-    let get_max_limb_value = |width: usize| (BigUint::one() << width) - 1u8;
 
-    let (low_limbs_width, low_limbs_max_value, top_limb_max_value) = (
-        widths[0], // All limbs have same width except the top limb.
-        get_max_limb_value(widths[0]),
-        get_max_limb_value(widths[k - 1]),
-    );
-    let max_operand_value = get_max_limb_value(widths.iter().sum());
-    let max_polynomial_value = &max_operand_value * &max_operand_value * num_quadratic_terms
-        + &max_operand_value * num_linear_terms;
+    let max_polynomial_value: BigUint = terms.iter().map(Term::largest).sum();
 
     let t = (max_polynomial_value.bits() as usize)
         .saturating_sub(injective_integer_width)
-        .div_ceil(low_limbs_width);
+        .div_ceil(limb_bits);
 
-    let max_partial_product_carry = (&low_limbs_max_value * (k - 1))
-        .max(&low_limbs_max_value * (k - 2) + &top_limb_max_value * 2u8);
-    let max_carry = max_partial_product_carry * num_quadratic_terms + num_linear_terms;
+    let max_carry: BigUint = terms.iter().map(Term::max_carry).sum();
     let carry_bits = max_carry.bits() as usize;
+    let has_negative_terms = terms.iter().any(|term| term.polarity == Polarity::Negative);
     let (carry_check_bits, carry_offset_bits, sign_bits) = if has_negative_terms {
         (carry_bits + 1, Some(carry_bits), 1)
     } else {
         (carry_bits, None, 0)
     };
 
-    if is_checked {
-        let group_size = injective_integer_width.checked_sub(carry_check_bits)? / low_limbs_width;
+    if let Some(target) = target {
+        let group_size = injective_integer_width.checked_sub(carry_check_bits)? / limb_bits;
         (group_size > 0).then_some(CheckParams {
             carry_check_bits,
             carry_offset_bits,
             group_size,
-            t: k,
-            hint_bits: low_limbs_width + carry_bits.max(low_limbs_width + 1) + sign_bits,
+            t: target.layout().num_limbs(),
+            hint_bits: limb_bits + carry_bits.max(limb_bits + 1) + sign_bits,
         })
     } else {
-        let group_size = injective_integer_width.saturating_sub(carry_check_bits) / low_limbs_width;
+        let group_size = injective_integer_width.saturating_sub(carry_check_bits) / limb_bits;
         (t == 0 || group_size > 0).then_some(CheckParams {
             carry_check_bits,
             carry_offset_bits,
             group_size,
             t,
-            hint_bits: low_limbs_width + carry_bits.max(low_limbs_width) + sign_bits,
+            hint_bits: limb_bits + carry_bits.max(limb_bits) + sign_bits,
         })
     }
 }
 
-/// The degree of `F` at `k` limbs.
-fn degree(num_quadratic_terms: usize, k: usize) -> usize {
-    if num_quadratic_terms > 0 {
-        2 * k - 2
-    } else {
-        k - 1
+/// The max that partial products of factors cut as `lhs` and `rhs` can carry out of any column.
+fn max_product_carry(lhs: LimbLayout, rhs: LimbLayout) -> BigUint {
+    if lhs == rhs {
+        let k = lhs.num_limbs();
+        let low_limbs_max_value = max_limb_value(lhs.low_limb_bits);
+        let top_limb_max_value = max_limb_value(lhs.width(k - 1));
+        return (&low_limbs_max_value * (k - 1))
+            .max(&low_limbs_max_value * (k - 2) + top_limb_max_value * 2u8);
     }
+    let limb_sum = |layout: LimbLayout| -> BigUint {
+        (0..layout.num_limbs())
+            .map(|limb| max_limb_value(layout.width(limb)))
+            .sum()
+    };
+    limb_sum(lhs).min(limb_sum(rhs))
+}
+
+/// The largest value a limb of `width` holds.
+fn max_limb_value(width: usize) -> BigUint {
+    (BigUint::one() << width) - 1u8
+}
+
+/// The degree of `F`: that of its highest term.
+fn degree(terms: &[Term<'_>]) -> usize {
+    terms
+        .iter()
+        .map(Term::degree)
+        .max()
+        .expect("an identity has a term")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainLayout, IdentityShape, chain_layout};
+    use super::{ChainLayout, Factor, IdentityTemplate, LimbLayout, chain_layout};
     use crate::compiler::passes::{
         shared::limbs::{widest_injective_int_bits, witness_limb_bits},
         wide_witness_ints::{
@@ -432,7 +519,6 @@ mod tests {
                 division::EuclideanDivision, product::UnsignedProduct, sign::SignedProduct,
             },
             test_utils::bn254,
-            types::limb_widths,
         },
     };
     use mavros_artifacts::FieldConfig;
@@ -446,20 +532,26 @@ mod tests {
             let injective = widest_injective_int_bits(field);
             let h = witness_limb_bits(field);
             for bits in [h + 1, 2 * h, 3 * h - 1, 320, 1000, 16384] {
-                let widths = limb_widths(bits, h);
-                let shapes: [&dyn IdentityShape; 3] =
-                    [&UnsignedProduct, &SignedProduct, &EuclideanDivision];
-                for shape in shapes {
-                    check_blocks(
-                        chain_layout(shape, &widths, injective),
-                        shape.is_checked(),
-                        injective,
-                        &widths,
-                        &format!("{id:?} int{bits} {shape:?}"),
-                    );
-                }
+                let limbs = LimbLayout::new(bits, h);
+                let what = format!("{id:?} int{bits}");
+                check_shape(UnsignedProduct, injective, limbs, &what);
+                check_shape(SignedProduct, injective, limbs, &what);
+                check_shape(EuclideanDivision, injective, limbs, &what);
             }
         }
+    }
+
+    /// Check the block invariants of `shape` laid out over full-range factors cut as `limbs`.
+    fn check_shape<T: IdentityTemplate>(shape: T, injective: usize, limbs: LimbLayout, what: &str) {
+        let full = Factor::full(limbs);
+        let (terms, target) = shape.largest_terms(&full);
+        check_blocks(
+            chain_layout(&terms, target, injective),
+            target.is_some(),
+            injective,
+            limbs,
+            &format!("{what} {shape:?}"),
+        );
     }
 
     /// Check the block invariants.
@@ -467,11 +559,11 @@ mod tests {
         layout: Option<ChainLayout>,
         is_checked: bool,
         injective: usize,
-        widths: &[usize],
+        limbs: LimbLayout,
         what: &str,
     ) {
         let layout = layout.unwrap_or_else(|| panic!("{what}: the field holds the identity"));
-        let limb_bits = widths[0];
+        let limb_bits = limbs.low_limb_bits;
         let mut next = 0;
         for block in &layout.blocks {
             assert_eq!(
@@ -497,7 +589,7 @@ mod tests {
         if is_checked {
             assert_eq!(
                 next,
-                widths.len(),
+                limbs.num_limbs(),
                 "{what}: a checked identity certifies every column"
             );
         }

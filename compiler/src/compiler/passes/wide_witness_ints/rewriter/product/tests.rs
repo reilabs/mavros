@@ -8,7 +8,7 @@ use crate::{
             wide_witness_ints::{
                 rewriter::{
                     division::EuclideanDivision,
-                    identity::{Factor, IdentityTemplate, PolynomialIdentity},
+                    identity::{Factor, IdentityTemplate, LimbLayout, PolynomialIdentity, Target},
                     product::UnsignedProduct,
                 },
                 test_utils::{
@@ -63,9 +63,17 @@ fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
 /// [`planned_written_checks`] of a product of full-range witnesses, or [`None`] if a field whose
 /// widest injective width is `injective` cannot hold it.
 fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize>>> {
-    let factor = Factor::full(widths);
-    let identity = UnsignedProduct.instantiate(widths, injective, (&factor, &factor, widths))?;
+    let factor = Factor::full(layout_of(widths));
+    let identity = UnsignedProduct.instantiate(
+        injective,
+        (&factor, &factor, Target::Witnessed(factor.layout)),
+    )?;
     Some(planned_written_checks(&identity, widths, false))
+}
+
+/// The layout limb `widths` are cut at: every limb but the top one is as wide as the first.
+fn layout_of(widths: &[usize]) -> LimbLayout {
+    LimbLayout::new(widths.iter().sum(), widths[0])
 }
 
 /// The range check on each witness `identity` at limb `widths` writes after its operands, in the
@@ -404,10 +412,9 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
 
 /// The range check on each witness the division's schoolbook writes, in order, at full operand ranges.
 pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Option<usize>> {
-    let factor = Factor::full(widths);
+    let factor = Factor::full(layout_of(widths));
     let identity = EuclideanDivision
         .instantiate(
-            widths,
             widest_injective_int_bits(field),
             (&factor, &factor, &factor, &factor),
         )

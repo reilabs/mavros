@@ -2,7 +2,7 @@ use super::{
     super::types::limb_widths,
     CarryOut, Rewriter,
     division::Answer,
-    identity::{Factor, IdentityShape, IdentityTemplate, Limb, Polarity, Target, Term},
+    identity::{Factor, IdentityTemplate, Limb, LimbLayout, Polarity, Target, Term},
 };
 
 use crate::compiler::{
@@ -20,25 +20,11 @@ use num_traits::One;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SignedProduct;
 
-impl IdentityShape for SignedProduct {
-    fn num_products(&self) -> usize {
-        1
-    }
-
-    fn num_linear_terms(&self) -> usize {
-        1
-    }
-
-    fn has_negative_terms(&self) -> bool {
-        true
-    }
-}
-
-impl<'a> IdentityTemplate<'a> for SignedProduct {
+impl IdentityTemplate for SignedProduct {
     /// `a`, `b` and `c`.
-    type Factors = (&'a Factor, &'a Factor, &'a Factor);
+    type Factors<'a> = (&'a Factor, &'a Factor, &'a Factor);
 
-    fn terms(self, (a, b, c): Self::Factors) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+    fn terms<'a>(self, (a, b, c): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let terms = vec![
             Term {
                 polarity: Polarity::Positive,
@@ -54,6 +40,10 @@ impl<'a> IdentityTemplate<'a> for SignedProduct {
             },
         ];
         (terms, None)
+    }
+
+    fn largest_terms<'a>(self, full: &'a Factor) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+        self.terms((full, full, full))
     }
 }
 
@@ -97,7 +87,7 @@ impl Rewriter<'_> {
         let c_limbs = self.chain_limbs_of(&c, widths.len());
         let c_offset = self.offset_factor_of(c_limbs.clone(), &widths);
 
-        let identity = self.identity(SignedProduct, &widths, (&a, b, &c_offset));
+        let identity = self.identity(SignedProduct, (&a, b, &c_offset));
         self.lower_identity(&identity, guard);
 
         let answer = self.limb_fields(c_limbs);
@@ -413,7 +403,8 @@ impl Rewriter<'_> {
                 }
             })
             .collect();
-        Factor::new(limbs, widths, is_witnessed, offset)
+        let layout = LimbLayout::new(widths.iter().sum(), self.limb_bits());
+        Factor::new(layout, limbs, is_witnessed, offset)
     }
 
     /// A gadget's answer, one field element per limb of `widths`, as limbs the chain and the

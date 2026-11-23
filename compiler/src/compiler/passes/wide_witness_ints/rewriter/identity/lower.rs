@@ -6,7 +6,9 @@
 //! carry polynomial `H`. We check that `A(X)·B(X) − C(X) = (β − X)·H(X)` at `deg F` points.
 
 use super::super::Rewriter;
-use super::{Factor, IdentityTemplate, Limb, Polarity, PolynomialIdentity, Target, Term};
+use super::{
+    Factor, IdentityTemplate, Limb, LimbLayout, Polarity, PolynomialIdentity, Target, Term,
+};
 use crate::compiler::ssa::{
     ValueId,
     hlssa::{BinaryArithOpKind, CastTarget, Constant, OpCode, builder::HLEmitter},
@@ -52,23 +54,22 @@ impl IdentityFlags {
 }
 
 impl Rewriter<'_> {
-    /// The identity `shape` lays out over `factors` at limb `widths`.
+    /// The identity `shape` lays out over `factors`.
     ///
     /// [`LimbConfig`](crate::compiler::passes::wide_witness_ints::limb_config::LimbConfig) admitted every identity the program
     /// lowers at this limb, so the field holds it.
-    pub(in super::super) fn identity<'f, S: IdentityTemplate<'f>>(
+    pub(in super::super) fn identity<'f, S: IdentityTemplate>(
         &self,
         shape: S,
-        widths: &[usize],
-        factors: S::Factors,
+        factors: S::Factors<'f>,
     ) -> PolynomialIdentity<'f> {
         shape
-            .instantiate(widths, self.injective_bits(), factors)
+            .instantiate(self.injective_bits(), factors)
             .unwrap_or_else(|| {
-            ice_unreachable!(
-                "the limb config admits every identity it lowers, but not {shape:?} at {widths:?}"
-            )
-        })
+                ice_unreachable!(
+                    "the limb config admits every identity it lowers, but not {shape:?}"
+                )
+            })
     }
 
     /// An operand of the schoolbook as its limbs at `bits`, with their bounds.
@@ -77,35 +78,29 @@ impl Rewriter<'_> {
     /// of the plan. A witnessed operand can have known limbs too (above a widened value, emptied by
     /// a constant shift, or known from an earlier gadget); each is taken as its constant, which is
     /// pinned by being one.
-    pub(in super::super) fn factor(
-        &mut self,
-        value: ValueId,
-        bits: usize,
-        widths: &[usize],
-    ) -> Factor {
+    pub(in super::super) fn factor(&mut self, value: ValueId, bits: usize) -> Factor {
+        let layout = LimbLayout::new(bits, self.limb_bits());
         if let Some(constant) = self.ssa.get_const(value)
             && let Constant::Int(pattern) = constant.as_ref()
         {
-            let limbs = widths
-                .iter()
-                .enumerate()
-                .map(|(index, width)| {
-                    Limb::Constant(pattern.bit_range(index * self.limb_bits(), *width))
+            let limbs = (0..layout.num_limbs())
+                .map(|index| {
+                    Limb::Constant(pattern.bit_range(layout.place(index), layout.width(index)))
                 })
                 .collect();
-            return Factor::new(limbs, widths, false, None);
+            return Factor::new(layout, limbs, false, None);
         }
 
         let limbs = self
-            .chain_operand(value, bits, widths.len())
+            .chain_operand(value, bits, layout.num_limbs())
             .into_iter()
-            .zip(widths)
-            .map(|(limb, width)| match self.known(limb) {
-                Some(pattern) => Limb::Constant(pattern.cast(*width)),
+            .enumerate()
+            .map(|(index, limb)| match self.known(limb) {
+                Some(pattern) => Limb::Constant(pattern.cast(layout.width(index))),
                 None => Limb::Value(limb),
             })
             .collect();
-        Factor::new(limbs, widths, self.is_witness(value), None)
+        Factor::new(layout, limbs, self.is_witness(value), None)
     }
 
     /// Witnesses and checks `identity`, returning the answer's limbs. These are empty unless the
@@ -167,17 +162,18 @@ impl Rewriter<'_> {
             if let Some(carry) = carry_in {
                 running_sum = self.bin(BinaryArithOpKind::SAdd, running_sum, carry);
             }
-            if let Some(Target::Witnessed(widths)) = target
-                && column < widths.len()
+            if let Some(Target::Witnessed(answer)) = target
+                && column < answer.num_limbs()
             {
-                let low = self.cast(running_sum, CastTarget::Int(widths[column]));
+                let width = answer.width(column);
+                let low = self.cast(running_sum, CastTarget::Int(width));
                 let low = self.cast(low, CastTarget::Field);
                 let written = self.write_witness(low);
                 self.push_guarded(
                     range_check_guard,
                     OpCode::Rangecheck {
                         value: written,
-                        max_bits: widths[column],
+                        max_bits: width,
                     },
                 );
                 witnessed_answer.push(written);

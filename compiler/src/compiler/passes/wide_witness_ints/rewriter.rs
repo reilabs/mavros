@@ -41,7 +41,7 @@ mod spread;
 
 pub(super) use division::EuclideanDivision;
 pub(super) use division::divided;
-pub(super) use identity::IdentityShape;
+pub(super) use identity::{IdentityShape, LimbLayout};
 #[cfg(test)]
 pub(super) use product::division_carries;
 pub(super) use product::multiplied;
