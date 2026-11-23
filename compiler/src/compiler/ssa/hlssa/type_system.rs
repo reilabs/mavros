@@ -363,6 +363,11 @@ impl Type {
         t
     }
 
+    /// Whether `self` and `other` are the same type once each is stripped of its top-level WitnessOf wrapper
+    pub fn eq_ignoring_witness(&self, other: &Type) -> bool {
+        self.peel_witness() == other.peel_witness()
+    }
+
     /// Recursively strip all WitnessOf wrappers at every level.
     pub fn strip_all_witness(&self) -> Self {
         match &self.expr {

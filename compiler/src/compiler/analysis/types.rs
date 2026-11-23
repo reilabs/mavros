@@ -320,7 +320,7 @@ impl Types {
                         | BinaryArithOpKind::SShl
                         | BinaryArithOpKind::UShr
                         | BinaryArithOpKind::SShr
-                ) && lhs_type.strip_witness().expr != rhs_type.strip_witness().expr
+                ) && !lhs_type.eq_ignoring_witness(rhs_type)
                 {
                     // Noir unifies a shift's two operands, and no backend reads a mixed pair.
                     return Err(format!(
@@ -969,17 +969,27 @@ impl Types {
                 rhs,
                 modulus,
             } => {
-                let operand_types = [lhs, rhs, modulus]
-                    .into_iter()
-                    .map(|v| {
-                        function_info.values.get(v).ok_or_else(|| {
-                            format!("MulMod operand {:?} not found in type assignments", v)
-                        })
+                let get_operand_type = |v: &ValueId| {
+                    function_info.values.get(v).ok_or_else(|| {
+                        format!("MulMod operand {:?} not found in type assignments", v)
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
-                // `lhs`'s type, witnessed if any operand is.
-                let base = operand_types[0].strip_witness();
-                let result_type = if operand_types.iter().any(|t| t.is_witness_of()) {
+                };
+                let lhs_type = get_operand_type(lhs)?;
+                let rhs_type = get_operand_type(rhs)?;
+                let modulus_type = get_operand_type(modulus)?;
+                if !lhs_type.eq_ignoring_witness(rhs_type)
+                    || !lhs_type.eq_ignoring_witness(modulus_type)
+                {
+                    return Err(format!(
+                        "mul_mod operands must share one type, not {lhs_type}, {rhs_type} and {modulus_type}"
+                    ));
+                }
+                // The operands' shared type, witnessed if any operand is.
+                let base = lhs_type.strip_witness();
+                let result_type = if [lhs_type, rhs_type, modulus_type]
+                    .iter()
+                    .any(|t| t.is_witness_of())
+                {
                     Type::witness_of(base)
                 } else {
                     base
