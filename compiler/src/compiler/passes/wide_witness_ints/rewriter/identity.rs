@@ -520,7 +520,8 @@ mod tests {
         shared::limbs::{widest_injective_int_bits, witness_limb_bits},
         wide_witness_ints::{
             rewriter::{
-                division::EuclideanDivision, product::UnsignedProduct, sign::SignedProduct,
+                division::EuclideanDivision, modular_product::ModularProduct,
+                product::UnsignedProduct, sign::SignedProduct,
             },
             test_utils::bn254,
         },
@@ -541,6 +542,7 @@ mod tests {
                 check_shape(UnsignedProduct, true, injective, limbs, &what);
                 check_shape(SignedProduct, false, injective, limbs, &what);
                 check_shape(EuclideanDivision, true, injective, limbs, &what);
+                check_shape(ModularProduct, false, injective, limbs, &what);
             }
         }
     }

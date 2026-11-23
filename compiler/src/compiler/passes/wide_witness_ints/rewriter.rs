@@ -34,6 +34,7 @@ mod division;
 mod gadgets;
 mod identity;
 mod lower;
+mod modular_product;
 mod product;
 mod shift;
 mod sign;
