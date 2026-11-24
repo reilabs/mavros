@@ -26,6 +26,7 @@ impl Rewriter<'_> {
         if self.lower_through_chain(op)
             || self.lower_product(op)
             || self.lower_division(op)
+            || self.lower_modular_product(op)
             || self.lower_shift(op)
         {
             return;

@@ -461,7 +461,7 @@ impl DCE {
             | OpCode::MulConst { .. }
             | OpCode::ReadGlobal { .. } => false,
             OpCode::Spread { .. } | OpCode::Unspread { .. } => self.rewrites_dead_partial_ops(),
-            OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
+            OpCode::MulMod { .. } => true,
             OpCode::TupleProj { .. } | OpCode::TupleRefProj { .. } | OpCode::MkTuple { .. } => {
                 ice_non_elided_tuple()
             }

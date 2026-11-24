@@ -64,7 +64,7 @@ fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
 /// widest injective width is `injective` cannot hold it.
 fn product_checks(widths: &[usize], injective: usize) -> Option<Vec<Option<usize>>> {
     let factor = Factor::full(layout_of(widths));
-    let identity = UnsignedProduct.instantiate(
+    let identity = UnsignedProduct::instantiate(
         injective,
         (&factor, &factor, Target::Witnessed(factor.layout)),
     )?;
@@ -413,12 +413,11 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
 /// The range check on each witness the division's schoolbook writes, in order, at full operand ranges.
 pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Option<usize>> {
     let factor = Factor::full(layout_of(widths));
-    let identity = EuclideanDivision
-        .instantiate(
-            widest_injective_int_bits(field),
-            (&factor, &factor, &factor, &factor),
-        )
-        .expect("the field holds the division's identity");
+    let identity = EuclideanDivision::instantiate(
+        widest_injective_int_bits(field),
+        (&factor, &factor, &factor, &factor),
+    )
+    .expect("the field holds the division's identity");
     planned_written_checks(&identity, widths, true)
 }
 

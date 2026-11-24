@@ -676,8 +676,8 @@ impl CSE {
                     | OpCode::InitGlobal { .. }
                     | OpCode::DropGlobal { .. }
                     | OpCode::Spread { .. }
-                    | OpCode::Unspread { .. } => {}
-                    OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
+                    | OpCode::Unspread { .. }
+                    | OpCode::MulMod { .. } => {}
                     OpCode::AssertConstant { .. } => ice_unvalidated_assert_constant(),
                     OpCode::Not { result: r, value } => {
                         let value_expr = get_expr(&exprs, &mut interner, value);

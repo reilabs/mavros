@@ -28,7 +28,7 @@ pub(super) trait IdentityTemplate: Copy + Debug + Sync {
     type Factors<'a>;
 
     /// Its terms over `factors`, and the target they are held to.
-    fn terms<'a>(self, factors: Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>);
+    fn terms<'a>(factors: Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>);
 
     /// Its layout at its largest, or [`None`] where the field cannot hold it.
     fn largest_layout(self, bits: usize, limb_bits: usize, injective: usize)
@@ -36,11 +36,10 @@ pub(super) trait IdentityTemplate: Copy + Debug + Sync {
 
     /// The identity this lays out over `factors`; or [`None`] where the field cannot hold it.
     fn instantiate<'a>(
-        self,
         injective: usize,
         factors: Self::Factors<'a>,
     ) -> Option<PolynomialIdentity<'a>> {
-        let (terms, target) = self.terms(factors);
+        let (terms, target) = Self::terms(factors);
         let layout = chain_layout(&terms, target, injective)?;
         Some(PolynomialIdentity {
             terms,

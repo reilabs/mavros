@@ -386,7 +386,6 @@ impl FnBuilder<'_> {
                 self.copy_value(*result_odd, *value, &ty_odd);
                 self.copy_value(*result_even, *value, &ty_even);
             }
-            OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
 
             // --- Memory. ---
             OpCode::Store { ptr, value } => {
@@ -600,6 +599,7 @@ impl FnBuilder<'_> {
             // --- No pointer flow. ---
             OpCode::Cmp { .. }
             | OpCode::BinaryArithOp { .. }
+            | OpCode::MulMod { .. }
             | OpCode::ToBits { .. }
             | OpCode::ToRadix { .. }
             | OpCode::SliceLen { .. }

@@ -73,6 +73,9 @@ impl Display for StackFrame {
 /// location in the same function.
 pub const DEBUG_INFO_FORMAT_VERSION: u32 = 1;
 
+/// What the message of a trap on a value a range-check lookup has no row for starts with.
+pub const RANGECHECK_TRAP: &str = "rngchk";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugInfo {
@@ -3244,7 +3247,14 @@ mod def {
         let val_row = if flag_u64 != 0 {
             match table_row_index(val, table_info.length) {
                 Some(row) => Some(row),
-                None => return trap(pc, frame, vm),
+                None => {
+                    return trap_with_message(
+                        pc,
+                        frame,
+                        vm,
+                        format!("{RANGECHECK_TRAP}: a value past the {bits}-bit range check"),
+                    );
+                }
             }
         } else {
             None

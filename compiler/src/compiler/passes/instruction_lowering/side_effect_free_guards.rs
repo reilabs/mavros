@@ -78,7 +78,7 @@ impl LowerSideEffectFreeGuards {
             OpCode::Spread { value, .. } | OpCode::Unspread { value, .. } => {
                 !type_info.get_value_type(*value).is_witness_of()
             }
-            OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
+            OpCode::MulMod { .. } => false,
             OpCode::ToBits { value, .. } => !type_info.get_value_type(*value).is_witness_of(),
             // Dynamic radix validation and the source fit check have not been emitted yet.
             // Keep their guard until the radix lowerer establishes the raw byte decomposition.

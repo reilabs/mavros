@@ -302,7 +302,19 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
             let ty = builder.value_type(*result_even);
             builder.copy_taint(*result_even, *value, ty);
         }
-        OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
+        OpCode::MulMod {
+            result,
+            lhs,
+            rhs,
+            modulus,
+        } => {
+            for operand in [lhs, rhs, modulus] {
+                builder.graph.add_ge(
+                    builder.value_position(*result),
+                    builder.value_position(*operand),
+                );
+            }
+        }
         OpCode::Select {
             result,
             cond,
@@ -768,8 +780,8 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         | OpCode::Lookup { .. }
         | OpCode::DLookup { .. }
         | OpCode::Todo { .. }
-        | OpCode::Alloc { .. } => false,
-        OpCode::MulMod { .. } => ice_unreachable!("unexpected MulMod"),
+        | OpCode::Alloc { .. }
+        | OpCode::MulMod { .. } => false,
     }
 }
 

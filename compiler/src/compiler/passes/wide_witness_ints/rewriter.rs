@@ -24,6 +24,7 @@ use crate::compiler::{
 use chain::{CarryOut, chained};
 use division::{Answer, Division};
 use lower::unguarded;
+use modular_product::{ModularProduct, modular_multiplied};
 use product::UnsignedProduct;
 use shift::shifted;
 use sign::SignedProduct;
@@ -600,17 +601,22 @@ pub(super) fn lowers_a_gadget(op: &OpCode, fti: &FunctionTypeInfo, field: FieldC
     chained(op, fti, field).is_some()
         || multiplied(op, fti, field).is_some()
         || divided(op, fti, field).is_some()
+        || modular_multiplied(op, fti, field).is_some()
         || shifted(op, fti, field).is_some()
 }
 
 /// The identity `op` lowers to, if it lowers to one, at the width of its operands.
 ///
-/// A signed division divides the magnitudes, so it is the unsigned division's identity.
+/// A signed division divides the magnitudes, so it is the unsigned division's identity. A modular
+/// product's quotient is twice the operands' width, which its template lays out itself.
 pub(super) fn lowered_identity(
     op: &OpCode,
     types: &FunctionTypeInfo,
     field: FieldConfig,
 ) -> Option<(usize, &'static dyn IdentityShape)> {
+    if let Some(bits) = modular_multiplied(op, types, field) {
+        return Some((bits, &ModularProduct));
+    }
     let Operands { bits, .. } =
         multiplied(op, types, field).or_else(|| divided(op, types, field))?;
     let OpCode::BinaryArithOp { kind, .. } = unguarded(op) else {

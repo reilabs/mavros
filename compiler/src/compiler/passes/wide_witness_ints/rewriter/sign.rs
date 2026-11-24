@@ -24,7 +24,7 @@ impl IdentityTemplate for SignedProduct {
     /// `a`, `b` and `c`.
     type Factors<'a> = (&'a Factor, &'a Factor, &'a Factor);
 
-    fn terms<'a>(self, (a, b, c): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+    fn terms<'a>((a, b, c): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let terms = vec![
             Term {
                 polarity: Polarity::Positive,
@@ -49,7 +49,7 @@ impl IdentityTemplate for SignedProduct {
         injective: usize,
     ) -> Option<ChainLayout> {
         let full = Factor::full(LimbLayout::new(bits, limb_bits));
-        let identity = self.instantiate(injective, (&full, &full, &full))?;
+        let identity = Self::instantiate(injective, (&full, &full, &full))?;
         Some(identity.into_layout())
     }
 }

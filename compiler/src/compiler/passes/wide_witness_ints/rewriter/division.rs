@@ -30,7 +30,7 @@ impl IdentityTemplate for EuclideanDivision {
     /// `q`, `d`, `r` and `n`.
     type Factors<'a> = (&'a Factor, &'a Factor, &'a Factor, &'a Factor);
 
-    fn terms<'a>(self, (q, d, r, n): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+    fn terms<'a>((q, d, r, n): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let terms = vec![
             Term {
                 polarity: Polarity::Positive,
@@ -55,7 +55,7 @@ impl IdentityTemplate for EuclideanDivision {
         injective: usize,
     ) -> Option<ChainLayout> {
         let full = Factor::full(LimbLayout::new(bits, limb_bits));
-        let identity = self.instantiate(injective, (&full, &full, &full, &full))?;
+        let identity = Self::instantiate(injective, (&full, &full, &full, &full))?;
         Some(identity.into_layout())
     }
 }
@@ -217,23 +217,35 @@ impl Rewriter<'_> {
 
         let identity = self.identity(EuclideanDivision, (&q, d, &r, n));
         self.lower_identity(&identity, guard);
+        self.constrain_below(&r, d, widths, guard);
+        (q, r)
+    }
 
-        // `r < d` reads only the limbs either side can reach, as above them both are zero.
+    /// `lhs < rhs` where `guard` holds: the carry chain with its top borrow forced out, which a
+    /// zero `rhs` cannot pass. Both are cut at `widths`.
+    ///
+    /// It reads only the limbs either side can reach, as above them both are zero.
+    pub(super) fn constrain_below(
+        &mut self,
+        lhs: &Factor,
+        rhs: &Factor,
+        widths: &[usize],
+        guard: Option<ValueId>,
+    ) {
         let reached = (0..widths.len())
             .rev()
-            .find(|index| !r.bounds[*index].is_zero() || !d.bounds[*index].is_zero())
+            .find(|index| !lhs.bounds[*index].is_zero() || !rhs.bounds[*index].is_zero())
             .map_or(1, |top| top + 1);
-        let remainder_limbs = self.chain_limbs_of(&r, reached);
-        let divisor_limbs = self.chain_limbs_of(d, reached);
+        let lhs_limbs = self.chain_limbs_of(lhs, reached);
+        let rhs_limbs = self.chain_limbs_of(rhs, reached);
         self.carry_chain_over(
             true,
-            &remainder_limbs,
-            &divisor_limbs,
+            &lhs_limbs,
+            &rhs_limbs,
             widths[..reached].to_vec(),
             CarryOut::One,
             guard,
         );
-        (q, r)
     }
 
     /// `d / d` and `d % d`, which are one and zero wherever `d` is not zero, so only that is

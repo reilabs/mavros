@@ -53,7 +53,7 @@ impl IdentityTemplate for UnsignedProduct {
     /// `a`, `b`, and `c`.
     type Factors<'a> = (&'a Factor, &'a Factor, Target<'a>);
 
-    fn terms<'a>(self, (a, b, c): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
+    fn terms<'a>((a, b, c): Self::Factors<'a>) -> (Vec<Term<'a>>, Option<Target<'a>>) {
         let product = Term {
             polarity: Polarity::Positive,
             lhs: a,
@@ -71,7 +71,7 @@ impl IdentityTemplate for UnsignedProduct {
     ) -> Option<ChainLayout> {
         let layout = LimbLayout::new(bits, limb_bits);
         let full = Factor::full(layout);
-        let identity = self.instantiate(injective, (&full, &full, Target::Witnessed(layout)))?;
+        let identity = Self::instantiate(injective, (&full, &full, Target::Witnessed(layout)))?;
         Some(identity.into_layout())
     }
 }

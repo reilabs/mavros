@@ -63,13 +63,9 @@ impl Rewriter<'_> {
         shape: S,
         factors: S::Factors<'f>,
     ) -> PolynomialIdentity<'f> {
-        shape
-            .instantiate(self.injective_bits(), factors)
-            .unwrap_or_else(|| {
-                ice_unreachable!(
-                    "the limb config admits every identity it lowers, but not {shape:?}"
-                )
-            })
+        S::instantiate(self.injective_bits(), factors).unwrap_or_else(|| {
+            ice_unreachable!("the limb config admits every identity it lowers, but not {shape:?}")
+        })
     }
 
     /// An operand of the schoolbook as its limbs at `bits`, with their bounds.
