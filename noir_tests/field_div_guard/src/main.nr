@@ -5,7 +5,10 @@
 // This pins the direction that costs something: ordinary field divisions must keep working, and
 // must keep working across witness divisors, constant divisors, and inside witness-dependent
 // control flow (where the guarded lowering, not this check, is responsible).
-fn main(x: Field, y: Field, c: bool) {
+fn main(x: u8, y: u8, c: bool) {
+    let x = x as Field;
+    let y = y as Field;
+
     // Witness divisor.
     assert_eq(x / y, 4);
 

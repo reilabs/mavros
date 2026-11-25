@@ -7,7 +7,10 @@ unconstrained fn outer(xs: [Field]) -> Field {
     a.len() as Field + 10 * a[0] + 100 * a[1] + 1000 * a[2] + 10000 * a[3]
 }
 
-fn main(w: Field, expected: pub Field) {
+fn main(w: u8, expected: pub u16) {
+    let w = w as Field;
+    let expected = expected as Field;
+
     let mut s: [Field] = [1];
     if w == 1 {
         s = s.push_back(2);

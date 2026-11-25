@@ -55,9 +55,9 @@ fn empty_calls_after_break_and_continue_are_removed() {
 fn empty_function_calls_only_fail_when_their_branch_is_taken() {
     for mode in ["", "unconstrained "] {
         let source = format!(
-            "{mode}fn main(take: bool, x: u32) -> pub Field {{
+            "{mode}fn main(take: bool, x: u32) -> pub u32 {{
                 if take {{
-                    let callbacks: [fn(()) -> Field; 0] = [];
+                    let callbacks: [fn(()) -> u32; 0] = [];
                     callbacks[x](())
                 }} else {{ 7 }}
             }}"

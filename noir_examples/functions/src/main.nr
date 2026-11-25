@@ -7,7 +7,10 @@ fn fn2(x: Field, y: Field) -> Field {
   a + b
 }
 
-fn main(x: pub Field, y: pub Field) {
+fn main(x: pub u8, y: pub u8) {
+  let x = x as Field;
+  let y = y as Field;
+
   assert_eq(fn2(x,y), 2*x);
 }
 

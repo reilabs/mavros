@@ -2,7 +2,12 @@
 // tuple produced by the previous one, so cursors compound (front push renumbers indices, the
 // second back push writes at start + log_len after two bumps). The final element is read back
 // through a witness index.
-fn main(w: Field, e0: pub Field, e_last: pub Field, elen: pub Field) {
+fn main(w: u8, e0: pub u8, e_last: pub u8, elen: pub u8) {
+    let w = w as Field;
+    let e0 = e0 as Field;
+    let e_last = e_last as Field;
+    let elen = elen as Field;
+
     let mut s: [Field] = [10];
     if w == 1 {
         s = s.push_back(20);

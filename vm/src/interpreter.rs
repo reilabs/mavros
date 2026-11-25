@@ -1252,7 +1252,6 @@ fn param_field_count<F>(value: &InputValueOrdered<F>) -> usize {
             .iter()
             .map(|(_field_name, field_value)| param_field_count(field_value))
             .sum(),
-        _ => panic!("Unsupported input value type."),
     }
 }
 
@@ -1271,9 +1270,6 @@ fn flatten_params<F: Copy>(value: &InputValueOrdered<F>) -> Vec<F> {
                 encoded_value.extend(flatten_params(field_value));
             }
         }
-        _ => panic!(
-            "Unsupported input value type. We only support Field, Vecs, and Structs for now."
-        ),
     }
     encoded_value
 }

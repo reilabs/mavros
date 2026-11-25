@@ -271,6 +271,15 @@ fn build_instr(builder: &mut GraphBuilder, instr: &OpCode, branch_conditions: &[
                 builder.value_position(*rhs),
             );
         }
+        OpCode::IntFromLimbs { result, limbs, .. } => {
+            // scalar result ≥ each limb's top
+            for limb in limbs {
+                builder.graph.add_ge(
+                    builder.value_position(*result),
+                    builder.value_position(*limb),
+                );
+            }
+        }
         OpCode::Cast {
             result,
             value,
@@ -726,6 +735,7 @@ fn writes_under_witness_cf(op: &OpCode) -> bool {
         OpCode::Guard { inner, .. } => writes_under_witness_cf(inner),
         OpCode::Cmp { .. }
         | OpCode::BinaryArithOp { .. }
+        | OpCode::IntFromLimbs { .. }
         | OpCode::Not { .. }
         | OpCode::Cast { .. }
         | OpCode::SExt { .. }

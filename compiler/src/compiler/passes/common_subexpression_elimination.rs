@@ -20,7 +20,10 @@ use crate::{
                 OpCode, Radix,
             },
         },
-        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+        util::{
+            ice_int_from_limbs_after_wide_witness_ints, ice_non_elided_tuple,
+            ice_unvalidated_assert_constant,
+        },
     },
 };
 
@@ -693,6 +696,7 @@ impl CSE {
                     OpCode::TupleProj { .. }
                     | OpCode::TupleRefProj { .. }
                     | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                    OpCode::IntFromLimbs { .. } => ice_int_from_limbs_after_wide_witness_ints(),
                     OpCode::Guard { .. } => {
                         // Guards are opaque to CSE
                     }

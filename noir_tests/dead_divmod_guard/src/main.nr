@@ -7,7 +7,10 @@
 // empty body, so the quotient has no consumer -- and every one of them is well defined, so the
 // program must run clean. The failing direction is covered upstream by
 // execution_failure/div_by_zero_{constants,numerator_witness,witness,modulo}.
-fn main(x: u32, y: u32, s: i32, t: i32, f: Field, g: Field) {
+fn main(x: u32, y: u32, s: i32, t: i32, f: u8, g: u8) {
+    let f = f as Field;
+    let g = g as Field;
+
     // Unsigned, witness divisor.
     let a: u32 = x / y;
     std::println(a);

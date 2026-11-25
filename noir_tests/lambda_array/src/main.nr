@@ -1,4 +1,7 @@
-fn main(x: Field, expected: pub Field) {
+fn main(x: u8, expected: pub u8) {
+    let x = x as Field;
+    let expected = expected as Field;
+
     let fns: [fn(Field) -> Field; 4] = [
         |a: Field| -> Field { a + 1 },
         |a: Field| -> Field { a * 2 },

@@ -2,7 +2,9 @@
 
 global PRIMES: [Field; 5] = [2, 3, 5, 7, 11];
 
-fn main(x: Field, idx: u32) {
+fn main(x: u8, idx: u32) {
+    let x = x as Field;
+
     // 1. Witness-indexed lookup on a local constant array
     let local_arr: [Field; 5] = [10, 20, 30, 40, 50];
     let local_val = local_arr[idx];

@@ -10,7 +10,11 @@
 // folds `eq` through the anticipated channel: the select condition is redirected to a hoisted
 // `cast true to WitnessOf`, the kept comparison loses its last use, and the equality gadget
 // dies instead of lowering to constraint rows.
-fn main(a: Field, b: pub Field, c: pub Field) {
+fn main(a: u8, b: pub u8, c: pub u8) {
+    let a = a as Field;
+    let b = b as Field;
+    let c = c as Field;
+
     let x = a + b;
     let y = a + b;
     let eq = x == c;

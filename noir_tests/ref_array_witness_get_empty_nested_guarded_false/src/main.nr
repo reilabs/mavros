@@ -1,4 +1,7 @@
-fn main(w: Field, i: u32, expected: pub Field) {
+fn main(w: u8, i: u32, expected: pub u8) {
+    let w = w as Field;
+    let expected = expected as Field;
+
     let d: [([&mut Field; 2], Field); 0] = [];
     let mut v = 7;
     if w == 1 {

@@ -4,6 +4,8 @@ fn update_large_value(value: Field) -> Field {
     values[255]
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     assert(update_large_value(7) + x == x + 7);
 }

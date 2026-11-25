@@ -1,7 +1,10 @@
 // pop_front on a *pure-length* slice: no witness control flow touches the length, so purify
 // leaves the SlicePop untouched and `LowerSlicePop` rewrites the front pop late with a pure
 // bound. The popped element is a witness value.
-fn main(x: Field, expected: pub Field) {
+fn main(x: u8, expected: pub u8) {
+    let x = x as Field;
+    let expected = expected as Field;
+
     let mut s: [Field] = [10, 20];
     s = s.push_front(x);
     let (e, s2) = s.pop_front();

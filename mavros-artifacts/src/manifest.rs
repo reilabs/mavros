@@ -49,8 +49,6 @@ use crate::{
 pub enum ParamVisibility {
     Public,
     Private,
-    /// Noir's `call_data` / `return_data`, handled exactly like `Private`.
-    DataBus,
 }
 
 impl ParamVisibility {
@@ -65,7 +63,8 @@ impl ParamVisibility {
 pub struct ManifestParam {
     pub name: String,
     pub visibility: ParamVisibility,
-    /// Flattened field count.
+    /// The parameter's entry-blob elements: one per scalar or string byte, and one per limb of an
+    /// integer too wide for one element.
     pub width: usize,
     /// `None` for an elided private or zero-width parameter.
     pub column_start: Option<usize>,
@@ -76,6 +75,8 @@ pub struct ManifestParam {
 pub struct ReturnSlot {
     /// `None` for a zero-width return.
     pub column_start: Option<usize>,
+    /// The return's columns: one per scalar or string byte, and one per limb of an integer too
+    /// wide for one element.
     pub len: usize,
     pub visibility: ParamVisibility,
 }
@@ -165,7 +166,7 @@ impl WitnessManifest {
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 4;
 /// The first format version with a compiler field.
 const COMPILER_SINCE_VERSION: u32 = 3;
 

@@ -5,7 +5,11 @@ struct P {
     a: Field,
     b: Field,
 }
-fn main(w: Field, e_a: pub Field, e_len: pub Field) {
+fn main(w: u8, e_a: pub u8, e_len: pub u8) {
+    let w = w as Field;
+    let e_a = e_a as Field;
+    let e_len = e_len as Field;
+
     let mut s: [P] = [P { a: 1, b: 2 }];
     if w == 1 {
         s = s.push_back(P { a: 3, b: 4 });

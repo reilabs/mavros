@@ -14,7 +14,10 @@ use crate::{
                 builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
             },
         },
-        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+        util::{
+            ice_int_from_limbs_after_wide_witness_ints, ice_non_elided_tuple,
+            ice_unvalidated_assert_constant,
+        },
     },
 };
 
@@ -500,6 +503,9 @@ impl WitnessLowering {
                         OpCode::MkTuple { .. }
                         | OpCode::TupleProj { .. }
                         | OpCode::TupleRefProj { .. } => ice_non_elided_tuple(),
+                        OpCode::IntFromLimbs { .. } => {
+                            ice_int_from_limbs_after_wide_witness_ints()
+                        }
                         };
                     });
                 }

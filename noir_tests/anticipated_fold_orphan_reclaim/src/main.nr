@@ -12,7 +12,12 @@
 // next run, whose solver prunes cleanly). The `JmpIf` becomes a `Jmp` and the else arm is
 // orphaned in the same run. The casts and the array access in that arm are exactly the shapes
 // the PointsTo builder asks the type table about.
-fn main(a: Field, b: pub Field) {
+fn main(a: [u8; 8], b: pub u8) {
+    // Read from bytes, so the element is witnessed with no range the compiler tracks, and its
+    // narrowing casts truncate.
+    let a = Field::from_le_bytes_checked(a);
+    let b = b as Field;
+
     let mut c = a;
     c = c + b;
     let d = a * 2;

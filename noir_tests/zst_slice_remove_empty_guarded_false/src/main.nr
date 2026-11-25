@@ -1,6 +1,8 @@
 struct P {}
 
-fn main(w: Field, expected: u32) {
+fn main(w: u8, expected: u32) {
+    let w = w as Field;
+
     let s: [P] = @[];
     let mut l = 5;
     if w == 1 {

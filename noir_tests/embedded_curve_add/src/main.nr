@@ -1,19 +1,32 @@
 use std::embedded_curve_ops::{embedded_curve_add, EmbeddedCurvePoint};
 
 fn main(
-    point_x: Field,
-    point_y: Field,
-    expected_double_x: pub Field,
-    expected_double_y: pub Field,
-    expected_triple_x: pub Field,
-    expected_triple_y: pub Field,
-    random_lhs_x: [Field; 4],
-    random_lhs_y: [Field; 4],
-    random_rhs_x: [Field; 4],
-    random_rhs_y: [Field; 4],
-    random_sum_x: pub [Field; 4],
-    random_sum_y: pub [Field; 4],
+    point_x: u8,
+    point_y: [u8; 32],
+    expected_double_x: pub [u8; 32],
+    expected_double_y: pub [u8; 32],
+    expected_triple_x: pub [u8; 32],
+    expected_triple_y: pub [u8; 32],
+    random_lhs_x: [[u8; 32]; 4],
+    random_lhs_y: [[u8; 32]; 4],
+    random_rhs_x: [[u8; 32]; 4],
+    random_rhs_y: [[u8; 32]; 4],
+    random_sum_x: pub [[u8; 32]; 4],
+    random_sum_y: pub [[u8; 32]; 4],
 ) {
+    let point_x = point_x as Field;
+    let point_y = Field::from_le_bytes_checked(point_y);
+    let expected_double_x = Field::from_le_bytes_checked(expected_double_x);
+    let expected_double_y = Field::from_le_bytes_checked(expected_double_y);
+    let expected_triple_x = Field::from_le_bytes_checked(expected_triple_x);
+    let expected_triple_y = Field::from_le_bytes_checked(expected_triple_y);
+    let random_lhs_x = random_lhs_x.map(|b| Field::from_le_bytes_checked(b));
+    let random_lhs_y = random_lhs_y.map(|b| Field::from_le_bytes_checked(b));
+    let random_rhs_x = random_rhs_x.map(|b| Field::from_le_bytes_checked(b));
+    let random_rhs_y = random_rhs_y.map(|b| Field::from_le_bytes_checked(b));
+    let random_sum_x = random_sum_x.map(|b| Field::from_le_bytes_checked(b));
+    let random_sum_y = random_sum_y.map(|b| Field::from_le_bytes_checked(b));
+
     let point = EmbeddedCurvePoint { x: point_x, y: point_y };
     let infinity = EmbeddedCurvePoint::point_at_infinity();
 

@@ -5,8 +5,8 @@ use crate::compiler::ssa::{
 use mavros_int_semantics::IntBits;
 
 use super::super::{
+    multi_cell_int_bits,
     types::{limb_widths, paired},
-    utils::multi_cell_int_bits,
 };
 use super::{Rewriter, sign::Sign};
 
@@ -112,6 +112,7 @@ impl Rewriter<'_> {
                     value: sum,
                     target: CastTarget::Nop,
                 });
+                self.read_limbs.insert(result, stripped);
             }
 
             CastTarget::Nop => {

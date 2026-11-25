@@ -14,6 +14,33 @@ use mavros_int_semantics::IntBits;
 use num_bigint::BigUint;
 
 impl Rewriter<'_> {
+    /// An integer spelled by its limbs. Witnessed, it **is** those limbs, as a value that is limbs
+    /// from the start: their emitter bounds each one, so nothing is constrained here. Pure, they are
+    /// recombined, as the pure lane holds a value whole.
+    fn lower_int_from_limbs(&mut self, result: ValueId, limbs: &[ValueId], bits: usize) {
+        if self.wide_width(result).is_none() {
+            let sum = self.recombine_pure(limbs, bits);
+            self.push(OpCode::Cast {
+                result,
+                value: sum,
+                target: CastTarget::Nop,
+            });
+            return;
+        }
+        for (result, limb) in paired(self.limbs(result), limbs.to_vec()) {
+            let target = if self.is_witness(limb) {
+                CastTarget::Nop
+            } else {
+                CastTarget::WitnessOf
+            };
+            self.push(OpCode::Cast {
+                result,
+                value: limb,
+                target,
+            });
+        }
+    }
+
     /// Rewrite one instruction into the limb-wise instructions that replace it.
     pub(super) fn lower(&mut self, op: &OpCode) {
         if self.lower_global(op) {
@@ -24,6 +51,15 @@ impl Rewriter<'_> {
             || self.lower_division(op)
             || self.lower_shift(op)
         {
+            return;
+        }
+        if let OpCode::IntFromLimbs {
+            result,
+            limbs,
+            bits,
+        } = op
+        {
+            self.lower_int_from_limbs(*result, limbs, *bits);
             return;
         }
 
@@ -390,22 +426,42 @@ impl Rewriter<'_> {
             // A whole pure integer written as a witnessed one held as limbs, such as an
             // unconstrained call's answer: each limb is a new column, written from the value and
             // bounded at its width, as nothing else ties the limbs to it.
+            //
+            // A pinned write is an entry point's return, whose limbs take no range check: the
+            // module doc's fourth shape, sound only beside `bind_return_deep`'s equality, so one
+            // anywhere else is refused.
             OpCode::WriteWitness {
                 result: Some(result),
                 value,
                 pinned,
             } if self.limbs(*value).len() == 1 && self.limbs(*result).len() > 1 => {
-                // A pinned write is an entry point's input, which `prepare_entry_point` keeps
-                // within one element.
-                debug_assert!(!pinned, "ICE: a pinned write of a wide value");
+                if *pinned && !self.at_entry_return {
+                    ice!("a pinned write of a wide value outside the entry point's return");
+                }
                 let bits = self
                     .wide_width(*result)
                     .expect("ICE: a write into the representation without a wide result");
                 let widths = limb_widths(bits, self.limb_bits());
+                // A value stripped from a witness in this block, as a witnessed return is, hands
+                // back its limbs, so it is not split again.
+                let read = self
+                    .read_limbs
+                    .get(value)
+                    .filter(|limbs| limbs.len() == widths.len())
+                    .cloned();
                 for (index, (result, width)) in
                     self.limbs(*result).into_iter().zip(widths).enumerate()
                 {
-                    let (limb, _) = self.witness_limb(*value, bits, index, width, width);
+                    let limb = if *pinned {
+                        let hint = match &read {
+                            Some(limbs) => self.cast(limbs[index], CastTarget::Field),
+                            None => self.limb_hint(*value, bits, index, width),
+                        };
+                        let written = self.pinned_write_witness(hint);
+                        self.relabel(written, width)
+                    } else {
+                        self.witness_limb(*value, bits, index, width, width).0
+                    };
                     self.push(OpCode::Cast {
                         result,
                         value: limb,

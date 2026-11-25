@@ -3,6 +3,9 @@
 //! (range-checking integers), initializes globals, calls `main`, binds its return, then deinitializes
 //! globals. This pass also prepares unconstrained call arguments and witnesses their results.
 //!
+//! An integer too wide for one element crosses, and is returned, as its `WideWitnessInts` limbs;
+//! see [`PrepareEntryPoint::flattened_field_count`].
+//!
 //! # Reference Arguments
 //!
 //! Argument lowering relies on Noir's monomorphizer rejecting mutable references with
@@ -28,8 +31,7 @@
 //!
 //! The constant one, public parameters and all return leaves are pinned. Each return column is
 //! constrained equal to its computed value; an optional `return` in `Prover.toml` is compared
-//! against it by the host after witness generation. A `call_data` parameter is written with the
-//! private ones, and a `return_data` return is bound like any other.
+//! against it by the host after witness generation.
 //!
 //! Private parameter writes feed a per-parameter array through a counted loop. Its dynamic index
 //! prevents splitting, so DCE retains or elides the whole parameter; a one-field parameter is
@@ -43,14 +45,10 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 use crate::{
     collections::HashMap,
     compiler::{
-        diagnostic::Diagnostic,
         pass_manager::{AnalysisStore, Pass},
         passes::{
-            shared::{
-                limbs::widest_injective_int_bits,
-                unsupported::{field_offers, unsupported_on_this_field},
-            },
-            wide_witness_ints::multi_cell_int_bits,
+            shared::MIN_LOOPED_RUN,
+            wide_witness_ints::{int_limb_widths, multi_cell_int_bits},
         },
         ssa::{
             BlockId, FunctionId, Located, SourceLocation, ValueId,
@@ -184,59 +182,6 @@ impl PrepareEntryPoint {
         }
     }
 
-    /// A diagnostic for every entry-point parameter whose integers the configured field cannot
-    /// carry. The driver asks before this pass runs, so it reports them as errors; the pass refuses
-    /// them too.
-    pub fn param_refusals(ssa: &HLSSA) -> Vec<Diagnostic> {
-        fn refusals(typ: &Type, field: FieldConfig, found: &mut BTreeSet<String>) {
-            match &typ.expr {
-                TypeExpr::Int(size) => {
-                    found.extend(PrepareEntryPoint::int_param_refusal(*size, field))
-                }
-                TypeExpr::Array(inner, _) | TypeExpr::WitnessOf(inner) => {
-                    refusals(inner, field, found);
-                }
-                TypeExpr::Tuple(element_types) => {
-                    for element_type in element_types {
-                        refusals(element_type, field, found);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let field = ssa.field();
-        let mut diagnostics = Vec::new();
-        for (index, typ) in ssa
-            .get_unique_entrypoint()
-            .get_param_types()
-            .iter()
-            .enumerate()
-        {
-            let mut found = BTreeSet::new();
-            refusals(typ, field, &mut found);
-            let location = SourceLocation::synthetic(entry_param_origin(index));
-            diagnostics.extend(found.into_iter().map(|refusal| {
-                Diagnostic::error(refusal, location.clone()).with_note(field_offers(field))
-            }));
-        }
-        diagnostics
-    }
-
-    /// Why an `int{size}` parameter is refused on `field`, or `None` where it crosses.
-    ///
-    /// This ABI carries each integer in one input element, so its width must fit injectively.
-    /// Wider integers can be assembled inside the program from ABI limbs.
-    fn int_param_refusal(size: usize, field: FieldConfig) -> Option<String> {
-        let widest = widest_injective_int_bits(field);
-        (size > widest).then(|| {
-            format!(
-                "an int{size} crosses the entry point as one field element, which carries \
-                 integers up to int{widest}"
-            )
-        })
-    }
-
     /// The Noir ABI distinguishes unit (no public return) from an empty struct even
     /// though both have an empty-tuple HLSSA result. Hand-built SSA defaults to its signature.
     pub fn with_abi_return(mut self, has_return: bool) -> Self {
@@ -293,8 +238,14 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
 
-        let layout =
-            Self::entry_blob_layout(&param_types, &return_types, has_return, &param_is_public);
+        let field = ssa.field();
+        let layout = Self::entry_blob_layout(
+            &param_types,
+            &return_types,
+            has_return,
+            &param_is_public,
+            field,
+        );
         let total_fields = layout.total;
 
         let wrapper_id = ssa.add_function("wrapper_main".to_string());
@@ -370,7 +321,7 @@ impl PrepareEntryPoint {
             for ((typ, slot), witness_array) in
                 param_types.iter().zip(&layout.params).zip(&witness_arrays)
             {
-                debug_assert_eq!(slot.width, Self::flattened_field_count(typ));
+                debug_assert_eq!(slot.width, Self::flattened_field_count(typ, field));
                 let witness_array =
                     witness_array.expect("every parameter has its witness array emitted");
                 let value = if slot.width == 0 {
@@ -419,7 +370,17 @@ impl PrepareEntryPoint {
     }
 
     fn bind_return_deep(b: &mut HLBlockEmitter<'_>, result: ValueId, typ: &Type) {
-        match &typ.expr {
+        // Seen through `WitnessOf`, as `flattened_field_count` sees the return's columns.
+        match &typ.strip_witness().expr {
+            // Each iteration takes only its element's columns, so the run stays contiguous and in
+            // index order.
+            TypeExpr::Array(inner, size) if *size >= MIN_LOOPED_RUN => {
+                b.build_counted_loop(*size, vec![], |b, index, _| {
+                    let result_elem = b.array_get(result, index);
+                    Self::bind_return_deep(b, result_elem, inner);
+                    vec![]
+                });
+            }
             TypeExpr::Array(inner, size) => {
                 for i in 0..*size {
                     let index = b.int_const(IntBits::from_u128(32, i as u128));
@@ -432,6 +393,13 @@ impl PrepareEntryPoint {
                     let result_elem = b.tuple_proj(result, i);
                     Self::bind_return_deep(b, result_elem, elem_type);
                 }
+            }
+            // `WideWitnessInts` writes each limb to a column and lowers the equality limb by limb.
+            // One column holding the entire integer would publish its residue, `v` and `v + p`
+            // alike. The written limbs take no range check, so this equality is what bounds them.
+            TypeExpr::Int(size) if *size > multi_cell_int_bits(b.field()) => {
+                let written = b.pinned_write_witness(result);
+                b.assert_eq(result, written);
             }
             _ => {
                 let result_field = b.ensure_field(result, typ);
@@ -618,6 +586,7 @@ impl PrepareEntryPoint {
         return_types: &[Type],
         has_return: bool,
         param_is_public: &[bool],
+        field: FieldConfig,
     ) -> EntryBlobLayout {
         let mut offset = 0usize;
         let mut slot = |width: usize, public: bool| {
@@ -632,10 +601,14 @@ impl PrepareEntryPoint {
         let params = param_types
             .iter()
             .zip(param_is_public)
-            .map(|(typ, public)| slot(Self::flattened_field_count(typ), *public))
+            .map(|(typ, public)| slot(Self::flattened_field_count(typ, field), *public))
             .collect();
-        let return_width =
-            has_return.then(|| return_types.iter().map(Self::flattened_field_count).sum());
+        let return_width = has_return.then(|| {
+            return_types
+                .iter()
+                .map(|typ| Self::flattened_field_count(typ, field))
+                .sum()
+        });
         EntryBlobLayout {
             params,
             return_width,
@@ -643,19 +616,26 @@ impl PrepareEntryPoint {
         }
     }
 
-    /// How many elements of the entry point's input blob a value of `typ` occupies.
+    /// How many elements of the entry point's input blob, or columns of its return, a value of
+    /// `typ` occupies on `field`.
     ///
-    /// An integer takes one: a parameter is written to a single witness column and range-checked
-    /// to its width there. A range check bounds a _field element_, so one slot carries any integer
-    /// up to `widest_injective_int_bits`.
-    pub fn flattened_field_count(typ: &Type) -> usize {
+    /// An integer up to [`multi_cell_int_bits`] takes one: a parameter is written to a single
+    /// witness column and bounded to its width there. A wider one takes one per `WideWitnessInts`
+    /// limb, little-endian: a parameter's limbs are each bounded to the limb's width, and a
+    /// return's are bound limb by limb to the returned value.
+    pub fn flattened_field_count(typ: &Type, field: FieldConfig) -> usize {
         match &typ.expr {
-            TypeExpr::Field | TypeExpr::Int(_) => 1,
-            TypeExpr::Array(inner, size) => Self::flattened_field_count(inner) * size,
-            TypeExpr::Tuple(element_types) => {
-                element_types.iter().map(Self::flattened_field_count).sum()
+            TypeExpr::Field => 1,
+            TypeExpr::Int(size) if *size > multi_cell_int_bits(field) => {
+                int_limb_widths(*size, field).len()
             }
-            TypeExpr::WitnessOf(inner) => Self::flattened_field_count(inner),
+            TypeExpr::Int(_) => 1,
+            TypeExpr::Array(inner, size) => Self::flattened_field_count(inner, field) * size,
+            TypeExpr::Tuple(element_types) => element_types
+                .iter()
+                .map(|typ| Self::flattened_field_count(typ, field))
+                .sum(),
+            TypeExpr::WitnessOf(inner) => Self::flattened_field_count(inner, field),
             _ => todo!("Not implemented yet"),
         }
     }
@@ -720,22 +700,9 @@ impl PrepareEntryPoint {
                 e.write_witness(value_id)
             }
             TypeExpr::Int(size) => {
-                // Unchecked: the range check (or boolean constraint) below bounds the witness.
-                let cast_back = CastTarget::IntUnchecked(*size);
                 let as_field = e.cast_to_field(value_id);
                 let witness = e.write_witness(as_field);
-
-                if *size == 1 {
-                    let zero = e.field_const(e.field().constant(0));
-                    let one = e.field_const(e.field().constant(1));
-                    let x_sub_1 = e.usub(witness, one);
-                    let x_times_x_sub_1 = e.umul(witness, x_sub_1);
-                    e.assert_eq(x_times_x_sub_1, zero);
-                } else {
-                    e.rangecheck(witness, *size);
-                }
-
-                e.cast_to(cast_back, witness)
+                Self::emit_bounded_int(e, witness, *size)
             }
             TypeExpr::Array(inner, size) => {
                 let child_fn = child_fns
@@ -822,7 +789,7 @@ impl PrepareEntryPoint {
             let location = SourceLocation::synthetic(b.function.get_name());
             let mut e = b.block(entry_block).with_source_location(location);
 
-            let input_len = Self::flattened_field_count(typ);
+            let input_len = Self::flattened_field_count(typ, e.field());
             let input_array = e.add_parameter(Type::field().array_of(input_len));
             let result = Self::emit_reconstruct_body(&mut e, typ, input_array, reconstruct_fns);
             e.terminate_return(vec![result]);
@@ -842,28 +809,26 @@ impl PrepareEntryPoint {
                 let zero = e.int_const(IntBits::zero(32));
                 e.array_get(input_array, zero)
             }
+            // Limbs from the start: each element is one limb, bounded at its width, and none holds
+            // the whole value.
+            TypeExpr::Int(size) if *size > multi_cell_int_bits(e.field()) => {
+                let widths = int_limb_widths(*size, e.field());
+                let mut limbs = Vec::with_capacity(widths.len());
+                for (index, width) in widths.into_iter().enumerate() {
+                    let index = e.int_const(IntBits::from_u128(32, index as u128));
+                    let element = e.array_get(input_array, index);
+                    limbs.push(Self::emit_bounded_int(e, element, width));
+                }
+                e.int_from_limbs(limbs, *size)
+            }
             TypeExpr::Int(size) => {
-                if let Some(refusal) = Self::int_param_refusal(*size, e.field()) {
-                    unsupported_on_this_field(format_args!("{refusal}"), e.field());
-                }
                 let zero = e.int_const(IntBits::zero(32));
-                let field_param = e.array_get(input_array, zero);
-                if *size == 1 {
-                    let zero = e.field_const(e.field().constant(0));
-                    let one = e.field_const(e.field().constant(1));
-                    let x_sub_1 = e.usub(field_param, one);
-                    let x_times_x_sub_1 = e.umul(field_param, x_sub_1);
-                    e.assert_eq(x_times_x_sub_1, zero);
-                } else {
-                    e.rangecheck(field_param, *size);
-                }
-
-                // Unchecked: the range check (or boolean constraint) above bounds the parameter.
-                e.cast_to(CastTarget::IntUnchecked(*size), field_param)
+                let element = e.array_get(input_array, zero);
+                Self::emit_bounded_int(e, element, *size)
             }
             TypeExpr::Array(inner, size) => {
                 let child_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
-                let child_width = Self::flattened_field_count(inner);
+                let child_width = Self::flattened_field_count(inner, e.field());
                 let initial_array = Self::emit_default_witness_array(e, inner, *size);
                 let reconstructed_array = e.build_counted_loop(
                     *size,
@@ -888,7 +853,7 @@ impl PrepareEntryPoint {
                 let mut field_offset = 0;
                 for elem_type in element_types {
                     let child_fn = Self::find_reconstruct_fn(elem_type, reconstruct_fns);
-                    let child_width = Self::flattened_field_count(elem_type);
+                    let child_width = Self::flattened_field_count(elem_type, e.field());
                     let child_input = Self::emit_reconstruct_child_input_array(
                         e,
                         input_array,
@@ -908,6 +873,23 @@ impl PrepareEntryPoint {
             }
             _ => todo!("Not implemented yet"),
         }
+    }
+
+    /// `element` read as an `int(size)`, bounded here: by a boolean constraint at one bit, by a
+    /// range check otherwise.
+    fn emit_bounded_int(e: &mut HLBlockEmitter<'_>, element: ValueId, size: usize) -> ValueId {
+        if size == 1 {
+            let zero = e.field_const(e.field().constant(0));
+            let one = e.field_const(e.field().constant(1));
+            let x_sub_1 = e.usub(element, one);
+            let x_times_x_sub_1 = e.umul(element, x_sub_1);
+            e.assert_eq(x_times_x_sub_1, zero);
+        } else {
+            e.rangecheck(element, size);
+        }
+
+        // Unchecked: the range check (or boolean constraint) above bounds the element.
+        e.cast_to(CastTarget::IntUnchecked(size), element)
     }
 
     /// Build a placeholder value that is witness-typed at the leaves. These

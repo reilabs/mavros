@@ -41,7 +41,9 @@ fn make(v: u8) -> u8 {
     v + 1
 }
 
-fn main(x: u8, y: u8, z: u8, w: u8, f: Field, n: i8, arr: [u8; 2], s: Wrap) {
+fn main(x: u8, y: u8, z: u8, w: u8, f: u8, n: i8, arr: [u8; 2], s: Wrap) {
+    let f = f as Field;
+
     assert_eq(classify_u8(x), 10);
     assert_eq(classify_u8(y), 20);
     assert_eq(classify_u8(z), 30);

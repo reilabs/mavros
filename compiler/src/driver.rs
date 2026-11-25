@@ -57,6 +57,7 @@ use crate::{
             mem2reg::Mem2Reg,
             merge_identical_functions::MergeIdenticalFunctions,
             normalize_asserts::NormalizeAsserts,
+            outline_field_bit_ranges::OutlineFieldBitRanges,
             partial_redundancy_elimination::PRE,
             prepare_entry_point::{
                 ENTRY_RETURN_ORIGIN, EntryBlobLayout, PrepareEntryPoint, entry_param_origin,
@@ -66,6 +67,7 @@ use crate::{
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
             return_reachability::ReturnReachabilityValidation,
+            share_field_decompositions::ShareFieldDecompositions,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
             sparse_conditional_simplification::SCS,
@@ -125,6 +127,9 @@ pub struct Driver {
     /// this single SSA.
     program_ssa: Option<HLSSA>,
     abi: Option<noirc_abi::Abi>,
+    /// Which entry-point parameters a driver seeded from HLSSA pins as public; see
+    /// [`Self::with_param_visibility`].
+    seeded_param_is_public: Option<Vec<bool>>,
     entry_blob_layout: Option<EntryBlobLayout>,
     entry_columns: Option<EntryColumns>,
     draw_cfg: bool,
@@ -178,6 +183,10 @@ pub enum Error {
     /// not a prover binary for the R1CS.
     Artifact(ArtifactError),
 
+    /// The entry point's ABI has no byte encoding (`noirc_abi::bytes::check_abi`). The frontend
+    /// refuses every such ABI first, the codec's 2^32-byte limit included, so this is a backstop.
+    AbiUnencodable(noirc_abi::bytes::Error),
+
     Toolchain(ToolchainError),
 }
 
@@ -213,6 +222,9 @@ impl std::fmt::Display for Error {
             }
             Error::WitnessManifest(message) => write!(f, "witness manifest: {message}"),
             Error::Artifact(error) => write!(f, "{error}"),
+            Error::AbiUnencodable(error) => {
+                write!(f, "unencodable entry-point ABI: {error}")
+            }
             Error::Toolchain(error) => write!(f, "{error}"),
         }
     }
@@ -243,6 +255,7 @@ impl Driver {
             r1cs_profiling: false,
             program_ssa: None,
             abi: None,
+            seeded_param_is_public: None,
             entry_blob_layout: None,
             entry_columns: None,
             draw_cfg,
@@ -276,6 +289,7 @@ impl Driver {
             r1cs_profiling: false,
             program_ssa: None,
             abi: None,
+            seeded_param_is_public: None,
             entry_blob_layout: None,
             entry_columns: None,
             draw_cfg,
@@ -290,6 +304,35 @@ impl Driver {
             fs::remove_dir_all(dir).unwrap();
         }
         fs::create_dir_all(dir).unwrap();
+    }
+
+    /// Which of a seeded driver's entry-point parameters are public, in order. Only a public one is
+    /// pinned to a column; a private one nothing reads is elided. Without this, every parameter is
+    /// public.
+    ///
+    /// # Panics
+    ///
+    /// On a project-backed driver, whose visibilities come from its ABI, or when `param_is_public`
+    /// does not have one entry per parameter of the seeded entry point.
+    pub fn with_param_visibility(mut self, param_is_public: Vec<bool>) -> Self {
+        assert!(
+            self.project.is_none(),
+            "a project-backed driver takes its parameter visibilities from its ABI"
+        );
+        let params = self
+            .initial_ssa
+            .as_ref()
+            .expect("a seeded driver holds its initial SSA")
+            .get_unique_entrypoint()
+            .get_param_types()
+            .len();
+        assert_eq!(
+            param_is_public.len(),
+            params,
+            "one visibility per parameter of the seeded entry point"
+        );
+        self.seeded_param_is_public = Some(param_is_public);
+        self
     }
 
     /// Override the LogUp bits-of-security target (defaults to
@@ -370,7 +413,7 @@ impl Driver {
             &mut context,
             crate_id,
             &noirc_driver::CompileOptions {
-                field: crate::abi_helpers::noir_field_id(field.id()),
+                field: noir_field_id(field.id()),
                 ..Default::default()
             },
         )
@@ -394,12 +437,14 @@ impl Driver {
             .map_err(|error| self.noir_error(vec![error.into()]))?;
         let program = monomorphizer.into_program();
 
-        self.abi = Some(noirc_driver::gen_abi(
+        let abi = noirc_driver::gen_abi(
             &context,
             &main,
             program.return_visibility(),
             BTreeMap::default(),
-        ));
+        );
+        noirc_abi::bytes::check_abi(&abi).map_err(Error::AbiUnencodable)?;
+        self.abi = Some(abi);
 
         // Convert monomorphized AST directly to SSA, bypassing Noir's SSA generation
         let (ssa, main_is_unconstrained) = HLSSA::from_program_with_file_manager(
@@ -450,16 +495,6 @@ impl Driver {
             ));
         }
 
-        let refusals = PrepareEntryPoint::param_refusals(&ssa);
-        if !refusals.is_empty() {
-            return Err(Error::LoweringRefused(
-                refusals
-                    .into_iter()
-                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
-                    .collect(),
-            ));
-        }
-
         let entry_blob_layout = Rc::new(RefCell::new(None));
         let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained)
             .with_layout_sink(Rc::clone(&entry_blob_layout));
@@ -467,6 +502,9 @@ impl Driver {
             prepare_entry_point = prepare_entry_point
                 .with_abi_return(abi.return_type.is_some())
                 .with_param_visibility(Self::abi_param_is_public(abi));
+        } else if let Some(param_is_public) = &self.seeded_param_is_public {
+            prepare_entry_point =
+                prepare_entry_point.with_param_visibility(param_is_public.clone());
         }
         let mut pass_manager = PassManager::new(
             "make_struct_access_static".to_string(),
@@ -757,6 +795,12 @@ impl Driver {
             "witness_lowering".to_string(),
             self.draw_cfg,
             vec![
+                // Both rewrite windows of witnessed elements, so they run before
+                // `witness_integer_ops`, which lowers them, and after `witness_narrowing_casts`,
+                // past which the prefix's `Int` cast is a relabel. Sharing goes first so that
+                // outlining sees the prefixes.
+                Box::new(ShareFieldDecompositions::new()),
+                Box::new(OutlineFieldBitRanges::new()),
                 Box::new(InstructionLowering::witness_integer_ops()),
                 // After the last pre-spilling lowering, run cleanup twice
                 // back-to-back. The first round exposes folds/dedup opportunities
@@ -925,7 +969,7 @@ impl Driver {
         Ok(report.repetitions as usize)
     }
 
-    /// Only `pub` pins; a `call_data` parameter is private.
+    /// Each ABI parameter's visibility, in order; only a `pub` one is pinned to a column.
     fn abi_param_is_public(abi: &noirc_abi::Abi) -> Vec<bool> {
         abi.parameters
             .iter()
@@ -1079,21 +1123,39 @@ impl Driver {
                 "entry columns not recorded; run generate_r1cs first".to_string(),
             )
         })?;
-        if abi.parameters.len() != blob.params.len() || blob.total != abi.field_count() as usize {
+        // With one slot per parameter, each as wide as its parameter, the blob's total agrees too.
+        if abi.parameters.len() != blob.params.len() {
             return Err(Error::WitnessManifest(format!(
-                "ABI flattens to {} parameters and {} fields but the entry point has {} and {}",
+                "the ABI has {} parameters but the entry point has {}",
                 abi.parameters.len(),
-                abi.field_count(),
-                blob.params.len(),
-                blob.total
+                blob.params.len()
             )));
         }
+        for (param, slot) in abi.parameters.iter().zip(&blob.params) {
+            let elements = crate::abi_helpers::abi_type_elements(&param.typ, self.field());
+            if slot.width != elements {
+                return Err(Error::WitnessManifest(format!(
+                    "parameter `{}` flattens to {elements} elements but the entry point gives \
+                     it {}",
+                    param.name, slot.width
+                )));
+            }
+        }
         let returns = match (blob.return_width, abi.return_type.as_ref()) {
-            (Some(len), Some(ret)) => Some(ReturnSlot {
-                column_start: columns.returns,
-                len,
-                visibility: abi_visibility(ret.visibility),
-            }),
+            (Some(len), Some(ret)) => {
+                let elements = crate::abi_helpers::abi_type_elements(&ret.abi_type, self.field());
+                if len != elements {
+                    return Err(Error::WitnessManifest(format!(
+                        "the return flattens to {elements} elements but the entry point gives it \
+                         {len}"
+                    )));
+                }
+                Some(ReturnSlot {
+                    column_start: columns.returns,
+                    len,
+                    visibility: abi_visibility(ret.visibility),
+                })
+            }
             (None, None) => None,
             _ => {
                 return Err(Error::WitnessManifest(
@@ -1137,7 +1199,15 @@ impl Driver {
 
     /// The parameters only; the return is computed, not an input.
     pub fn entry_blob_field_count(&self) -> usize {
-        self.abi().field_count() as usize
+        crate::abi_helpers::abi_param_elements(self.abi(), self.field())
+    }
+
+    /// The field every stage's SSA takes from the initial one.
+    fn field(&self) -> FieldConfig {
+        self.initial_ssa
+            .as_ref()
+            .expect("a driver holds its initial SSA")
+            .field()
     }
 
     /// Column 0, the surviving parameter columns and the return columns.
@@ -1266,12 +1336,7 @@ impl Driver {
         use crate::compiler::ssa::hlssa_to_llssa;
         use inkwell::context::Context;
 
-        // Every later stage's SSA takes the initial one's field.
-        let field = self
-            .initial_ssa
-            .as_ref()
-            .expect("a driver holds its initial SSA")
-            .field();
+        let field = self.field();
         if field.id() != F::ID {
             return Err(Error::R1csFieldMismatch {
                 requested: F::ID,
@@ -1364,17 +1429,16 @@ impl Driver {
         // Build parameter info
         let mut parameters = Vec::new();
         for param in &abi.parameters {
-            let element_count = param.typ.field_count();
+            let element_count = crate::abi_helpers::abi_type_elements(&param.typ, self.field());
             parameters.push(serde_json::json!({
                 "name": param.name,
                 "elementCount": element_count
             }));
         }
 
-        let return_element_count = abi
-            .return_type
-            .as_ref()
-            .map_or(0, |ret| ret.abi_type.field_count());
+        let return_element_count = abi.return_type.as_ref().map_or(0, |ret| {
+            crate::abi_helpers::abi_type_elements(&ret.abi_type, self.field())
+        });
 
         let manifest = serde_json::to_value(self.witness_manifest(r1cs)?).unwrap();
         let metadata = serde_json::json!({
@@ -1401,11 +1465,20 @@ impl Driver {
     }
 }
 
+fn noir_field_id(field: FieldId) -> acvm::FieldId {
+    match field {
+        FieldId::Bn254 => acvm::FieldId::Bn254,
+        FieldId::Goldilocks => acvm::FieldId::Goldilocks,
+    }
+}
+
 fn abi_visibility(visibility: noirc_abi::AbiVisibility) -> ParamVisibility {
     match visibility {
         noirc_abi::AbiVisibility::Public => ParamVisibility::Public,
         noirc_abi::AbiVisibility::Private => ParamVisibility::Private,
-        noirc_abi::AbiVisibility::DataBus => ParamVisibility::DataBus,
+        noirc_abi::AbiVisibility::DataBus => {
+            ice!("the frontend refuses the data bus on every function, `main` included")
+        }
     }
 }
 
@@ -1422,30 +1495,33 @@ fn compiled_source(file_manager: &fm::FileManager, path: &str) -> Option<Arc<str
 mod tests {
     use noirc_abi::{AbiType, Sign};
 
-    use super::{Diagnostic, Error, SourceLocation};
+    use super::{Diagnostic, Error, FieldConfig, SourceLocation};
     use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
 
-    /// ABI and HLSSA flattening must agree on the VM entry blob's width.
+    /// ABI and HLSSA flattening must agree on the VM entry blob's width, on every field.
     #[test]
     fn abi_and_hlssa_field_counts_agree() {
+        let u16 = AbiType::Integer {
+            sign: Sign::Unsigned,
+            width: 16,
+        };
         let mut cases: Vec<(AbiType, Type)> = vec![
-            (AbiType::Field, Type::field()),
             (AbiType::Boolean, Type::int(1)),
             // A Noir `str<12>` lowers to an array of 12 bytes.
             (AbiType::String { length: 12 }, Type::int(8).array_of(12)),
             (
                 AbiType::Array {
                     length: 4,
-                    typ: Box::new(AbiType::Field),
+                    typ: Box::new(u16.clone()),
                 },
-                Type::field().array_of(4),
+                Type::int(16).array_of(4),
             ),
             // Structs lower to tuples.
             (
                 AbiType::Struct {
                     path: "Pair".to_string(),
                     fields: vec![
-                        ("a".to_string(), AbiType::Field),
+                        ("a".to_string(), u16.clone()),
                         (
                             "b".to_string(),
                             AbiType::Array {
@@ -1455,7 +1531,7 @@ mod tests {
                         ),
                     ],
                 },
-                Type::tuple_of(vec![Type::field(), Type::int(1).array_of(2)]),
+                Type::tuple_of(vec![Type::int(16), Type::int(1).array_of(2)]),
             ),
             // Nesting: array of tuples.
             (
@@ -1463,7 +1539,7 @@ mod tests {
                     length: 3,
                     typ: Box::new(AbiType::Tuple {
                         fields: vec![
-                            AbiType::Field,
+                            u16.clone(),
                             AbiType::Integer {
                                 sign: Sign::Unsigned,
                                 width: 8,
@@ -1471,22 +1547,25 @@ mod tests {
                         ],
                     }),
                 },
-                Type::tuple_of(vec![Type::field(), Type::int(8)]).array_of(3),
+                Type::tuple_of(vec![Type::int(16), Type::int(8)]).array_of(3),
             ),
             // WitnessOf is transparent on the HLSSA side; the ABI never sees it.
-            (AbiType::Field, Type::witness_of(Type::field())),
+            (u16.clone(), Type::witness_of(Type::int(16))),
         ];
-        for width in [1, 8, 32, 64] {
+        // Wider than one element of each field carries, as limbs.
+        for width in [1, 8, 32, 63, 64, 65, 128, 253, 254, 256, 1000] {
             for sign in [Sign::Unsigned, Sign::Signed] {
                 cases.push((AbiType::Integer { sign, width }, Type::int(width as usize)));
             }
         }
-        for (abi, hlssa) in &cases {
-            assert_eq!(
-                abi.field_count() as usize,
-                PrepareEntryPoint::flattened_field_count(hlssa),
-                "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?}",
-            );
+        for field in [FieldConfig::bn254(), FieldConfig::goldilocks()] {
+            for (abi, hlssa) in &cases {
+                assert_eq!(
+                    crate::abi_helpers::abi_type_elements(abi, field),
+                    PrepareEntryPoint::flattened_field_count(hlssa, field),
+                    "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?} on {field:?}",
+                );
+            }
         }
     }
 

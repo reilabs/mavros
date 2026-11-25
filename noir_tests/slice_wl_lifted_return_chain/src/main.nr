@@ -19,7 +19,11 @@ fn mid(s: [Field]) -> [Field] {
     ext(s)
 }
 
-fn main(w: Field, la: pub Field, lc: pub Field) {
+fn main(w: u8, la: pub u8, lc: pub u8) {
+    let w = w as Field;
+    let la = la as Field;
+    let lc = lc as Field;
+
     // Pure-length site: `mid`'s own return shape stays pure here.
     let a: [Field] = [1];
     let a2 = mid(a);

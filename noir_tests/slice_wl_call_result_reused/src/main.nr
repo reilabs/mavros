@@ -12,7 +12,11 @@ fn extend(s: [Field], v: Field) -> [Field] {
     s.push_back(v)
 }
 
-fn main(w: Field, e_last: pub Field, elen: pub Field) {
+fn main(w: u8, e_last: pub u8, elen: pub u8) {
+    let w = w as Field;
+    let e_last = e_last as Field;
+    let elen = elen as Field;
+
     let mut s: [Field] = [1];
     if w == 1 {
         let t = extend(s, 2);

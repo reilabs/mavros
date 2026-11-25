@@ -18,7 +18,9 @@ fn from_be_bits<let N: u32>(bits: [bool; N]) -> Field {
     result
 }
 
-fn main(x: Field) {
+fn main(x: u32) {
+    let x = x as Field;
+
     // Exercise the maximum supported BN254 width through both native bytecode operations.
     let le: [bool; 254] = x.to_le_bits();
     let be: [bool; 254] = x.to_be_bits();

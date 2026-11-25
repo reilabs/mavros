@@ -16,7 +16,11 @@ fn apply_n_times(f: fn(Field) -> Field, x: Field, n: u32) -> Field {
     acc
 }
 
-fn main(x: Field, y: Field, expected_dot: pub Field) {
+fn main(x: u8, y: u8, expected_dot: pub u8) {
+    let x = x as Field;
+    let y = y as Field;
+    let expected_dot = expected_dot as Field;
+
     test_basic_map();
     test_map_with_capture(x);
     test_chained_maps();

@@ -2,7 +2,11 @@
 //
 // A guarded field division has no zero check in its lowering, so it is given one beside it as an
 // assertion under the same guard, which no cleanup deletes however dead the division is.
-fn main(a: Field, b: Field, c: Field, w: bool) {
+fn main(a: u8, b: u8, c: u8, w: bool) {
+    let a = a as Field;
+    let b = b as Field;
+    let c = c as Field;
+
     if w {
         let _ = a / b / c / c / c / c / c / c;
     }

@@ -7,6 +7,7 @@ use num_bigint::BigUint;
 
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
+    passes::shared::MIN_LOOPED_RUN,
     ssa::{
         ValueId,
         hlssa::{
@@ -183,7 +184,8 @@ impl LowerBitRangeOps {
         width: usize,
     ) {
         let flag = b.field_const(b.field().one());
-        let bytes = decompose_canonical_field_bytes(b, value, flag);
+        let low_bytes = (offset + width).div_ceil(8);
+        let bytes = decompose_canonical_field_bytes(b, value, flag, low_bytes);
         let selected = lower_field_bit_range_from_bytes(b, &bytes, offset, width, flag);
 
         b.emit(OpCode::Cast {
@@ -229,14 +231,23 @@ impl CanonicalBytes {
 }
 
 /// Decomposes the witnessed field element `value` into its canonical big-endian bytes, each
-/// range-checked, and returns their witnesses.
+/// range-checked, and returns the witnesses of the lowest `low_bytes` of them, big-endian.
 ///
 /// The bytes are the prover's hint, and the constraints hold only for those of the element's
 /// canonical integer: the bytes of `value + p`, which sum to the same element, are refused.
+///
+/// The bytes the caller does not read are not returned, so a limb's run of at least
+/// `MIN_LOOPED_RUN` of them is checked in a counted loop, which emits the witnesses and
+/// constraints of the unrolled run in the same order.
+///
+/// # Panics
+///
+/// If `low_bytes` is zero or past the element's byte count.
 fn decompose_canonical_field_bytes(
     b: &mut HLBlockEmitter<'_>,
     value: ValueId,
     flag: ValueId,
+    low_bytes: usize,
 ) -> Vec<ValueId> {
     let CanonicalBytes {
         bytes: count,
@@ -278,23 +289,60 @@ fn decompose_canonical_field_bytes(
         }
     };
 
-    let mut bytes = Vec::with_capacity(count);
-    let mut limbs = vec![zero; hi_limbs + lo_limbs];
-    let mut full_sum = zero;
-    for i in 0..count - 1 {
-        let idx = b.int_const(IntBits::from_u128(32, i as u128));
-        let byte = b.array_get(bytes_arr, idx);
+    // The bytes below `first_kept` are checked and summed but not returned.
+    assert!(
+        (1..=count).contains(&low_bytes),
+        "a window reads {low_bytes} bytes of an element of {count}"
+    );
+    let first_kept = count - low_bytes;
+    let sum_byte = |b: &mut HLBlockEmitter<'_>, byte: ValueId, limb: ValueId, full: ValueId| {
         let byte_field = b.cast_to_field(byte);
         let byte_wit = b.write_witness(byte_field);
         b.lookup_rngchk_8(byte_wit, flag);
-        bytes.push(byte_wit);
+        let shifted_limb = b.umul(limb, two_to_8);
+        let limb = b.uadd(shifted_limb, byte_wit);
+        let shifted_full = b.umul(full, two_to_8);
+        let full = b.uadd(shifted_full, byte_wit);
+        (byte_wit, limb, full)
+    };
 
+    let mut bytes = Vec::with_capacity(low_bytes);
+    let mut limbs = vec![zero; hi_limbs + lo_limbs];
+    let mut full_sum = zero;
+    let mut i = 0;
+    while i < count - 1 {
         let limb_idx = limb_of(i);
-        let shifted_limb = b.umul(limbs[limb_idx], two_to_8);
-        limbs[limb_idx] = b.uadd(shifted_limb, byte_wit);
-
-        let shifted_full = b.umul(full_sum, two_to_8);
-        full_sum = b.uadd(shifted_full, byte_wit);
+        let run = (i..count - 1)
+            .take_while(|&j| j < first_kept && limb_of(j) == limb_idx)
+            .count();
+        let idx = b.int_const(IntBits::from_u128(32, i as u128));
+        let byte = b.array_get(bytes_arr, idx);
+        let (byte_wit, limb, full) = sum_byte(b, byte, limbs[limb_idx], full_sum);
+        (limbs[limb_idx], full_sum) = (limb, full);
+        if i >= first_kept {
+            bytes.push(byte_wit);
+        }
+        if run >= MIN_LOOPED_RUN {
+            let first = b.int_const(IntBits::from_u128(32, (i + 1) as u128));
+            let witness_field = Type::witness_of(Type::field());
+            let results = b.build_counted_loop(
+                run - 1,
+                vec![
+                    (limbs[limb_idx], witness_field.clone()),
+                    (full_sum, witness_field),
+                ],
+                |b, k, state| {
+                    let idx = b.uadd(first, k);
+                    let byte = b.array_get(bytes_arr, idx);
+                    let (_, limb, full) = sum_byte(b, byte, state[0], state[1]);
+                    vec![limb, full]
+                },
+            );
+            (limbs[limb_idx], full_sum) = (results[0], results[1]);
+            i += run;
+        } else {
+            i += 1;
+        }
     }
 
     let full_sum_shifted = b.umul(full_sum, two_to_8);
@@ -573,7 +621,7 @@ mod tests {
             SourceLocation,
             hlssa::{Constant, HLSSA, SequenceTargetType, builder::HLSSABuilder},
         },
-        forgery::{self, all_ops, replace_hints},
+        forgery::{self, all_ops, forge_radix_byte_hints, replace_hints},
     };
 
     /// The mask is a pattern, not a host word, so a window may be wider than every host type. A
@@ -873,16 +921,46 @@ mod tests {
         );
     }
 
+    /// Writes each byte hint from the honest bytes of `value`, with the places `elements` names
+    /// overwritten; see [`forge_radix_byte_hints`].
+    fn forge_byte_hints(
+        ssa: &mut HLSSA,
+        field: FieldConfig,
+        value: &BigUint,
+        elements: &[(usize, BigUint)],
+    ) {
+        let count = CanonicalBytes::of(field).bytes;
+        let mut table: Vec<_> = (0..count)
+            .map(|index| (value >> (8 * (count - 1 - index))) & BigUint::from(0xffu8))
+            .collect();
+        for (place, forged) in elements {
+            assert!(*place > 0, "the least significant byte is not hinted");
+            table[count - 1 - place] = forged.clone();
+        }
+        let table: Vec<_> = table
+            .iter()
+            .map(|entry| {
+                field
+                    .from_canonical_limbs(&entry.to_u64_digits())
+                    .expect("a canonical value")
+            })
+            .collect();
+        forge_radix_byte_hints(ssa, &table);
+    }
+
     /// The hints a dishonest prover replaces, each [`None`] or empty where it stays honest.
     #[derive(Debug, Default)]
     struct Forgery {
         /// The decomposition's bytes, as those of this integer.
         bytes: Option<BigUint>,
+
         /// Hinted bytes written as these elements, each named by its place counted up from the
         /// least significant byte, which is not hinted.
         elements: Vec<(usize, BigUint)>,
+
         /// The borrow of the comparison against `p - 1`, as this element.
         borrow: Option<BigUint>,
+
         /// The high part of the one byte a window splits, as this element.
         partial_hi: Option<BigUint>,
     }
@@ -916,52 +994,8 @@ mod tests {
         };
         let input = InputValueOrdered::Field(F::from_element(element(value)));
         forgery::accepts_the_forgery::<F>(ssa, &[input], |ssa| {
-            for (place, forged) in &forgery.elements {
-                assert!(*place > 0, "the least significant byte is not hinted");
-                let forged = ssa.add_const(Constant::Field(element(forged)));
-                let index = ssa.find_const(&Constant::Int(IntBits::from_u128(
-                    32,
-                    (count - 1 - place) as u128,
-                )));
-                let radix: Vec<_> = all_ops(ssa)
-                    .filter_map(|op| match op {
-                        OpCode::ToRadix { result, .. } => Some(result),
-                        _ => None,
-                    })
-                    .collect();
-                let reads: Vec<_> = all_ops(ssa)
-                    .filter_map(|op| match op {
-                        OpCode::ArrayGet {
-                            result,
-                            array,
-                            index: at,
-                        } if radix.contains(&array) && Some(at) == index => Some(result),
-                        _ => None,
-                    })
-                    .collect();
-                let hints: Vec<_> = all_ops(ssa)
-                    .filter_map(|op| match op {
-                        OpCode::Cast {
-                            result,
-                            value,
-                            target: CastTarget::Field,
-                        } if reads.contains(&value) => Some(result),
-                        _ => None,
-                    })
-                    .collect();
-                let replaced = replace_hints(ssa, |op| match *op {
-                    OpCode::WriteWitness {
-                        result,
-                        value,
-                        pinned,
-                    } if hints.contains(&value) => Some(OpCode::WriteWitness {
-                        result,
-                        value: forged,
-                        pinned,
-                    }),
-                    _ => None,
-                });
-                assert_eq!(replaced, 1, "byte {place} is one hint");
+            if !forgery.elements.is_empty() {
+                forge_byte_hints(ssa, field, value, &forgery.elements);
             }
             if let Some(representative) = &forgery.bytes {
                 let mut bytes = representative.to_bytes_be();

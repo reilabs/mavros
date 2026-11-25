@@ -339,6 +339,16 @@ pub trait HLEmitter {
         r
     }
 
+    fn int_from_limbs(&mut self, limbs: Vec<ValueId>, bits: usize) -> ValueId {
+        let r = self.fresh_value();
+        self.emit(OpCode::IntFromLimbs {
+            result: r,
+            limbs,
+            bits,
+        });
+        r
+    }
+
     fn mk_seq(
         &mut self,
         elems: Vec<ValueId>,

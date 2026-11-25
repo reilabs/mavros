@@ -5,7 +5,12 @@ fn bump_first(arr: &mut [Field; 3]) {
     arr[0] = arr[0] + 1;
 }
 
-fn main(a: Field, b: Field, c: Field, e0: pub Field) {
+fn main(a: u8, b: u8, c: u8, e0: pub u8) {
+    let a = a as Field;
+    let b = b as Field;
+    let c = c as Field;
+    let e0 = e0 as Field;
+
     let mut xs = [a, b, c];
     bump_first(&mut xs);
     assert_eq(xs[0], e0);

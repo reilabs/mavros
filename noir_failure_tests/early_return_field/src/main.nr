@@ -7,7 +7,7 @@
 // Inputs are supplied deliberately: without them this would keep "failing" on missing prover
 // inputs even if the frontend ever started accepting early returns, i.e. it would pass for the
 // wrong reason and stop guarding the rule above.
-fn main(x: Field, y: pub Field) -> pub Field {
+fn main(x: u8, y: pub u8) -> pub u8 {
     if x == 3 {
         return x + y;
     }

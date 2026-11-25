@@ -1,6 +1,6 @@
 pub struct IDData {
-    pub age: Field,
-    pub id: Field,
+    pub age: u8,
+    pub id: u8,
 }
 
 
