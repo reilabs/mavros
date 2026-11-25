@@ -123,11 +123,16 @@ impl Rewriter<'_> {
         let (witnessed_answer, carries) =
             self.witness_columns(identity, flags.range_check_guard, pure_range_check_guard);
 
-        let answer_as_felts =
-            self.answer_as_felts(identity.target, &witnessed_answer, flags.answer_flag);
+        let rows_are_linear = !terms.iter().any(Term::is_witness_product);
+        let (flag, row_guard) = match rows_are_linear {
+            true => (None, guard),
+            false => (flags.answer_flag, None),
+        };
+
+        let answer_as_felts = self.answer_as_felts(identity.target, &witnessed_answer, flag);
 
         self.check_block_carries(identity, &carries, flags.range_check_guard);
-        let terms_as_felts = self.terms_as_felts(&identity, flags.answer_flag);
+        let terms_as_felts = self.terms_as_felts(&identity, flag);
 
         for point in 0..=identity.degree() as u64 {
             self.check_at_point(
@@ -136,6 +141,7 @@ impl Rewriter<'_> {
                 &terms_as_felts,
                 &carries,
                 &answer_as_felts,
+                row_guard,
                 pure_range_check_guard,
             );
         }
@@ -316,7 +322,12 @@ impl Rewriter<'_> {
     /// The identity's row at `point`: `Σ ±terms − (β − point)·H − C = 0`, where `β` is the radix
     /// `2^limb_bits`, `H` is the carry polynomial and `C` is the answer polynomial, all evaluated
     /// at `point`. One product of witnesses is the row's multiplication. Each further one is
-    /// witnessed and pinned by a row of its own.
+    /// witnessed and pinned by a row of its own. A product with a non-witness factor is linear in
+    /// the witness, so it folds into the sum.
+    ///
+    /// No operation lowered today has more than one product, but the identity, its bounds and its
+    /// layout are all built for any number of them, so this lowering is too.
+    #[allow(clippy::too_many_arguments)]
     fn check_at_point(
         &mut self,
         point: u64,
@@ -324,6 +335,7 @@ impl Rewriter<'_> {
         terms_as_felts: &[(Vec<ValueId>, Option<Vec<ValueId>>)],
         carries: &[ValueId],
         answer: &[ValueId],
+        guard: Option<ValueId>,
         pure_guard: Option<ValueId>,
     ) {
         let radix = self.field().two_pow(self.limb_bits());
@@ -332,21 +344,17 @@ impl Rewriter<'_> {
         let mut linear: Vec<(Polarity, ValueId)> = Vec::new();
         for (term, (lhs, rhs)) in terms.iter().zip(terms_as_felts) {
             let a = self.evaluate_at(lhs, point);
-            match rhs {
-                Some(rhs) => {
+            match (rhs, term.rhs) {
+                (Some(rhs), Some(rhs_factor)) => {
                     let b = self.evaluate_at(rhs, point);
-                    match term
-                        .rhs
-                        .filter(|rhs| term.lhs.is_witnessed && rhs.is_witnessed)
-                    {
-                        Some(rhs) => witness_products.push((term, rhs, a, b)),
-                        None => {
-                            let product = self.bin(BinaryArithOpKind::UMul, a, b);
-                            linear.push((term.polarity, product));
-                        }
+                    if term.is_witness_product() {
+                        witness_products.push((term, rhs_factor, a, b));
+                    } else {
+                        let product = self.bin(BinaryArithOpKind::UMul, a, b);
+                        linear.push((term.polarity, product));
                     }
                 }
-                None => linear.push((term.polarity, a)),
+                _ => linear.push((term.polarity, a)),
             }
         }
 
@@ -379,7 +387,7 @@ impl Rewriter<'_> {
             None => {
                 let sum = self.signed_sum(&linear, &CastTarget::Field);
                 let zero = self.field_const(self.field().zero());
-                self.constrain_equal(sum, zero, None);
+                self.constrain_equal(sum, zero, guard);
             }
             Some((polarity, a, b)) => {
                 if polarity == Polarity::Positive {

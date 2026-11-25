@@ -130,6 +130,13 @@ pub(super) struct Term<'a> {
     pub(super) gated: bool,
 }
 
+impl Term<'_> {
+    /// Whether the term is a product of two witnessed factors.
+    pub(super) fn is_witness_product(&self) -> bool {
+        self.lhs.is_witnessed && self.rhs.is_some_and(|rhs| rhs.is_witnessed)
+    }
+}
+
 /// Whether a term of an identity is added or subtracted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Polarity {

@@ -272,7 +272,10 @@ impl Rewriter<'_> {
     }
 
     /// Hand the limbs of an answer to `result`, each a field element range-checked at its width,
-    /// and zero where a guard is off.
+    /// and zero where `guard` is off.
+    ///
+    /// A gadget whose answer limbs are range-checked unguarded doesn't pass in a guard.
+    /// Where its own guard is off its answer will be in range (but doesn't need to be zero).
     ///
     /// A result held as one element fits one, as the operands do: only their sum or product needed
     /// limbs. A limb known at compile time, as every limb of `0 / d` is, is delivered as a

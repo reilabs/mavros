@@ -50,7 +50,7 @@ impl<'a> IdentityTemplate<'a> for SignedProduct {
                 polarity: Polarity::Negative,
                 lhs: c,
                 rhs: None,
-                gated: true,
+                gated: false,
             },
         ];
         (terms, None)
@@ -90,7 +90,12 @@ impl Rewriter<'_> {
         let pure_wide_rhs = self.cast(pure_rhs, wide_integer_type);
 
         let product = self.bin(BinaryArithOpKind::UMul, pure_wide_lhs, pure_wide_rhs);
-        let narrow_product = self.cast(product, CastTarget::Int(bits));
+        let mut narrow_product = self.cast(product, CastTarget::Int(bits));
+        if let Some(condition) = guard {
+            let condition = self.pure_of(condition, self.is_witness(condition));
+            let zero = self.int_const(IntBits::zero(bits));
+            narrow_product = self.select(condition, narrow_product, zero);
+        }
 
         let max_value = (BigUint::one() << bits) - 1u8;
         let c = self.witness_hinted(narrow_product, bits, &widths, &max_value);
@@ -101,7 +106,8 @@ impl Rewriter<'_> {
         self.lower_identity(&identity, guard);
 
         let answer = self.limb_fields(c_limbs);
-        self.deliver(result, answer, &widths, bits, guard);
+        // `c`'s limbs are range-checked unconditionally.
+        self.deliver(result, answer, &widths, bits, None);
     }
 
     /// A two's complement `bits`-wide operand as a factor.
