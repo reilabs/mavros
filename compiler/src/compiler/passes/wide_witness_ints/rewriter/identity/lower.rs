@@ -565,10 +565,8 @@ impl Rewriter<'_> {
                 self.bin(BinaryArithOpKind::USub, value, constant)
             }
             CastTarget::Int(bits) => {
-                let modulus = BigUint::one() << bits;
-                let wrapped = (&modulus - offset % &modulus) % &modulus;
-                let constant = self.int_const(IntBits::from_biguint(*bits, &wrapped));
-                self.bin(BinaryArithOpKind::UAdd, value, constant)
+                let constant = self.int_const(IntBits::from_biguint(*bits, offset));
+                self.bin(BinaryArithOpKind::SSub, value, constant)
             }
             _ => ice_unreachable!("a limb's offset is taken in a field element or an integer"),
         }
