@@ -7,8 +7,8 @@ use crate::{
     collections::HashMap,
     compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
-        pass_manager::{Analysis, AnalysisStore, Pass},
-        passes::wide_witness_ints::{WideWitnessInts, limb_config::LimbConfig},
+        pass_manager::{AnalysisStore, Pass},
+        passes::{shared::limbs::witness_limb_bits, wide_witness_ints::WideWitnessInts},
         ssa::{
             Instruction, Located, SourceLocation, ValueId,
             hlssa::{
@@ -437,7 +437,5 @@ pub(super) fn run_pass(ssa: &mut HLSSA) {
     let mut store = AnalysisStore::new();
     store.insert_with_deps(flow, vec![]);
     store.insert_with_deps(types, vec![]);
-    let limb_config = LimbConfig::compute(ssa, &store);
-    store.insert_with_deps(limb_config, vec![]);
-    WideWitnessInts::new().run(ssa, &store);
+    WideWitnessInts::new(witness_limb_bits(ssa.field())).run(ssa, &store);
 }

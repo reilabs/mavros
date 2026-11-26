@@ -7,17 +7,15 @@ use crate::compiler::{
     passes::wide_witness_ints::rewriter::lowers_a_gadget,
     ssa::{BlockId, FunctionId, hlssa::HLSSA},
 };
-pub struct WideWitnessInts {}
-
-impl WideWitnessInts {
-    pub fn new() -> Self {
-        WideWitnessInts {}
-    }
+pub struct WideWitnessInts {
+    /// The widest limb a value may be cut at.
+    max_limb_bits: usize,
 }
 
-impl Default for WideWitnessInts {
-    fn default() -> Self {
-        Self::new()
+impl WideWitnessInts {
+    /// The pass, cutting no limb wider than `max_limb_bits`.
+    pub fn new(max_limb_bits: usize) -> Self {
+        WideWitnessInts { max_limb_bits }
     }
 }
 
@@ -27,16 +25,15 @@ impl Pass for WideWitnessInts {
     }
 
     fn needs(&self) -> Vec<AnalysisId> {
-        vec![TypeInfo::id(), FlowAnalysis::id(), LimbConfig::id()]
+        vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
-        let limb_config = store.get::<LimbConfig>();
-        let field = limb_config.field();
-        let globals = Globals::split(ssa, limb_config);
-
         let type_info = store.get::<TypeInfo>();
         let cfg = store.get::<FlowAnalysis>();
+        let limb_config = &LimbConfig::of(ssa, type_info, cfg, self.max_limb_bits);
+        let field = limb_config.field();
+        let globals = Globals::split(ssa, limb_config);
 
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 

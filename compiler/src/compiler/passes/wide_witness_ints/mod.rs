@@ -158,6 +158,7 @@ mod rewriter;
 mod types;
 mod utils;
 
+pub use limb_config::checked_max_limb_bits;
 pub use pass::WideWitnessInts;
 pub use utils::multi_cell_int_bits;
 

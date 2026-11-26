@@ -66,13 +66,14 @@ use crate::{
             remove_unreachable_blocks::RemoveUnreachableBlocks,
             remove_unreachable_functions::RemoveUnreachableFunctions,
             return_reachability::ReturnReachabilityValidation,
+            shared::limbs::witness_limb_bits,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
             sparse_conditional_simplification::SCS,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
-            wide_witness_ints::WideWitnessInts,
+            wide_witness_ints::{WideWitnessInts, checked_max_limb_bits},
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
@@ -131,6 +132,8 @@ pub struct Driver {
     main_is_unconstrained: bool,
     /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the LogUp repetitions.
     logup_soundness: u32,
+    /// The widest witness limb a wide integer may be cut at; or the field's default when `None`.
+    max_limb_bits: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -156,6 +159,10 @@ pub enum Error {
     /// target needs more than
     /// [`MAX_LOGUP_REPETITIONS`](crate::compiler::codegen::hlssa_to_r1cs::MAX_LOGUP_REPETITIONS).
     LogupSoundnessUnsupported(String),
+
+    /// The maximum limb width set with [`Driver::set_max_limb_bits`] is not one of the widths the
+    /// program's field can cut a wide integer at.
+    MaxLimbBitsUnsupported(String),
 
     /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
     ///
@@ -192,6 +199,7 @@ impl std::fmt::Display for Error {
                 write!(f, "{}", diagnostic::render_all(diagnostics))
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
+            Error::MaxLimbBitsUnsupported(message) => write!(f, "{message}"),
             Error::R1csFieldMismatch { requested, program } => write!(
                 f,
                 "an R1CS over {requested} was requested or handed in for a program over {program}"
@@ -248,6 +256,7 @@ impl Driver {
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
+            max_limb_bits: None,
         }
     }
 
@@ -281,6 +290,7 @@ impl Driver {
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
+            max_limb_bits: None,
         }
     }
 
@@ -296,6 +306,11 @@ impl Driver {
     /// [`DEFAULT_LOGUP_SOUNDNESS_BITS`]).
     pub fn set_logup_soundness(&mut self, bits: u32) {
         self.logup_soundness = bits;
+    }
+
+    /// Cut wide witnessed integers into limbs of at most `bits`.
+    pub fn set_max_limb_bits(&mut self, bits: usize) {
+        self.max_limb_bits = Some(bits);
     }
 
     pub fn enable_r1cs_profile(&mut self) {
@@ -686,6 +701,13 @@ impl Driver {
     #[tracing::instrument(skip_all)]
     pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
+        let field = ssa.field();
+        let max_limb_bits = match self.max_limb_bits {
+            Some(bits) => {
+                checked_max_limb_bits(field, bits).map_err(Error::MaxLimbBitsUnsupported)?
+            }
+            None => witness_limb_bits(field),
+        };
 
         // Two phases, so that a witnessed decomposition the field cannot carry is reported as an
         // error between them rather than refused by its lowering at the start of the second.
@@ -731,7 +753,7 @@ impl Driver {
                 // Immediately before the lowerings that read an integer's width: a witnessed value
                 // too wide for one field element becomes its limbs here, and every lowering below
                 // this sees limbs it can work with.
-                Box::new(WideWitnessInts::new()),
+                Box::new(WideWitnessInts::new(max_limb_bits)),
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.
                 Box::new(InstructionLowering::witness_narrowing_casts()),

@@ -6,7 +6,6 @@ use num_bigint::BigInt;
 
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo, value_range_analysis::field_modulus},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore},
     passes::{
         shared::{
             limbs::{limb_bits_for_modulus, widest_injective_int_bits_for_modulus},
@@ -30,17 +29,23 @@ pub(super) struct LimbConfig {
     injective_bits: usize,
 }
 
-impl Analysis for LimbConfig {
-    fn dependencies() -> Vec<AnalysisId> {
-        vec![TypeInfo::id(), FlowAnalysis::id()]
-    }
-
-    fn compute(ssa: &HLSSA, store: &AnalysisStore) -> Self {
-        Self::admitting(ssa.field(), &required_identities(ssa, store))
-    }
-}
-
 impl LimbConfig {
+    /// The limb `ssa` is cut at.
+    ///
+    /// The widest size up to `max_limb_bits` at which every lowered-to identity is sound.
+    pub(super) fn of(
+        ssa: &HLSSA,
+        type_info: &TypeInfo,
+        cfg: &FlowAnalysis,
+        max_limb_bits: usize,
+    ) -> Self {
+        Self::admitting(
+            ssa.field(),
+            &required_identities(ssa, type_info, cfg),
+            max_limb_bits,
+        )
+    }
+
     pub(super) fn field(&self) -> FieldConfig {
         self.field
     }
@@ -53,21 +58,20 @@ impl LimbConfig {
         self.injective_bits
     }
 
-    /// The widest limb of `field` at which every identity is sound.
-    fn admitting(field: FieldConfig, required: &[Identity]) -> Self {
+    /// The widest limb of `field`, up to `max_limb_bits`, at which every identity is sound.
+    fn admitting(field: FieldConfig, required: &[Identity], max_limb_bits: usize) -> Self {
         let modulus = field_modulus(field);
-        let limb_bits = choose_limb_bits_for_modulus(&modulus, required).unwrap_or_else(
-            |(narrowest, (bits, shape))| {
-            unsupported_on_this_field(
-                format_args!(
-                    "a {bits}-bit {shape:?} identity over witness limbs needs each of its columns \
-                     and the carries it is grouped with to fit a field element, at some limb down to \
-                     {narrowest} bits"
-                ),
-                field,
-            )
-        },
-        );
+        let limb_bits = choose_limb_bits_for_modulus(&modulus, required, max_limb_bits)
+            .unwrap_or_else(|(narrowest, (bits, shape))| {
+                unsupported_on_this_field(
+                    format_args!(
+                        "a {bits}-bit {shape:?} identity over witness limbs needs each of its \
+                         columns and the carries it is grouped with to fit a field element, at \
+                         some limb down to {narrowest} bits"
+                    ),
+                    field,
+                )
+            });
         Self {
             field,
             limb_bits,
@@ -80,11 +84,8 @@ impl LimbConfig {
 type Identity = (usize, &'static dyn IdentityShape);
 
 /// Every identity the program's products and divisions lower to.
-fn required_identities(ssa: &HLSSA, store: &AnalysisStore) -> Vec<Identity> {
+fn required_identities(ssa: &HLSSA, type_info: &TypeInfo, cfg: &FlowAnalysis) -> Vec<Identity> {
     let field = ssa.field();
-    let type_info = store.get::<TypeInfo>();
-    let cfg = store.get::<FlowAnalysis>();
-
     let mut required = Vec::new();
     for fid in ssa.get_function_ids() {
         if !type_info.has_function(fid) {
@@ -101,15 +102,16 @@ fn required_identities(ssa: &HLSSA, store: &AnalysisStore) -> Vec<Identity> {
     required
 }
 
-/// The widest candidate limb at which every one of the identities holds, or the narrowest candidate
-/// with an identity it refuses.
+/// The widest candidate limb up to `max_limb_bits` at which every one of the identities holds, or
+/// the narrowest candidate with an identity it refuses.
 fn choose_limb_bits_for_modulus(
     modulus: &BigInt,
     required: &[Identity],
+    max_limb_bits: usize,
 ) -> Result<usize, (usize, Identity)> {
     let injective = widest_injective_int_bits_for_modulus(modulus);
     let mut refused = None;
-    for limb_bits in limb_candidates(modulus) {
+    for limb_bits in limb_candidates(modulus, max_limb_bits) {
         let is_unsound =
             |(bits, shape): &&Identity| !shape.admits(&limb_widths(*bits, limb_bits), injective);
         match required.iter().find(is_unsound) {
@@ -119,11 +121,26 @@ fn choose_limb_bits_for_modulus(
     }
     Err(refused.expect("a field has a limb"))
 }
-/// Candidate limb widths; widest to narrowest.
-fn limb_candidates(modulus: &BigInt) -> impl Iterator<Item = usize> {
+
+/// Candidate limb widths up to `max_limb_bits`; widest to narrowest.
+fn limb_candidates(modulus: &BigInt, max_limb_bits: usize) -> impl Iterator<Item = usize> {
     successors(Some(limb_bits_for_modulus(modulus)), |bits| {
         (bits / 2 >= 2).then_some(bits / 2)
     })
+    .filter(move |bits| *bits <= max_limb_bits)
+}
+
+/// `max_limb_bits`, if it is one of the limb widths of `field`.
+pub fn checked_max_limb_bits(field: FieldConfig, max_limb_bits: usize) -> Result<usize, String> {
+    let allowed: Vec<usize> = limb_candidates(&field_modulus(field), usize::MAX).collect();
+    if allowed.contains(&max_limb_bits) {
+        Ok(max_limb_bits)
+    } else {
+        Err(format!(
+            "the maximum witness limb width {max_limb_bits} is not a limb this field can be cut \
+             at; the allowed widths are {allowed:?}"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +148,7 @@ mod tests {
     use super::*;
     use crate::compiler::{
         analysis::types::Types,
+        passes::shared::limbs::witness_limb_bits,
         passes::wide_witness_ints::{
             rewriter::EuclideanDivision,
             test_utils::{fields, limbed_widths, operation_with_in, run_pass},
@@ -145,7 +163,8 @@ mod tests {
                 .into_iter()
                 .map(|bits| (bits, &EuclideanDivision as &'static dyn IdentityShape))
                 .collect();
-            choose_limb_bits_for_modulus(&(BigInt::from(1) << (modulus_bits - 1)), &required).ok()
+            let modulus = BigInt::from(1) << (modulus_bits - 1);
+            choose_limb_bits_for_modulus(&modulus, &required, limb_bits_for_modulus(&modulus)).ok()
         };
 
         assert_eq!(get_limb_width(131, None), Some(64));
@@ -178,11 +197,8 @@ mod tests {
                         operation_with_in(field, kind, bits, Type::witness_of(Type::int(bits)));
                     let flow = FlowAnalysis::run(&ssa);
                     let types = Types::new().run(&ssa, &flow);
-                    let mut store = AnalysisStore::new();
-                    store.insert_with_deps(flow, vec![]);
-                    store.insert_with_deps(types, vec![]);
                     assert_eq!(
-                        LimbConfig::compute(&ssa, &store),
+                        LimbConfig::of(&ssa, &types, &flow, default.limb_bits()),
                         default,
                         "{field:?} int{bits} {kind:?}"
                     );
@@ -193,6 +209,6 @@ mod tests {
     }
 
     pub(in super::super) fn default_limb_config(field: FieldConfig) -> LimbConfig {
-        LimbConfig::admitting(field, &[])
+        LimbConfig::admitting(field, &[], witness_limb_bits(field))
     }
 }
