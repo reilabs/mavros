@@ -23,7 +23,6 @@ use mavros_compiler::{
         r1cs_compact,
     },
     driver::{Driver, Error as DriverError},
-    ice_usr,
     vm::interpreter,
     wasm_host, wasm_runtime,
 };

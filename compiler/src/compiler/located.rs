@@ -100,6 +100,17 @@ impl SourceLocation {
         )
     }
 
+    /// Whether this spans the program being compiled: neither the standard library nor a
+    /// [`synthetic`](Self::synthetic) location.
+    pub fn is_program_source(&self) -> bool {
+        !self.file.starts_with("std/") && !self.is_synthetic()
+    }
+
+    /// Whether this is a [`synthetic`](Self::synthetic) location, with no source file behind it.
+    pub fn is_synthetic(&self) -> bool {
+        self.file.starts_with('<')
+    }
+
     /// The location for code with no user-source anchor, such as generated helper functions,
     /// dispatch stubs, or last-resort handling for unlocated compiler input. `origin` names the
     /// generator/context and becomes the synthetic source identifier `<origin>`.

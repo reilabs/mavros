@@ -16,7 +16,7 @@ use crate::{
             types::{FunctionTypeInfo, TypeInfo, Types},
             value_range_analysis::{ValueRangeAnalysis, ValueRanges},
         },
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::{
             divmod_guard::{
                 divisor_checked_by_its_lowering, divmod_can_fail, divmod_provably_defined,
@@ -183,8 +183,9 @@ impl Pass for DCE {
         vec![FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<FlowAnalysis>());
+        Ok(())
     }
 }
 

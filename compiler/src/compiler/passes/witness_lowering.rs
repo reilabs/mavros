@@ -5,7 +5,7 @@ use crate::{
     collections::HashMap,
     compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::value_replacements::ValueReplacements,
         ssa::{
             BlockId, Terminator, ValueId,
@@ -32,8 +32,9 @@ impl Pass for WitnessLowering {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<TypeInfo>(), store.get::<FlowAnalysis>());
+        Ok(())
     }
 }
 

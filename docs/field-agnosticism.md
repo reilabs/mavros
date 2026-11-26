@@ -60,9 +60,10 @@ The `Field` type in Mavros has the following semantics regardless of which field
 - **Casts _from_ `Field`:** Casts out of the configured `Field` keep the low bits of the element's
   canonical value. The answer may thus depend on the field.
 - **Bit and Byte Decompositions:** The decompositions of a `Field` are _at most_ as wide as the
-  field. A wider decomposition of a witness is a compile-time error for constrained code, and in
-  unconstrained code a wider byte decomposition fails at witness generation time while a wider bit
-  decomposition is zero-padded.
+  field. In constrained code, a wider decomposition of a witness fails every run that reaches it:
+  one that every run reaches is a compile-time error, and one under a witness condition is refused
+  when proving the runs that take it. In unconstrained code a wider byte decomposition fails at
+  witness generation time while a wider bit decomposition is zero-padded.
 
 ## Changes from Upstream Noir
 

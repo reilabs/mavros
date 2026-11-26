@@ -27,7 +27,7 @@ use crate::compiler::{
                 emit_pure_shift_amount_check, shift_amount_pinned_to,
                 shift_amount_provably_in_range,
             },
-            unsupported::unsupported_on_this_field,
+            unreachable::unreachable_on_this_field,
         },
     },
     ssa::{
@@ -1002,9 +1002,9 @@ fn spread_as_field(b: &mut impl HLEmitter, value: ValueId, bits: usize) -> Value
 // `U(bits*2)`), so on a ~64-bit field even a 32-bit spread nearly saturates p. A half-limb operand
 // satisfies `2*bits <= h` by construction, which is why every width past the whole-width arm goes
 // through a half-limb decomposition. The whole-width arm checks this same predicate before taking
-// an operand, so the refusal below could fire only on two half-limb spreads. Their sum is below
-// `2^h`, inside the `2h` bits the limb rule in `shared/limbs.rs` keeps injective, so the refusal
-// guards no reachable case.
+// an operand, so the backstop below could fire only on two half-limb spreads. Their sum is below
+// `2^h`, inside the `2h` bits the limb rule in `shared/limbs.rs` keeps injective, so it guards no
+// reachable case.
 fn lower_word_bitwise(
     b: &mut impl HLEmitter,
     kind: BinaryArithOpKind,
@@ -1013,7 +1013,7 @@ fn lower_word_bitwise(
     bits: usize,
 ) -> ValueId {
     if !spread_sum_fits_field(bits, b.field()) {
-        unsupported_on_this_field(
+        unreachable_on_this_field(
             format_args!(
                 "a {bits}-bit bitwise op spreads each operand to {} bits, and the sum of the two spreads no longer fits one field element, so `Unspread` would read a residue rather than the interleaved bits",
                 2 * bits
@@ -1469,7 +1469,8 @@ mod tests {
             vec![Box::new(LowerWitnessBitwiseOps::new())],
             false,
         )
-        .run(&mut ssa, &AnalysisStore::new());
+        .run(&mut ssa, &AnalysisStore::new())
+        .unwrap();
 
         let answer = ssa
             .get_unique_entrypoint()

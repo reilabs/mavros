@@ -1,7 +1,7 @@
 use super::{globals::Globals, plan::plan_function, rewriter::rewrite_function};
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     passes::wide_witness_ints::rewriter::lowers_a_gadget,
     ssa::{
         BlockId, FunctionId,
@@ -31,7 +31,7 @@ impl Pass for WideWitnessInts {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let field = ssa.field();
         let globals = Globals::split(ssa, field);
 
@@ -87,6 +87,7 @@ impl Pass for WideWitnessInts {
             }
             rewrite_function(ssa, fid, &reachable, &value_map, type_info, field, &globals);
         }
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

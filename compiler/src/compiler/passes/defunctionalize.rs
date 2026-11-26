@@ -23,7 +23,7 @@ use crate::{
             flow_analysis::FlowAnalysis,
             types::{TypeInfo, Types},
         },
-        pass_manager::{AnalysisStore, Pass},
+        pass_manager::{AnalysisStore, Pass, PassResult},
         passes::{
             remove_unreachable_blocks::remove_unreachable_blocks,
             shared::value_replacements::ValueReplacements,
@@ -53,8 +53,9 @@ impl Pass for Defunctionalize {
         "defunctionalize"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         run_defunctionalize(ssa);
+        Ok(())
     }
 }
 

@@ -1021,11 +1021,15 @@ mod tests {
         });
         entry.set_terminator(Terminator::Return(vec![result]));
 
-        InstructionLowering::pure_guards().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::pure_guards()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
 
         // The checks use bit windows, lowered one phase later, so lower them here too or a width a
         // window cannot build would go unseen.
-        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::witness_integer_ops()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         ssa
     }
 
@@ -1059,7 +1063,9 @@ mod tests {
         });
         entry.set_terminator(Terminator::Return(vec![result]));
 
-        InstructionLowering::pure_guards().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::pure_guards()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         ssa.get_unique_entrypoint()
             .get_blocks()
             .flat_map(|(_, block)| block.get_instructions())
@@ -1135,7 +1141,9 @@ mod tests {
         });
         entry.set_terminator(Terminator::Return(vec![]));
 
-        InstructionLowering::pure_guards().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::pure_guards()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         let ops: Vec<OpCode> = ssa
             .get_unique_entrypoint()
             .get_blocks()

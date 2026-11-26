@@ -101,5 +101,5 @@ pub(super) fn run_pass(ssa: &mut HLSSA) {
     let mut store = AnalysisStore::new();
     store.insert_with_deps(flow, vec![]);
     store.insert_with_deps(types, vec![]);
-    WideWitnessInts::new().run(ssa, &store);
+    WideWitnessInts::new().run(ssa, &store).unwrap();
 }
