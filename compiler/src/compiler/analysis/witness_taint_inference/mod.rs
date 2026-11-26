@@ -384,7 +384,7 @@ mod tests {
         WitnessShape::Scalar(WitnessType::Witness)
     }
 
-    fn fr(n: u64) -> Field {
+    fn bn254_const(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
     }
 
@@ -439,7 +439,7 @@ mod tests {
     /// `WriteWitness` results are unconditionally Witness; a pure parameter stays Pure.
     #[test]
     fn write_witness_is_witness_pure_stays_pure() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -460,7 +460,7 @@ mod tests {
     /// Witness.
     #[test]
     fn witness_of_cast_is_witness() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -468,7 +468,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
-            let c = e.field_const(fr(0));
+            let c = e.field_const(bn254_const(0));
             let w = e.cast_to_witness_of(c);
             e.terminate_return(vec![w]);
         });
@@ -481,7 +481,7 @@ mod tests {
     /// Witness (it reads the pointee, which a witness store tainted).
     #[test]
     fn store_is_covariant_load_reads_pointee() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -490,7 +490,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c = e.field_const(fr(5));
+            let c = e.field_const(bn254_const(5));
             let p = e.alloc(c); // pure init store
             let w = e.write_witness(x); // Witness
             e.store(p, w); // witness store → pointee becomes Witness
@@ -505,7 +505,7 @@ mod tests {
     /// Arithmetic propagates taint by join: witness ∨ pure = witness; pure ∨ pure = pure.
     #[test]
     fn arithmetic_joins_operand_taint() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -516,7 +516,7 @@ mod tests {
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
             let a = e.uadd(w, x); // witness ∨ pure = witness
-            let c = e.field_const(fr(2));
+            let c = e.field_const(bn254_const(2));
             let d = e.uadd(c, x); // pure ∨ pure = pure
             e.terminate_return(vec![d, a]);
         });
@@ -531,7 +531,7 @@ mod tests {
     fn guard_delegates_and_joins_condition() {
         use crate::compiler::ssa::hlssa::{BinaryArithOpKind, OpCode};
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -541,8 +541,8 @@ mod tests {
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
             let cond = e.eq(w, x); // Witness condition
-            let c1 = e.field_const(fr(1));
-            let c2 = e.field_const(fr(2));
+            let c1 = e.field_const(bn254_const(1));
+            let c2 = e.field_const(bn254_const(2));
             let r = e.fresh_value();
             e.emit(OpCode::Guard {
                 condition: cond,
@@ -564,7 +564,7 @@ mod tests {
     /// instantiation + arg-out mapping onto the argument's deref levels.
     #[test]
     fn call_arg_out_back_taints_caller_ref() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("helper".to_string());
@@ -573,7 +573,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let p = e.add_parameter(Type::field().ref_of());
-            let c = e.field_const(fr(7));
+            let c = e.field_const(bn254_const(7));
             let w = e.write_witness(c);
             e.store(p, w);
             e.terminate_return(vec![]);
@@ -584,7 +584,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             let q = e.alloc(c0);
             e.call(helper_id, vec![q], 0);
             let r = e.load(q);
@@ -598,7 +598,7 @@ mod tests {
     /// converge (no infinite loop) and still propagate the arg-out taint to the caller.
     #[test]
     fn recursion_converges_with_arg_out() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let rec_id = sb.ssa().add_function("rec".to_string());
@@ -607,7 +607,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let p = e.add_parameter(Type::field().ref_of());
-            let c = e.field_const(fr(1));
+            let c = e.field_const(bn254_const(1));
             let w = e.write_witness(c);
             e.store(p, w);
             e.call(rec_id, vec![p], 0); // self-recursion
@@ -618,7 +618,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             let q = e.alloc(c0);
             e.call(rec_id, vec![q], 0);
             let r = e.load(q);
@@ -634,7 +634,7 @@ mod tests {
     /// through the other — the loaded inner `Field` is Witness via the shared equivalence class.
     #[test]
     fn nested_ref_aliases_unify() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -643,7 +643,7 @@ mod tests {
             let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             // inner: Ref<Field>, with a witness stored into its pointee.
-            let c = e.field_const(fr(9));
+            let c = e.field_const(bn254_const(9));
             let inner = e.alloc(c);
             let w = e.write_witness(c);
             e.store(inner, w);
@@ -665,7 +665,7 @@ mod tests {
     fn nested_ref_alloc_infers_witness_pointee() {
         use crate::compiler::ssa::hlssa::OpCode;
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -673,7 +673,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             let inner = e.alloc(c0);
             let outer = e.alloc(inner); // the nested-ref alloc under test
             let w = e.write_witness(x);
@@ -710,7 +710,7 @@ mod tests {
     /// Over-taint only, never unsoundness.
     #[test]
     fn merged_refs_unify_taint() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -718,7 +718,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             let ra = e.alloc(c0);
             let rb = e.alloc(c0);
             let cond = e.eq(x, c0); // a pure condition
@@ -743,7 +743,7 @@ mod tests {
     /// through it must be Witness — even though both candidate pointees hold pure values.
     #[test]
     fn conditional_ref_store_taints_loaded_handle() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -751,13 +751,13 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c1 = e.field_const(fr(1));
-            let c2 = e.field_const(fr(2));
+            let c1 = e.field_const(bn254_const(1));
+            let c2 = e.field_const(bn254_const(2));
             let r1 = e.alloc(c1);
             let r2 = e.alloc(c2);
             let p = e.alloc(r1);
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero); // witness condition
             // if cond { *p = r2 }
             e.build_if_else(
@@ -784,7 +784,7 @@ mod tests {
     /// exercises the Store-side `written ≥ ptr` edge.)
     #[test]
     fn store_through_witness_selected_ref_taints_original() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -792,13 +792,13 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c1 = e.field_const(fr(1));
-            let c2 = e.field_const(fr(2));
+            let c1 = e.field_const(bn254_const(1));
+            let c2 = e.field_const(bn254_const(2));
             let r1 = e.alloc(c1);
             let r2 = e.alloc(c2);
             let p = e.alloc(r1);
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero); // witness condition
             // if cond { *p = r2 }
             e.build_if_else(
@@ -811,7 +811,7 @@ mod tests {
                 |_| vec![],
             );
             let q = e.load(p); // q is r1 or r2 depending on the witness branch
-            let c5 = e.field_const(fr(5));
+            let c5 = e.field_const(bn254_const(5));
             e.store(q, c5); // unconditional pure store through the witness-selected pointer
             let v = e.load(r1); // r1's pointee is 1 or 5 depending on the witness branch
             e.terminate_return(vec![v]);
@@ -824,7 +824,7 @@ mod tests {
     /// double-load Pure (both candidate pointees hold pure values, and no branch chooses).
     #[test]
     fn unconditional_ref_store_stays_pure() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -832,8 +832,8 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
-            let c1 = e.field_const(fr(1));
-            let c2 = e.field_const(fr(2));
+            let c1 = e.field_const(bn254_const(1));
+            let c2 = e.field_const(bn254_const(2));
             let r1 = e.alloc(c1);
             let r2 = e.alloc(c2);
             let p = e.alloc(r1);
@@ -850,7 +850,7 @@ mod tests {
     /// through one allocation leaves loads through the other Pure.
     #[test]
     fn unmerged_refs_stay_separate() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -858,7 +858,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             let ra = e.alloc(c0);
             let rb = e.alloc(c0);
             let w = e.write_witness(x);
@@ -877,7 +877,7 @@ mod tests {
     fn witness_branch_taints_writes_and_merge_not_arithmetic() {
         use crate::compiler::ssa::hlssa::OpCode;
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -887,23 +887,24 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero); // a witness-dependent condition
-            let init = e.field_const(fr(0)); // pure initializer, leaves the slot Pure until the conditional store
+            // A pure initializer, which leaves the slot Pure until the conditional store.
+            let init = e.field_const(bn254_const(0));
             let p = e.alloc(init);
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field()],
                 |e| {
-                    let c1 = e.field_const(fr(1));
-                    let c2 = e.field_const(fr(2));
+                    let c1 = e.field_const(bn254_const(1));
+                    let c2 = e.field_const(bn254_const(2));
                     let a = e.uadd(c1, c2); // pure arithmetic under a witness branch
-                    let c7 = e.field_const(fr(7));
+                    let c7 = e.field_const(bn254_const(7));
                     e.store(p, c7); // conditional store → the slot becomes Witness
                     vec![a]
                 },
                 |e| {
-                    let c0 = e.field_const(fr(0));
+                    let c0 = e.field_const(bn254_const(0));
                     vec![c0]
                 },
             );
@@ -941,7 +942,7 @@ mod tests {
     fn caller_write_through_returned_ref_taints_callee() {
         use crate::compiler::ssa::hlssa::OpCode;
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("make_ref".to_string());
@@ -950,7 +951,7 @@ mod tests {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
-            let c = e.field_const(fr(17));
+            let c = e.field_const(bn254_const(17));
             let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
@@ -998,7 +999,7 @@ mod tests {
     /// summary inputs chaining across calls).
     #[test]
     fn returned_ref_two_level_pass_through() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let inner_id = sb.ssa().add_function("inner".to_string());
@@ -1007,7 +1008,7 @@ mod tests {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
-            let c = e.field_const(fr(17));
+            let c = e.field_const(bn254_const(17));
             let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
@@ -1046,7 +1047,7 @@ mod tests {
     /// and the caller's write must back-taint it.
     #[test]
     fn returned_ref_recursion_terminates() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let rec_id = sb.ssa().add_function("rec".to_string());
@@ -1084,7 +1085,7 @@ mod tests {
     /// summary edge that Return-deref inputs make expressible).
     #[test]
     fn returned_ref_alias_of_param_back_taints_arg() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let id_id = sb.ssa().add_function("id".to_string());
@@ -1102,7 +1103,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             let q = e.alloc(c0);
             let r = e.call(id_id, vec![q], 1)[0];
             let w = e.write_witness(x);
@@ -1118,7 +1119,7 @@ mod tests {
     /// the callee clone stay all-Pure (the Return-deref machinery must not over-taint).
     #[test]
     fn returned_ref_stays_pure_without_caller_write() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("make_ref".to_string());
@@ -1126,7 +1127,7 @@ mod tests {
             b.function.add_return_type(Type::field().ref_of());
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
-            let c = e.field_const(fr(17));
+            let c = e.field_const(bn254_const(17));
             let p = e.alloc(c);
             e.terminate_return(vec![p]);
         });
@@ -1136,7 +1137,7 @@ mod tests {
             let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
             let z = e.call(helper_id, vec![], 1)[0];
-            let c5 = e.field_const(fr(5));
+            let c5 = e.field_const(bn254_const(5));
             e.store(z, c5);
             let r = e.load(z);
             e.terminate_return(vec![r]);
@@ -1167,7 +1168,7 @@ mod tests {
     /// constrained calls answers `true` (the conservative refuse).
     #[test]
     fn approx_joins_call_site_contexts_without_mutation() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("helper".to_string());
@@ -1195,7 +1196,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c = e.field_const(fr(3));
+            let c = e.field_const(bn254_const(3));
             let w = e.write_witness(x);
             let r1 = e.call(helper_id, vec![c], 1)[0];
             let r2 = e.call(helper_id, vec![w], 1)[0];
@@ -1226,7 +1227,7 @@ mod tests {
     /// Pure (summaries instantiate per site in the caller's own solve).
     #[test]
     fn approx_cfg_witness_joins_across_call_sites() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let helper_id = sb.ssa().add_function("helper".to_string());
@@ -1236,7 +1237,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let p = e.add_parameter(Type::field().ref_of());
-            let c = e.field_const(fr(7));
+            let c = e.field_const(bn254_const(7));
             e.store(p, c);
             let r = e.load(p);
             e.terminate_return(vec![r]);
@@ -1249,7 +1250,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             let q1 = e.alloc(c0);
             let r1 = e.call(helper_id, vec![q1], 1)[0];
             let w = e.write_witness(x);
@@ -1281,7 +1282,7 @@ mod tests {
     /// worklist drains (the re-enqueue-on-growth path).
     #[test]
     fn approx_recursive_context_growth_terminates() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let rec_id = sb.ssa().add_function("rec".to_string());
@@ -1290,7 +1291,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let p = e.add_parameter(Type::field());
-            let c = e.field_const(fr(1));
+            let c = e.field_const(bn254_const(1));
             let w = e.write_witness(c);
             e.call(rec_id, vec![w], 0);
             e.terminate_return(vec![]);
@@ -1300,7 +1301,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let _x = e.add_parameter(Type::field());
-            let c0 = e.field_const(fr(0));
+            let c0 = e.field_const(bn254_const(0));
             e.call(rec_id, vec![c0], 0);
             e.terminate_return(vec![]);
         });
@@ -1318,7 +1319,7 @@ mod tests {
     fn witness_merge_of_slices_taints_len_and_leaves() {
         use crate::compiler::ssa::hlssa::SequenceTargetType;
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -1328,18 +1329,18 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field().slice_of()],
                 |e| {
-                    let c = e.field_const(fr(7));
+                    let c = e.field_const(bn254_const(7));
                     vec![e.mk_seq(vec![c], SequenceTargetType::Slice, Type::field())]
                 },
                 |e| {
-                    let c1 = e.field_const(fr(1));
-                    let c2 = e.field_const(fr(2));
+                    let c1 = e.field_const(bn254_const(1));
+                    let c2 = e.field_const(bn254_const(2));
                     vec![e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field())]
                 },
             );
@@ -1362,7 +1363,7 @@ mod tests {
     fn select_between_slices_taints_len_and_leaves() {
         use crate::compiler::ssa::hlssa::SequenceTargetType;
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -1371,10 +1372,10 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
-            let c1 = e.field_const(fr(1));
-            let c2 = e.field_const(fr(2));
+            let c1 = e.field_const(bn254_const(1));
+            let c2 = e.field_const(bn254_const(2));
             let s1 = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
             let s2 = e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field());
             let m = e.select(cond, s1, s2);
@@ -1397,7 +1398,7 @@ mod tests {
     fn pure_merge_and_unconditional_slice_ops_stay_pure() {
         use crate::compiler::ssa::hlssa::{SequenceTargetType, SliceOpDir};
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -1407,22 +1408,22 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(x, zero); // pure condition
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field().slice_of()],
                 |e| {
-                    let c = e.field_const(fr(7));
+                    let c = e.field_const(bn254_const(7));
                     vec![e.mk_seq(vec![c], SequenceTargetType::Slice, Type::field())]
                 },
                 |e| {
-                    let c1 = e.field_const(fr(1));
-                    let c2 = e.field_const(fr(2));
+                    let c1 = e.field_const(bn254_const(1));
+                    let c2 = e.field_const(bn254_const(2));
                     vec![e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field())]
                 },
             );
-            let c3 = e.field_const(fr(3));
+            let c3 = e.field_const(bn254_const(3));
             let pushed = e.slice_push(merge[0], vec![c3], SliceOpDir::Back);
             let (popped, elem) = e.slice_pop(pushed, SliceOpDir::Back);
             let len = e.slice_len(popped);
@@ -1447,7 +1448,7 @@ mod tests {
     fn guarded_push_is_pure_until_the_merge() {
         use crate::compiler::ssa::hlssa::{OpCode, SequenceTargetType, SliceOpDir};
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -1456,15 +1457,15 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
-            let c1 = e.field_const(fr(1));
+            let c1 = e.field_const(bn254_const(1));
             let s = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field().slice_of()],
                 |e| {
-                    let c2 = e.field_const(fr(2));
+                    let c2 = e.field_const(bn254_const(2));
                     vec![e.slice_push(s, vec![c2], SliceOpDir::Back)]
                 },
                 |_e| vec![s],

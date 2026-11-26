@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::Field;
+use mavros_artifacts::Bn254;
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions};
 
 fn check(body: &str, expected: &[u64]) {
@@ -19,7 +19,7 @@ fn check(body: &str, expected: &[u64]) {
             }}"
         );
         let dir = common::noir_project(&source);
-        let (mut driver, r1cs) = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false)
+        let (mut driver, r1cs) = api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false)
             .unwrap_or_else(|error| panic!("{source}: {error}"));
         let mut binary = api::compile_bytecode(
             &mut driver,

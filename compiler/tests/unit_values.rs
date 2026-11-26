@@ -1,4 +1,4 @@
-use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+use mavros_artifacts::{Bn254, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
 use mavros_compiler::{
     api,
     compiler::{
@@ -182,7 +182,7 @@ fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
     let dir = common::noir_project(source);
     std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
     let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
     let mut artifact = driver
         .compile_bytecode_artifact(CodeGenOptions {
@@ -249,7 +249,7 @@ fn an_unread_entry_blob_survives_bytecode_dce() {
             F::ID
         );
     }
-    check::<Field>();
+    check::<Bn254>();
     check::<Goldilocks>();
 }
 
@@ -260,6 +260,10 @@ fn data_bus_entry_points_are_refused() {
         "fn main(x: call_data(0) u8, y: pub u8) -> pub u8 { x * y }",
         "fn main(x: u8, y: pub u8) -> return_data u8 { x * y }",
     ] {
-        common::assert_frontend_refused(source, "the data bus is not supported");
+        common::assert_frontend_refused(
+            FieldConfig::bn254(),
+            source,
+            "the data bus is not supported",
+        );
     }
 }

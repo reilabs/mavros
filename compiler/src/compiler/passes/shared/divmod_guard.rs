@@ -212,7 +212,7 @@ mod tests {
         ValueRange::from_signed(Width::Bits(8), Interval::closed(lo, hi))
     }
 
-    fn field_range(lo: i64, hi: i64) -> ValueRange {
+    fn bn254_range(lo: i64, hi: i64) -> ValueRange {
         ValueRange::from_unsigned(Width::Field(FieldConfig::bn254()), Interval::closed(lo, hi))
     }
 
@@ -238,13 +238,13 @@ mod tests {
         let anything = ValueRange::full(Width::Field(FieldConfig::bn254()));
         assert!(divmod_provably_defined(
             &anything,
-            &field_range(1, 9),
+            &bn254_range(1, 9),
             &Type::field(),
             false
         ));
         assert!(!divmod_provably_defined(
             &anything,
-            &field_range(0, 9),
+            &bn254_range(0, 9),
             &Type::field(),
             false
         ));

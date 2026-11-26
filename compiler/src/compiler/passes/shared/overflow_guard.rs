@@ -370,6 +370,7 @@ pub fn abs_as_u(
 mod tests {
     use super::*;
     use crate::compiler::analysis::value_range_analysis::{Interval, Width};
+    use mavros_artifacts::FieldConfig;
 
     fn u_range(bits: usize, lo: i64, hi: i64) -> ValueRange {
         ValueRange::from_unsigned(Width::Bits(bits), Interval::closed(lo, hi))
@@ -536,7 +537,7 @@ mod tests {
     ) {
         use crate::compiler::ssa::hlssa::{HLSSA, builder::HLSSABuilder};
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {

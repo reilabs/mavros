@@ -12,8 +12,8 @@ use crate::{
                     plan_product,
                 },
                 test_utils::{
-                    bn254, emitted, fields, guard_every_instruction, limbed_widths,
-                    operation_with_in, run_pass,
+                    bn254, emitted, fields, guard_every_instruction, limbed_widths, operation_with,
+                    run_pass,
                 },
             },
         },
@@ -343,16 +343,11 @@ fn bn254_holds_a_product_at_every_width() {
 /// `main(lhs: WitnessOf<int(bits)>, rhs: rhs_type) -> WitnessOf<int(bits)> { lhs * rhs }` over
 /// `field`.
 fn product_with(field: FieldConfig, bits: usize, rhs_type: Type) -> HLSSA {
-    operation_with_in(field, BinaryArithOpKind::UMul, bits, rhs_type)
+    operation_with(field, BinaryArithOpKind::UMul, bits, rhs_type)
 }
 
-/// `main(lhs, rhs: WitnessOf<int(bits)>) -> WitnessOf<int(bits)> { lhs * rhs }`.
-fn product(bits: usize) -> HLSSA {
-    product_in(bn254(), bits)
-}
-
-/// [`product`] over `field`.
-fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
+/// `main(lhs, rhs: WitnessOf<int(bits)>) -> WitnessOf<int(bits)> { lhs * rhs }` over `field`.
+fn product(field: FieldConfig, bits: usize) -> HLSSA {
     product_with(field, bits, Type::witness_of(Type::int(bits)))
 }
 
@@ -477,7 +472,7 @@ fn an_evaluated_product_is_pinned_at_distinct_points() {
         let id = field.id();
         let bits = limbed_widths(field)[1];
         let k = limb_widths(bits, witness_limb_bits(field)).len();
-        let mut ssa = product_in(field, bits);
+        let mut ssa = product(field, bits);
         run_pass(&mut ssa);
         let ops = emitted(&ssa);
 
@@ -576,7 +571,7 @@ fn a_guarded_product_is_checked_only_under_its_guard() {
     for field in fields() {
         let id = field.id();
         let bits = limbed_widths(field)[1];
-        let mut ssa = product_in(field, bits);
+        let mut ssa = product(field, bits);
         let condition = guard_every_instruction(&mut ssa);
         run_pass(&mut ssa);
         let ops = emitted(&ssa);
@@ -651,7 +646,7 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
     let widest = widest_injective_int_bits(field) / 2;
     assert!(!single_cell_product_fits(field, widest + 1));
 
-    let mut ssa = product(widest + 1);
+    let mut ssa = product(bn254(), widest + 1);
     let main = ssa.get_unique_entrypoint_id();
     let operands: Vec<ValueId> = ssa
         .get_function(main)
@@ -676,7 +671,7 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
     assert_eq!(tied, 2 + 3, "two decompositions and three evaluations");
 
     for bits in [widest, 2 * HOST_LIMB_BITS] {
-        let mut ssa = product(bits);
+        let mut ssa = product(bn254(), bits);
         let before = format!("{:?}", emitted(&ssa));
         run_pass(&mut ssa);
         assert_eq!(format!("{:?}", emitted(&ssa)), before, "int{bits}");
@@ -689,7 +684,7 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
 #[test]
 fn a_constant_factor_drops_the_limbs_it_does_not_reach() {
     let bits = 320usize;
-    let mut ssa = product(bits);
+    let mut ssa = product(bn254(), bits);
     let main = ssa.get_unique_entrypoint_id();
     let five = ssa.add_const(Constant::Int(IntBits::from_u128(bits, 5)));
     {

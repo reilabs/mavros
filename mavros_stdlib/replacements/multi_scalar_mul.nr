@@ -1,7 +1,11 @@
 // Pure-Noir replacement for the `multi_scalar_mul` foreign function.
-// FIELD-ASSUMPTION: L5-embedded-curve
 //
-// The embedded curve for BN254 is Grumpkin, with equation y^2 = x^3 - 17.
+// FIELD-ASSUMPTION: this is BN254's embedded curve, Grumpkin, with equation y^2 = x^3 - 17. The
+// curve equation, the doubling specialized to a = 0, the scalar validation against Grumpkin's
+// scalar modulus, and the omitted subgroup check (cofactor 1) all belong to Grumpkin. Another field
+// needs an embedded curve chosen for it: over another prime, `y^2 = x^3 - 17` is a different curve,
+// whose group order, scalar modulus and cofactor these constants do not describe.
+//
 // Scalars are represented by two 128-bit little-endian limbs. The implementation
 // uses a binary Straus MSM in Jacobian coordinates: one doubling per scalar bit,
 // followed by one conditional mixed addition per input point. Keeping the
@@ -52,7 +56,7 @@ fn double(point: JacobianPoint) -> JacobianPoint {
     JacobianPoint { x, y, z }
 }
 
-// Complete Jacobian addition, specialised to an `rhs` that came straight from
+// Complete Jacobian addition, specialized to an `rhs` that came straight from
 // `from_affine` and therefore has z of either 0 (infinity) or 1. That lets
 // rhs_z2 collapse to rhs.z (z^2 == z) and lhs_s to lhs.y * rhs.z (z * z^2 == z),
 // saving three multiplications per call over the general formula. The infinity

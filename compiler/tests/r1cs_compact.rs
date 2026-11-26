@@ -1,4 +1,4 @@
-use mavros_artifacts::{Field, FieldConfig, Goldilocks, MavrosField};
+use mavros_artifacts::{Bn254, FieldConfig, Goldilocks, MavrosField};
 use mavros_compiler::{
     api,
     compiler::{
@@ -21,7 +21,7 @@ fn protected_columns_survive_compaction() {
     ] {
         let dir = common::noir_project(source);
         let (driver, r1cs) =
-            api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+            api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
         let stats = r1cs_compact::analyze(&r1cs, driver.protected_r1cs_cols());
         assert_eq!(stats.removable_cols, removable, "{source}: {stats:?}");
         assert_eq!(stats.removable_rows, removable, "{source}: {stats:?}");
@@ -102,6 +102,6 @@ fn protected_columns_of_hand_built_entry_points_survive_compaction() {
             );
         }
     }
-    check::<Field>();
+    check::<Bn254>();
     check::<Goldilocks>();
 }

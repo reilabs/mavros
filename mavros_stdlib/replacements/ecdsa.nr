@@ -17,9 +17,11 @@ where
 {
     let w = unsafe { s.__invmod() };
     assert(s * w == Fr::one());
-    // `ScalarField::from_bignum` consumes 5 slices from the 16-bit high limb of a 256-bit value,
-    // then 30 slices for every remaining 120-bit limb. The curve parameters must correspondingly
-    // satisfy offset_generator_final = offset_generator * 2^(4 * (NScalarSlices - 1)).
+    // FIELD-ASSUMPTION: `ScalarField::from_bignum` consumes 5 slices from the 16-bit high limb of
+    // a 256-bit value, then 30 slices for every remaining 120-bit limb: `bignum`'s layout, sized
+    // for BN254's headroom. A new limb layout must update the reconstruction and this slice count
+    // together, and the curve parameters must still satisfy
+    // offset_generator_final = offset_generator * 2^(4 * (NScalarSlices - 1)).
     let u_1: ScalarField<5 + 30 * (N - 1)> =
         ScalarField::from_bignum(message_digest * w);
     let u_2: ScalarField<5 + 30 * (N - 1)> =

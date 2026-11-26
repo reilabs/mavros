@@ -1,7 +1,7 @@
 mod common;
 
 use ark_ff::{AdditiveGroup, UniformRand};
-use mavros_artifacts::{Field, FieldConfig, R1CS};
+use mavros_artifacts::{Bn254, FieldConfig, R1CS};
 use mavros_compiler::{
     api,
     compiler::codegen::{CodeGenOptions, llssa_to_llvm::WasmCompileOpts},
@@ -133,7 +133,7 @@ fn goldilocks_verifier_matches_materialized_matrices() {
     };
     use mavros_int_semantics::IntBits;
 
-    let mut ssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::goldilocks(), "main".to_string());
     let entry = ssa.get_unique_entrypoint_id();
     HLSSABuilder::new(&mut ssa).modify_function(entry, |b| {
         let entry = b.function.get_entry_id();
@@ -210,7 +210,7 @@ fn check_at(
     if let Some(toml) = prover_toml {
         std::fs::write(project.path().join("Prover.toml"), toml).unwrap();
     }
-    let (mut driver, r1cs) = api::compile_to_r1cs_with::<Field>(
+    let (mut driver, r1cs) = api::compile_to_r1cs_with::<Bn254>(
         project.path().to_path_buf(),
         api::R1csOptions {
             logup_soundness,
@@ -251,19 +251,19 @@ fn check_at(
     );
     let mut rng = StdRng::seed_from_u64(411);
     for case in 0..6 {
-        let mut r: Vec<Field> = (0..r1cs.constraints.len())
-            .map(|_| Field::rand(&mut rng))
+        let mut r: Vec<Bn254> = (0..r1cs.constraints.len())
+            .map(|_| Bn254::rand(&mut rng))
             .collect();
-        let mut w: Vec<Field> = (0..r1cs.witness_layout.size())
-            .map(|_| Field::rand(&mut rng))
+        let mut w: Vec<Bn254> = (0..r1cs.witness_layout.size())
+            .map(|_| Bn254::rand(&mut rng))
             .collect();
         match case {
-            0 => r.fill(Field::ZERO),
-            1 => w.fill(Field::ZERO),
+            0 => r.fill(Bn254::ZERO),
+            1 => w.fill(Bn254::ZERO),
             2 => {
                 // Constants must multiply w[0], even when it is not one.
-                w.fill(Field::ZERO);
-                w[0] = Field::from(7u64);
+                w.fill(Bn254::ZERO);
+                w[0] = Bn254::from(7u64);
             }
             _ => {}
         }
@@ -379,7 +379,7 @@ fn repeated_lookup_arguments() {
 fn check_wasm_at(source: &str, logup_soundness: u32, prover_toml: &str) -> usize {
     let project = common::noir_project(source);
     std::fs::write(project.path().join("Prover.toml"), prover_toml).unwrap();
-    let (mut driver, r1cs) = api::compile_to_r1cs_with::<Field>(
+    let (mut driver, r1cs) = api::compile_to_r1cs_with::<Bn254>(
         project.path().to_path_buf(),
         api::R1csOptions {
             logup_soundness,
@@ -419,8 +419,8 @@ fn check_wasm_at(source: &str, logup_soundness: u32, prover_toml: &str) -> usize
 
     let mut rng = StdRng::seed_from_u64(437);
     for _ in 0..3 {
-        let coeffs: Vec<Field> = (0..r1cs.constraints.len())
-            .map(|_| Field::rand(&mut rng))
+        let coeffs: Vec<Bn254> = (0..r1cs.constraints.len())
+            .map(|_| Bn254::rand(&mut rng))
             .collect();
         let ad = wasm_host::run_ad_loaded(&module, &r1cs, &coeffs).unwrap();
         assert!(api::check_ad(
@@ -448,11 +448,11 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
     let project =
         common::noir_project("fn main(x: u8, i: u32) { let a = [x, 2, 3]; assert(a[i] == x); }");
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(project.path().to_path_buf(), false).unwrap();
     let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let other = common::noir_project("fn main(x: u8) { assert(x == 1); }");
-    let (_, other_r1cs) = api::compile_to_r1cs::<Field>(other.path().to_path_buf(), false).unwrap();
+    let (_, other_r1cs) = api::compile_to_r1cs::<Bn254>(other.path().to_path_buf(), false).unwrap();
     let mut shifted_witness = r1cs.witness_layout;
     shifted_witness.algebraic_size -= 1;
     shifted_witness.multiplicities_size += 1;
@@ -468,8 +468,8 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
         (repeated, r1cs.constraints_layout),
     ] {
         // The vectors fit the supplied layouts, including mismatches with unchanged total lengths.
-        let r = vec![Field::from(3u64); cl.size()];
-        let w = vec![Field::from(5u64); wl.size()];
+        let r = vec![Bn254::from(3u64); cl.size()];
+        let w = vec![Bn254::from(5u64); wl.size()];
         let error = api::run_verifier_from_binary(&verifier, &r, &w, wl, cl, None)
             .err()
             .unwrap();
@@ -485,8 +485,8 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
             Some("constraint layouts do not match bytecode")
         );
     }
-    let r = vec![Field::from(3u64); r1cs.constraints_layout.size()];
-    let w = vec![Field::from(5u64); r1cs.witness_layout.size()];
+    let r = vec![Bn254::from(3u64); r1cs.constraints_layout.size()];
+    let w = vec![Bn254::from(5u64); r1cs.witness_layout.size()];
     let result = api::run_verifier_from_binary(
         &verifier,
         &r,
@@ -507,12 +507,12 @@ fn constraint_layouts_must_match_the_compiled_artifact() {
 fn vector_lengths_are_checked_before_execution() {
     let project = common::noir_project("fn main(x: u8) { assert(x * x == 9); }");
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(project.path().to_path_buf(), false).unwrap();
     let binary = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
-    let r = vec![Field::from(1u64); r1cs.constraints.len()];
-    let w = vec![Field::from(2u64); r1cs.witness_layout.size()];
+    let r = vec![Bn254::from(1u64); r1cs.constraints.len()];
+    let w = vec![Bn254::from(2u64); r1cs.witness_layout.size()];
     for len in [0, r.len() - 1, r.len() + 1] {
-        let invalid_r = vec![Field::ZERO; len];
+        let invalid_r = vec![Bn254::ZERO; len];
         let err = api::run_verifier_from_binary(
             &binary,
             &invalid_r,
@@ -526,7 +526,7 @@ fn vector_lengths_are_checked_before_execution() {
         assert!(err.message().unwrap().contains("coefficient length"));
     }
     for len in [0, w.len() - 1, w.len() + 1] {
-        let invalid_w = vec![Field::ZERO; len];
+        let invalid_w = vec![Bn254::ZERO; len];
         let err = api::run_verifier_from_binary(
             &binary,
             &r,
@@ -545,9 +545,9 @@ fn vector_lengths_are_checked_before_execution() {
 fn cli_verifies_without_prover_inputs_and_prints_json() {
     let project =
         common::noir_project("fn main(x: u8, y: pub u16) { assert(x as u16 * x as u16 == y); }");
-    let (_, r1cs) = api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
-    let r = vec![Field::from(3u64); r1cs.constraints.len()];
-    let w = vec![Field::from(7u64); r1cs.witness_layout.size()];
+    let (_, r1cs) = api::compile_to_r1cs::<Bn254>(project.path().to_path_buf(), false).unwrap();
+    let r = vec![Bn254::from(3u64); r1cs.constraints.len()];
+    let w = vec![Bn254::from(7u64); r1cs.witness_layout.size()];
     for (name, vector) in [("r.json", &r), ("w.json", &w)] {
         std::fs::write(
             project.path().join(name),
@@ -618,7 +618,7 @@ fn cli_requires_one_workspace_binary_and_honors_member_selection() {
         assert!(!workspace.path().join(member).join("mavros_debug").exists());
     }
 
-    let (_, r1cs) = api::compile_to_r1cs::<Field>(workspace.path().join("a"), false).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs::<Bn254>(workspace.path().join("a"), false).unwrap();
     for (file, len) in [
         ("r.json", r1cs.constraints.len()),
         ("w.json", r1cs.witness_layout.size()),
@@ -675,7 +675,7 @@ fn witness_slices_across_calls_and_nested_arrays() {
 fn prover_artifacts_are_rejected_by_the_verifier() {
     use mavros_vm::bytecode::{Function, OpCode, Program};
     let project = common::noir_project("fn main() {}");
-    let (_, r1cs) = api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs::<Bn254>(project.path().to_path_buf(), false).unwrap();
     let binary = Program {
         field: mavros_artifacts::FieldId::Bn254,
         constraint_layouts: None,
@@ -693,8 +693,8 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
         constant_pool: vec![],
     }
     .to_binary();
-    let r = vec![Field::ZERO; r1cs.constraints_layout.size()];
-    let w = vec![Field::ZERO; r1cs.witness_layout.size()];
+    let r = vec![Bn254::ZERO; r1cs.constraints_layout.size()];
+    let w = vec![Bn254::ZERO; r1cs.witness_layout.size()];
     let error = api::run_verifier_from_binary(
         &binary,
         &r,
@@ -712,10 +712,10 @@ fn prover_artifacts_are_rejected_by_the_verifier() {
 fn verifier_artifact_cannot_run_as_a_prover() {
     let project = common::noir_project("fn main(x: u8) { assert(x * x == 9); }");
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(project.path().to_path_buf(), false).unwrap();
     let mut binary =
         api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
-    let r = vec![Field::ZERO; r1cs.constraints_layout.size()];
+    let r = vec![Bn254::ZERO; r1cs.constraints_layout.size()];
     let error = api::run_ad_from_binary(&mut binary, &r1cs, &r, None)
         .err()
         .unwrap();
@@ -732,7 +732,7 @@ fn a_verifier_binary_is_not_a_prover_artifact() {
     use mavros_compiler::driver::Error;
     let project = common::noir_project("fn main(x: u8) { assert(x * x == 9); }");
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(project.path().to_path_buf(), false).unwrap();
     let verifier = api::compile_verifier_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     let error = driver.artifact(r1cs, verifier).err().unwrap();
     assert!(
@@ -781,7 +781,7 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
     )
     .unwrap();
     assert!(artifact.get("constraints").is_none());
-    let program: mavros_artifacts::Artifact =
+    let program: mavros_artifacts::Artifact<Bn254> =
         mavros_artifacts::Artifact::from_bytes(&original_program).unwrap();
     assert_eq!(artifact["circuit_digest"], program.circuit_digest_hex());
     let binary: Vec<u64> = serde_json::from_value(artifact["binary"].clone()).unwrap();
@@ -800,11 +800,11 @@ fn cli_exports_verifier_separately_without_changing_prover_binary() {
             .all(|f| f.name.starts_with("verifier_"))
     );
     assert_forward_bytecode(&binary);
-    let r = vec![Field::from(3u64); cl.size()];
-    let w = vec![Field::from(7u64); wl.size()];
+    let r = vec![Bn254::from(3u64); cl.size()];
+    let w = vec![Bn254::from(7u64); wl.size()];
     let result =
         mavros_vm::interpreter::run_verifier(&binary, &r, &w, wl, cl, Some(debug)).unwrap();
-    let (_, r1cs) = api::compile_to_r1cs::<Field>(project.path().to_path_buf(), false).unwrap();
+    let (_, r1cs) = api::compile_to_r1cs::<Bn254>(project.path().to_path_buf(), false).unwrap();
     assert_eq!(
         [result.r_aw, result.r_bw, result.r_cw],
         reference(&r1cs, &r, &w)

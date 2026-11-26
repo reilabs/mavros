@@ -1,5 +1,7 @@
 // Pure-Noir replacement for the `embedded_curve_add` foreign function.
-// FIELD-ASSUMPTION: L5-embedded-curve
+//
+// FIELD-ASSUMPTION: the addition and the validity check are `multi_scalar_mul`'s Grumpkin
+// arithmetic, so they hold only for BN254's embedded curve.
 //
 // The complete Jacobian addition used by the MSM replacement handles distinct
 // points, doubling, inverses, and either input being the point at infinity.

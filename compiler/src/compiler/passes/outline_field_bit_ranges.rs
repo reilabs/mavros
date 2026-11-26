@@ -123,7 +123,7 @@ mod tests {
 
     /// `main(x: WitnessOf<Field>)` returning `bit_range(x, offset, width)` for each window.
     fn windows_of_a_witness(windows: &[(usize, usize)]) -> HLSSA {
-        let mut ssa = HLSSA::with_main_in(FieldConfig::bn254(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             for _ in windows {
@@ -184,7 +184,7 @@ mod tests {
     /// the window's operand and result.
     #[test]
     fn windows_across_functions_and_guards_share_one_helper() {
-        let mut ssa = HLSSA::with_main_in(FieldConfig::bn254(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (guarded, x) = (ssa.fresh_value(), ssa.fresh_value());
         let mut sb = HLSSABuilder::new(&mut ssa);
@@ -247,7 +247,7 @@ mod tests {
     /// share.
     #[test]
     fn only_windows_of_a_witnessed_element_are_outlined() {
-        let mut ssa = HLSSA::with_main_in(FieldConfig::bn254(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             for ty in [Type::field(), Type::field()] {

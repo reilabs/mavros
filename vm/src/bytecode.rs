@@ -5,10 +5,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use std::{any::TypeId, collections::BTreeMap, fmt::Display, ptr};
 
-use mavros_artifacts::FieldId;
+use mavros_artifacts::{Bn254, FieldId, Goldilocks};
 
 use crate::{
-    ConstraintsLayout, Field, FlamegraphProfile, FlamegraphStackId, LogupStrides, TableKind,
+    ConstraintsLayout, FlamegraphProfile, FlamegraphStackId, LogupStrides, TableKind,
     WitnessLayout,
     array::{BoxedLayout, BoxedValue, DataType},
     int_limbs,
@@ -1631,7 +1631,7 @@ unsafe fn ad_kv_lookup_emit<F: mavros_artifacts::MavrosField>(
 ///
 ///   The spread opcodes are the exception: their `bits` is the number of bits read, which can be
 ///   fewer than the container holds, and the operand's width is a separate immediate or the cell.
-#[interpreter(fields(bn254 = Field, goldilocks = mavros_artifacts::Goldilocks))]
+#[interpreter(fields(bn254 = Bn254, goldilocks = Goldilocks))]
 mod def {
     #[raw_opcode]
     fn jmp(pc: *const u64, frame: Frame, vm: &mut VM, target: JumpTarget) -> (*const u64, Frame) {
@@ -4043,7 +4043,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(20, &mut vm);
 
@@ -4164,7 +4164,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(FRAME as u64, &mut vm);
         for cell in 0..FRAME {
@@ -4252,7 +4252,7 @@ mod tests {
         let (mut binary, debug_info) = program.to_binary_and_debug_info();
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
         let entry = header.entry_points[0];
@@ -4300,7 +4300,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
         // A pushed frame is `alloc`ated and not zeroed, so every cell an operand covers is written.
@@ -4463,7 +4463,7 @@ mod tests {
                     let compare_at = |i: usize| arith_at(arith.len()) + i;
                     let field_at = compare_at(compare.len());
                     let back_at =
-                        field_at + <Field as mavros_artifacts::MavrosField>::STORAGE_CELLS;
+                        field_at + <Bn254 as mavros_artifacts::MavrosField>::STORAGE_CELLS;
                     let frame_size = back_at + cells;
                     let at = FramePosition;
 
@@ -4512,7 +4512,7 @@ mod tests {
                     let header = parse_program_header(&binary);
                     crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-                    let mut vm = empty_witgen_vm::<Field>();
+                    let mut vm = empty_witgen_vm::<Bn254>();
                     vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
                     let frame = Frame::base_frame(frame_size as u64, &mut vm);
                     for cell in 0..frame_size {
@@ -4598,7 +4598,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
 
@@ -4662,7 +4662,7 @@ mod tests {
         let header = parse_program_header(&binary);
         crate::interpreter::prepare_dispatch(&mut binary, header.code_start);
 
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
         let frame = Frame::base_frame(12, &mut vm);
         let entry = header.entry_points[0];
@@ -4696,7 +4696,7 @@ mod tests {
                     len: 2,
                 },
             ] {
-                let mut vm = empty_witgen_vm::<Field>();
+                let mut vm = empty_witgen_vm::<Bn254>();
                 let frame = Frame::base_frame(16, &mut vm);
                 let array = BoxedValue::alloc(BoxedLayout::array(8, false), &mut vm);
                 let initial = [10, 11, 12, 13, 14, 15, 16, 17];
@@ -4754,7 +4754,7 @@ mod tests {
         let frame = Frame {
             data: ptr::null_mut(),
         };
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         // The invariant must be checked before touching any of these null pointers.
         for operation in ["array_get", "array_set", "blob_get", "slice_len"] {
             let panic =
@@ -4925,9 +4925,8 @@ mod tests {
         ] {
             // Separate tape regions keep every forward opcode's writes in allocated storage, and
             // each field's copies run on tapes of that field.
-            let mut bn254_tapes = vec![Field::ZERO; 8 * 16];
-            let mut test_tapes =
-                vec![<mavros_artifacts::Goldilocks as mavros_artifacts::MavrosField>::ZERO; 8 * 16];
+            let mut bn254_tapes = vec![Bn254::ZERO; 8 * 16];
+            let mut test_tapes = vec![Goldilocks::ZERO; 8 * 16];
             let mut vm = if opcode.to_string().starts_with("goldilocks_") {
                 witgen_vm_on(&mut test_tapes)
             } else {
@@ -5197,7 +5196,6 @@ mod tests {
     /// afterwards, so a copy that wrote bn254's width, or wrote an operand, fails.
     #[test]
     fn goldilocks_opcodes_run_at_one_cell_per_element() {
-        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
         const SENTINEL: u64 = 0xa5a5_a5a5_a5a5_a5a5;
@@ -5341,7 +5339,7 @@ mod tests {
     fn the_field_cast_opcodes_agree_with_the_model_on_both_fields() {
         type Make = fn(FramePosition, FramePosition) -> OpCode;
         type MakeN = fn(u64, FramePosition, FramePosition) -> OpCode;
-        check_field_cast_opcodes::<Field>(
+        check_field_cast_opcodes::<Bn254>(
             |res, a| OpCode::Bn254CastIntToField { res, a },
             |res, a| OpCode::Bn254CastInt128ToField { res, a },
             |bits, res, a| OpCode::Bn254CastIntnToField { bits, res, a },
@@ -5349,7 +5347,7 @@ mod tests {
             |res, a| OpCode::Bn254CastFieldToInt128 { res, a },
             |bits, res, a| OpCode::Bn254CastFieldToIntn { bits, res, a },
         );
-        check_field_cast_opcodes::<mavros_artifacts::Goldilocks>(
+        check_field_cast_opcodes::<Goldilocks>(
             |res, a| OpCode::GoldilocksCastIntToField { res, a },
             |res, a| OpCode::GoldilocksCastInt128ToField { res, a },
             |bits, res, a| OpCode::GoldilocksCastIntnToField { bits, res, a },
@@ -5472,7 +5470,6 @@ mod tests {
     /// `R^-1 mod p`: a copy reading the storage cell gets each of those cases wrong.
     #[test]
     fn goldilocks_assertions_and_decompositions_read_the_integer() {
-        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
         let cell = |value: u64| Goldilocks::from(value).storage_cell0();
@@ -5580,7 +5577,6 @@ mod tests {
     /// stored as `2^33 - 2`), and the element stored as the cell `1` denotes no row.
     #[test]
     fn goldilocks_tape_opcodes_fill_one_cell_slots() {
-        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
         let cell = |value: u64| Goldilocks::from(value).storage_cell0();
@@ -5871,8 +5867,8 @@ mod tests {
     /// for Goldilocks, so a write at bn254's stride lands on another witness's slot.
     #[test]
     fn goldilocks_ad_opcodes_agree_with_bn254() {
-        let (bn254, coeff) = run_ad_program::<Field>(FieldOpCode::bn254);
-        let goldilocks = run_ad_program::<mavros_artifacts::Goldilocks>(FieldOpCode::goldilocks);
+        let (bn254, coeff) = run_ad_program::<Bn254>(FieldOpCode::bn254);
+        let goldilocks = run_ad_program::<Goldilocks>(FieldOpCode::goldilocks);
         assert_eq!(coeff, -4);
         // Witness 1 reaches the tapes only through the multiply by -3, under the sum, under the
         // sum; witness 2 only through the outer sum.
@@ -5888,7 +5884,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "ran on a VM built for another field")]
     fn a_field_opcode_panics_on_a_vm_built_for_another_field() {
-        let mut vm = empty_witgen_vm::<mavros_artifacts::Goldilocks>();
+        let mut vm = empty_witgen_vm::<Goldilocks>();
         let frame = Frame::base_frame(16, &mut vm);
         let opcode = FieldOpCode::AddField {
             res: FramePosition(10),
@@ -5985,7 +5981,7 @@ mod tests {
         let middle_opcode = debug_info.functions[1].locations[0].code_offset;
         let helper_opcode = debug_info.functions[2].locations[0].code_offset;
 
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.set_debug_context(binary.as_ptr(), binary.len(), debug_info);
 
         let caller = Frame::base_frame(3, &mut vm);
@@ -6029,7 +6025,7 @@ mod tests {
 
     #[test]
     fn instruction_profile_uses_unknown_without_debug_context() {
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         vm.enable_instruction_profile();
         vm.record_instruction(
             ptr::null(),
@@ -6078,7 +6074,7 @@ mod tests {
             }
         }
 
-        let mut vm = empty_witgen_vm::<Field>();
+        let mut vm = empty_witgen_vm::<Bn254>();
         let frame = Frame::base_frame(8, &mut vm);
         let array = BoxedValue::alloc(BoxedLayout::array(3, false), &mut vm);
         unsafe { *frame.data.add(3) = array.0 as u64 };
@@ -6301,19 +6297,19 @@ mod tests {
     /// raw pointer arithmetic, which no bounds check stands behind.
     #[test]
     fn table_row_index_accepts_only_keys_inside_the_table() {
-        assert_eq!(table_row_index(Field::from(0u64), 8), Some(0));
-        assert_eq!(table_row_index(Field::from(7u64), 8), Some(7));
-        assert_eq!(table_row_index(Field::from(8u64), 8), None);
-        assert_eq!(table_row_index(Field::from(9u64), 8), None);
+        assert_eq!(table_row_index(Bn254::from(0u64), 8), Some(0));
+        assert_eq!(table_row_index(Bn254::from(7u64), 8), Some(7));
+        assert_eq!(table_row_index(Bn254::from(8u64), 8), None);
+        assert_eq!(table_row_index(Bn254::from(9u64), 8), None);
         // A degenerate table has no rows to land on, so nothing is a member of it.
-        assert_eq!(table_row_index(Field::from(0u64), 0), None);
+        assert_eq!(table_row_index(Bn254::from(0u64), 0), None);
     }
 
     /// The row is addressed by the key's low limb, so a key with high limbs set must be rejected
     /// even when its low limb names a row: otherwise `2^64 + 3` silently matches row 3.
     #[test]
     fn table_row_index_rejects_a_key_whose_high_limbs_are_set() {
-        let low_limb_in_range = Field::from((1u128 << 64) + 3);
+        let low_limb_in_range = Bn254::from((1u128 << 64) + 3);
         assert_eq!(
             ark_ff::PrimeField::into_bigint(low_limb_in_range).0[0],
             3,
@@ -6323,7 +6319,7 @@ mod tests {
 
         // The same shape at the top of the field: `-1` truncates to an arbitrary `u64`, which is
         // the case that would land outside the multiplicities buffer entirely if it were taken.
-        assert_eq!(table_row_index(-Field::from(1u64), 8), None);
+        assert_eq!(table_row_index(-Bn254::from(1u64), 8), None);
     }
 
     #[test]
@@ -6339,14 +6335,14 @@ mod tests {
 
     #[test]
     fn a_pow2_table_row_is_two_to_its_index() {
-        let rows: Vec<Field> = pow2_rows(128).collect();
+        let rows: Vec<Bn254> = pow2_rows(128).collect();
         assert_eq!(rows.len(), 128);
-        assert_eq!(rows[0], Field::from(1u64));
-        assert_eq!(rows[1], Field::from(2u64));
+        assert_eq!(rows[0], Bn254::from(1u64));
+        assert_eq!(rows[1], Bn254::from(2u64));
 
         // Every row expressible as a `u64`, pinned against the host shift.
         for n in 0..64 {
-            assert_eq!(rows[n], Field::from(1u64 << n), "row {n}");
+            assert_eq!(rows[n], Bn254::from(1u64 << n), "row {n}");
         }
 
         // Past a `u64`, which the widest table -- a 128-bit shift -- reaches. `pow2_rows` doubles
@@ -6355,7 +6351,7 @@ mod tests {
         // second algorithm agrees on, and `emit_pow2_ad_init_body` must produce the same one or the
         // backends disagree about the table's contents.
         for (n, row) in rows.iter().enumerate() {
-            let by_exponentiation = <Field as ark_ff::Field>::pow(&Field::from(2u64), [n as u64]);
+            let by_exponentiation = <Bn254 as ark_ff::Field>::pow(&Bn254::from(2u64), [n as u64]);
             assert_eq!(*row, by_exponentiation, "row {n}");
         }
 

@@ -117,6 +117,7 @@ impl Pass for AssertConstantValidation {
 
 #[cfg(test)]
 mod tests {
+    use mavros_artifacts::FieldConfig;
     use std::{cell::RefCell, rc::Rc};
 
     use super::AssertConstantValidation;
@@ -204,7 +205,7 @@ mod tests {
 
     #[test]
     fn accepts_constants_in_every_call_context_and_removes_markers() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let helper = add_asserting_helper(&mut ssa);
         let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let six = ssa.add_const(Constant::Field(ssa.field().constant(6u64)));
@@ -226,7 +227,7 @@ mod tests {
 
     #[test]
     fn rejects_when_any_call_context_contains_a_witness() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let helper = add_asserting_helper(&mut ssa);
         let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
@@ -242,7 +243,7 @@ mod tests {
     #[test]
     fn recursively_checks_aggregate_shapes() {
         for dynamic_element in [false, true] {
-            let mut ssa = HLSSA::with_main("main".to_string());
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
             let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
             let element = if dynamic_element {
                 witness(&mut ssa, five)
@@ -271,7 +272,7 @@ mod tests {
     fn accepts_static_sequence_length_with_witness_elements() {
         // Once witness-length slices are supported, this test must also cover a genuinely dynamic
         // slice length and require validation to reject it.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
         let array = ssa.fresh_value();
@@ -307,7 +308,7 @@ mod tests {
 
     #[test]
     fn rejects_a_direct_witness_and_preserves_markers_on_failure() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
@@ -326,7 +327,7 @@ mod tests {
 
     #[test]
     fn reports_every_failing_assertion() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let dynamic = witness(&mut ssa, five);
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
@@ -345,7 +346,7 @@ mod tests {
         expected = "ICE: Guard reached assert_constant validation before witness taint inference"
     )]
     fn rejects_a_guard_before_witness_taint_inference() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
         entry.push_instruction(
@@ -363,7 +364,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "has a constrained static call to uncovered function")]
     fn detects_missing_wti_coverage_for_a_constrained_callee() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.get_unique_entrypoint_mut()
             .get_entry_mut()
             .set_terminator(Terminator::Return(vec![]));

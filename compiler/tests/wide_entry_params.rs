@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+use mavros_artifacts::{Bn254, Goldilocks, InputValueOrdered, MavrosField};
 use mavros_compiler::{
     api,
     compiler::{
@@ -74,7 +74,7 @@ fn the_manifest_gives_a_wide_integer_one_column_per_limb() {
         (params, manifest.returns.unwrap().len)
     }
     // 64-bit limbs on bn254, which holds a `u128` in one element; 16-bit limbs on Goldilocks.
-    assert_eq!(widths::<Field>(), (vec![4, 2, 1], 5));
+    assert_eq!(widths::<Bn254>(), (vec![4, 2, 1], 5));
     assert_eq!(widths::<Goldilocks>(), (vec![16, 16, 1], 17));
 }
 
@@ -120,7 +120,7 @@ fn a_wide_return_is_not_taken_for_its_residue() {
             assert!(error.starts_with("declared return"), "{}: {error}", F::ID);
         }
     }
-    check::<Field>("u256");
+    check::<Bn254>("u256");
     check::<Goldilocks>("u64");
 }
 
@@ -164,7 +164,7 @@ fn a_limb_out_of_range_is_refused<F: MavrosField>() {
 
 #[test]
 fn a_limb_out_of_range_is_refused_on_bn254() {
-    a_limb_out_of_range_is_refused::<Field>();
+    a_limb_out_of_range_is_refused::<Bn254>();
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn a_looped_return_is_published_in_order_and_bound<F: MavrosField>() {
 
 #[test]
 fn a_looped_return_is_published_in_order_and_bound_on_bn254() {
-    a_looped_return_is_published_in_order_and_bound::<Field>();
+    a_looped_return_is_published_in_order_and_bound::<Bn254>();
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn a_constant_wide_return_is_bound<F: MavrosField>() {
 
 #[test]
 fn a_constant_wide_return_is_bound_on_bn254() {
-    a_constant_wide_return_is_bound::<Field>();
+    a_constant_wide_return_is_bound::<Bn254>();
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn a_constant_wide_return_is_bound_on_goldilocks() {
 #[test]
 fn a_long_returned_array_is_bound_in_a_loop() {
     let words = |len: usize| {
-        common::compile::<Field>(&format!(
+        common::compile::<Bn254>(&format!(
             "fn main(x: u8) -> pub [u8; {len}] {{ [x; {len}] }}"
         ))
         .binary

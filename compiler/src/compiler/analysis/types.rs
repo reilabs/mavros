@@ -1033,7 +1033,7 @@ mod tests {
 
     /// Type an `SExt` whose operand is an eight-bit constant but which declares `from_bits`.
     fn sext_declaring(from_bits: usize) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1067,7 +1067,7 @@ mod tests {
         bits: usize,
         op: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId) -> Vec<ValueId>,
     ) -> Vec<Type> {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let results = HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             let entry = b.function.get_entry_id();
@@ -1162,7 +1162,7 @@ mod tests {
 
     /// `main(x: int8) { fn_ptr(x) }` calling `callee(value: int8) -> returns` indirectly.
     fn program_calling_indirectly(returns: Vec<Type>) -> (HLSSA, Vec<ValueId>) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut builder = HLSSABuilder::new(&mut ssa);
 
@@ -1217,7 +1217,7 @@ mod tests {
     /// declared type is the answer.
     #[test]
     fn a_callable_parameters_declared_type_types_the_call_through_it() {
-        let mut ssa = HLSSA::with_main("apply".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "apply".to_string());
         let apply = ssa.get_unique_entrypoint_id();
         let mut builder = HLSSABuilder::new(&mut ssa);
 

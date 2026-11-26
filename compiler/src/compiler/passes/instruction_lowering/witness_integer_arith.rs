@@ -188,8 +188,7 @@ impl LowerWitnessIntegerArithOps {
     // packing below, `lo + cross·2^h` (~2^193 at the bn254 limb), which needs more than the limb
     // width certifies and so asks `two_limb_product_packing_fits`. A product one cell cannot hold
     // takes the schoolbook in `WideWitnessInts` first (`single_cell_product_fits`, asserted at
-    // entry). So the two refusals below are a backstop that cannot fire
-    // (docs/field-agnosticism.md, Layer 6).
+    // entry). So the two refusals below are a backstop that cannot fire.
     fn lower_unsigned_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -707,8 +706,7 @@ fn narrow_rangecheck_width(range: &Interval, default_bits: usize) -> usize {
 
 // Reads the real modulus, so it answers correctly on a small field. At 128 bits its FALSE case is
 // the two-limb packing in `lower_unsigned_mul`; at any other width the schoolbook in
-// `passes::wide_witness_ints` takes every product `single_cell_product_fits` refuses first. See
-// `L6-int-op-strategy` in docs/field-agnosticism.md.
+// `passes::wide_witness_ints` takes every product `single_cell_product_fits` refuses first.
 fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
     // ⊥ would report `hi - lo = -1 < p` and so license the single-field product path on no evidence
     // at all.

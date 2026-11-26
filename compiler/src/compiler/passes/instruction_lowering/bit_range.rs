@@ -613,7 +613,7 @@ fn cast_target_for_scalar_type(ty: &Type) -> CastTarget {
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+    use mavros_artifacts::{Bn254, Goldilocks, InputValueOrdered, MavrosField};
 
     use super::*;
     use crate::{
@@ -699,7 +699,7 @@ mod tests {
     /// `p - 1 - x`, makes the high distance `d` and the low one `t`.
     #[test]
     fn only_the_canonical_bytes_decompose_a_witnessed_element() {
-        check_only_the_canonical_bytes_decompose::<Field>(FieldConfig::bn254());
+        check_only_the_canonical_bytes_decompose::<Bn254>(FieldConfig::bn254());
         check_only_the_canonical_bytes_decompose::<Goldilocks>(FieldConfig::goldilocks());
     }
 
@@ -771,7 +771,7 @@ mod tests {
     /// value in range, which only the high gap refuses.
     #[test]
     fn a_split_byte_takes_only_its_honest_high_part() {
-        check_a_split_byte_takes_only_its_honest_high_part::<Field>(FieldConfig::bn254());
+        check_a_split_byte_takes_only_its_honest_high_part::<Bn254>(FieldConfig::bn254());
         check_a_split_byte_takes_only_its_honest_high_part::<Goldilocks>(FieldConfig::goldilocks());
     }
 
@@ -836,7 +836,7 @@ mod tests {
     /// it.
     #[test]
     fn every_byte_of_the_decomposition_is_held_to_a_byte() {
-        check_every_byte_is_held_to_a_byte::<Field>(FieldConfig::bn254());
+        check_every_byte_is_held_to_a_byte::<Bn254>(FieldConfig::bn254());
         check_every_byte_is_held_to_a_byte::<Goldilocks>(FieldConfig::goldilocks());
     }
 
@@ -974,7 +974,7 @@ mod tests {
         forgery: &Forgery,
     ) -> bool {
         let count = CanonicalBytes::of(field).bytes;
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());

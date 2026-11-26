@@ -161,7 +161,7 @@ mod tests {
         bytes: bool,
         count: usize,
     ) -> Vec<usize> {
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let (value, result) = (ssa.fresh_value(), ssa.fresh_value());
         let function = ssa.get_unique_entrypoint_mut();
         let entry = function.get_entry_mut();

@@ -1,5 +1,5 @@
 use mavros_artifacts::{
-    Field, FieldConfig, Goldilocks, InputValueOrdered, MavrosField, SealedR1CS,
+    Bn254, FieldConfig, Goldilocks, InputValueOrdered, MavrosField, SealedR1CS,
 };
 use mavros_compiler::{
     Project, abi_helpers, api,
@@ -40,19 +40,13 @@ pub fn le_bytes(value: &num_bigint::BigUint, len: usize) -> String {
     format!("[{}]", bytes.join(", "))
 }
 
-/// The frontend refuses `source` before Mavros lowering, with a located diagnostic that says
-/// `expected` in its message, one of its secondaries or one of its notes.
+/// The frontend refuses `source` over `field` before Mavros lowering, with a located diagnostic
+/// that says `expected` in its message, one of its secondaries or one of its notes.
 ///
 /// Matching the text is what makes a refusal test meaningful: a bare `is_err()` is satisfied by a
 /// typo in the program as readily as by the rule under test.
 #[allow(dead_code)]
-pub fn assert_frontend_refused(source: &str, expected: &str) {
-    assert_frontend_refused_on(FieldConfig::bn254(), source, expected);
-}
-
-/// [`assert_frontend_refused`] compiling for `field`.
-#[allow(dead_code)]
-pub fn assert_frontend_refused_on(field: FieldConfig, source: &str, expected: &str) {
+pub fn assert_frontend_refused(field: FieldConfig, source: &str, expected: &str) {
     let dir = noir_project(source);
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
     let Err(Error::NoirCompilerError {
@@ -95,7 +89,7 @@ pub fn hand_built_main(
     ret: Type,
     body: impl FnOnce(&mut HLBlockEmitter, &[ValueId]) -> ValueId,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
         b.function.add_return_type(ret);
@@ -232,6 +226,6 @@ pub fn check<F: MavrosField>(source: &str, inputs: &str) {
 /// [`check`] on bn254 and on Goldilocks.
 #[allow(dead_code)]
 pub fn check_both_fields(source: &str, inputs: &str) {
-    check::<Field>(source, inputs);
+    check::<Bn254>(source, inputs);
     check::<Goldilocks>(source, inputs);
 }

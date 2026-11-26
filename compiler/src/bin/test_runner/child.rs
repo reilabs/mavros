@@ -73,7 +73,7 @@ pub(crate) fn emit_artifact_hash(artifact: &str, bytes: &[u8]) {
 /// markers for the parent to parse. With `expect_failure` (execution_failure /
 /// execution_panic tests) the native AD pipeline is skipped: AD output only
 /// feeds proving, and a program whose witgen is expected to trap is never
-/// proven. The caller subsequently runs the BN254 WASM compile/runtime sanity checks.
+/// proven. The caller then runs the WASM compile and runtime checks, on every field.
 ///
 /// With `expected_error`, only a refusal at `COMPILED` that says the text is a `reject` there; any
 /// other refusal there is a `fail`, since the fixture is written to provoke that one.

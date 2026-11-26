@@ -2321,7 +2321,7 @@ mod tests {
     use super::*;
     use crate::compiler::analysis::value_range_analysis::field_modulus;
 
-    fn field_literal(value: noir_bigint::BigInt) -> Result<Constant, String> {
+    fn bn254_literal(value: noir_bigint::BigInt) -> Result<Constant, String> {
         ExpressionConverter::integer_constant(&value, &AstType::Field, FieldConfig::bn254())
     }
 
@@ -2334,11 +2334,11 @@ mod tests {
         );
 
         assert!(
-            field_literal(&modulus - 1).is_ok(),
+            bn254_literal(&modulus - 1).is_ok(),
             "the top element is a field element"
         );
         assert!(
-            field_literal(-(&modulus - 1u8)).is_ok(),
+            bn254_literal(-(&modulus - 1u8)).is_ok(),
             "its negation is one too"
         );
         for value in [
@@ -2348,7 +2348,7 @@ mod tests {
             noir_bigint::BigInt::from(1u8) << 254u32,
             noir_bigint::BigInt::from(1u8) << 300u32,
         ] {
-            let message = field_literal(value.clone()).expect_err("at or above the modulus");
+            let message = bn254_literal(value.clone()).expect_err("at or above the modulus");
             assert!(
                 message.contains("does not fit the field"),
                 "{value}: {message}"
@@ -2372,7 +2372,7 @@ mod tests {
                 field.two_pow(200) + field.constant(7u64),
             ),
         ] {
-            assert_eq!(field_literal(value).unwrap(), Constant::Field(expected));
+            assert_eq!(bn254_literal(value).unwrap(), Constant::Field(expected));
         }
     }
 

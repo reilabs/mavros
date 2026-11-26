@@ -185,6 +185,7 @@ impl TrivialPhiElimination {
 mod tests {
     use super::*;
     use crate::compiler::ssa::hlssa::{HLSSA, Type};
+    use mavros_artifacts::FieldConfig;
 
     fn field() -> Type {
         Type::field()
@@ -194,7 +195,7 @@ mod tests {
     /// parameter is collapsed, the differing one survives.
     #[test]
     fn collapses_agreeing_merge_parameter() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (cond, shared, then_val, else_val) =
             (ValueId(10), ValueId(11), ValueId(20), ValueId(21));
         let (m_shared, m_diff) = (ValueId(30), ValueId(31));
@@ -244,7 +245,7 @@ mod tests {
     /// and collapses to its pre-header value.
     #[test]
     fn collapses_loop_invariant_parameter() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (init, cond, param) = (ValueId(10), ValueId(11), ValueId(50));
 
         let f = ssa.get_unique_entrypoint_mut();
@@ -289,7 +290,7 @@ mod tests {
     /// A merge whose predecessors disagree on a parameter must keep it untouched.
     #[test]
     fn keeps_genuinely_distinct_parameter() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (cond, then_val, else_val, param) =
             (ValueId(10), ValueId(20), ValueId(21), ValueId(30));
 

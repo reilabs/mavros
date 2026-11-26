@@ -934,7 +934,7 @@ mod tests {
     /// Run `widen_u(from_bits -> to_bits)` on a fresh value; returns the result id, the input
     /// id, and the emitted instructions.
     fn widen(from_bits: usize, to_bits: usize) -> (ValueId, ValueId, Vec<LocatedOpCode>) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(fid);
         let v = ssa.fresh_value();
@@ -953,7 +953,7 @@ mod tests {
 
     /// Mint a constant through `build`, and return the pattern it interned.
     fn minted(build: impl FnOnce(&mut HLInstrBuilder<'_>) -> ValueId) -> IntBits {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(fid);
         let mut instrs = Vec::new();
@@ -977,7 +977,7 @@ mod tests {
         field: FieldConfig,
         build: impl FnOnce(&mut HLInstrBuilder<'_>) -> ValueId,
     ) -> crate::compiler::Field {
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let fid = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(fid);
         let mut instrs = Vec::new();
@@ -1085,7 +1085,7 @@ mod tests {
     /// Run `build_array_loop_with_acc` over `len` slots, storing the index at each one and counting
     /// the slots visited. Returns `(array, accumulator, saw_indices)`.
     fn array_loop_with_acc(len: usize) -> (ValueId, ValueId, Vec<ValueId>) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(fid);
         let entry = function.get_entry_id();
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn build_array_loop_with_acc_returns_the_initial_accumulator_at_zero_length() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(fid);
         let entry = function.get_entry_id();

@@ -4794,7 +4794,7 @@ mod tests {
             ("array_set", Some(SequenceTargetType::Array(2)), true),
             ("slice_set", Some(SequenceTargetType::Slice), true),
         ] {
-            let mut hlssa = HLSSA::with_main(name.to_string());
+            let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), name.to_string());
             let main = hlssa.get_unique_entrypoint_id();
             hlssa
                 .get_function_mut(main)
@@ -4900,7 +4900,7 @@ mod tests {
 
     /// The limbs a width reaches, and nothing above them.
     fn packing_dump(bits: usize, pack: bool) -> String {
-        let mut ssa = LLSSA::with_main("packing".to_string());
+        let mut ssa = LLSSA::with_main(FieldConfig::bn254(), "packing".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
 
         let mut sb = LLSSABuilder::new(&mut ssa);
@@ -4976,7 +4976,7 @@ mod tests {
     /// before touching the refcount word.
     #[test]
     fn guarded_rc_add_emits_immortal_check() {
-        let mut ssa = LLSSA::with_main("guard_test".to_string());
+        let mut ssa = LLSSA::with_main(FieldConfig::bn254(), "guard_test".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
 
         let rc_header = LLStruct::rc_header();
@@ -5020,7 +5020,7 @@ mod tests {
     fn felt_constant_lowers_to_struct_constant() {
         use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
 
-        let mut hlssa = HLSSA::with_main("felt_test".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), "felt_test".to_string());
         let main_id = hlssa.get_unique_entrypoint_id();
         let seven = hlssa.field().constant(7u64);
         let mut hb = HLSSABuilder::new(&mut hlssa);
@@ -5034,7 +5034,7 @@ mod tests {
         let constants = hlssa.const_snapshot();
         let function = hlssa.get_unique_entrypoint();
 
-        let mut llssa = LLSSA::with_main("felt_test".to_string());
+        let mut llssa = LLSSA::with_main(FieldConfig::bn254(), "felt_test".to_string());
         let mut ll_func = LLFunction::empty("felt_test".to_string());
         let mut val_map = HashMap::default();
         lower_constants_llssa(function, &constants, &mut ll_func, &mut llssa, &mut val_map);
@@ -5068,7 +5068,7 @@ mod tests {
             builder::{HLEmitter, HLSSABuilder},
         };
 
-        let mut hlssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "one_limb".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::goldilocks(), "one_limb".to_string());
         let main = hlssa.get_unique_entrypoint_id();
         let field = hlssa.field();
         hlssa
@@ -5166,7 +5166,7 @@ mod tests {
             builder::{HLEmitter, HLSSABuilder},
         };
 
-        let mut hlssa = HLSSA::with_main("decompose".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), "decompose".to_string());
         let main = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main)
@@ -5217,7 +5217,7 @@ mod tests {
     fn a_field_rangecheck_traps_exactly_at_its_limit_through_wasm() {
         use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
 
-        let mut hlssa = HLSSA::with_main("rangecheck".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), "rangecheck".to_string());
         let main = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main)
@@ -5248,7 +5248,7 @@ mod tests {
     fn a_one_limb_rangecheck_traps_exactly_at_its_limit_through_wasm() {
         use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
 
-        let mut hlssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "rangecheck".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::goldilocks(), "rangecheck".to_string());
         let main = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main)
@@ -5281,7 +5281,7 @@ mod tests {
             builder::{HLEmitter, HLSSABuilder},
         };
 
-        let mut hlssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "decompose".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::goldilocks(), "decompose".to_string());
         let main = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main)
@@ -5333,7 +5333,7 @@ mod tests {
             ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
         };
 
-        let mut hlssa = HLSSA::with_main("wide_rangecheck".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), "wide_rangecheck".to_string());
         let main = hlssa.get_unique_entrypoint_id();
         let one = hlssa.field().one();
         HLSSABuilder::new(&mut hlssa).modify_function(main, |fb| {
@@ -5359,7 +5359,7 @@ mod tests {
             ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
         };
 
-        let mut hlssa = HLSSA::with_main("width_mismatch_test".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), "width_mismatch_test".to_string());
         let main_id = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main_id)
@@ -5390,7 +5390,7 @@ mod tests {
             },
         };
 
-        let mut hlssa = HLSSA::with_main("blob_seq_test".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), "blob_seq_test".to_string());
         let main_id = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main_id)
@@ -5438,7 +5438,7 @@ mod tests {
             ssa::hlssa::builder::{HLEmitter, HLSSABuilder},
         };
 
-        let mut hlssa = HLSSA::with_main("to_bits_test".to_string());
+        let mut hlssa = HLSSA::with_main(FieldConfig::bn254(), "to_bits_test".to_string());
         let main_id = hlssa.get_unique_entrypoint_id();
         hlssa
             .get_function_mut(main_id)

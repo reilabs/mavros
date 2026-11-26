@@ -9,7 +9,7 @@ use clap::{
     Parser, Subcommand,
     builder::{PossibleValuesParser, TypedValueParser},
 };
-use mavros_artifacts::{Field as Bn254, FieldId, Goldilocks, MavrosField};
+use mavros_artifacts::{Bn254, FieldId, Goldilocks, MavrosField};
 use mavros_compiler::compiler::codegen::r1cs_compact;
 use mavros_compiler::{
     Project,
@@ -109,17 +109,6 @@ pub struct CompileSettings {
     pub include_debug_info: bool,
     pub absolute_paths: bool,
     pub field: FieldId,
-}
-
-impl Default for CompileSettings {
-    fn default() -> Self {
-        CompileSettings {
-            r1cs: R1csOptions::default(),
-            include_debug_info: false,
-            absolute_paths: false,
-            field: FieldId::Bn254,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -849,6 +838,16 @@ fn parse_path(path: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    /// The settings `mavros compile --field <field>` applies when no other flag is passed.
+    fn settings_over(field: FieldId) -> CompileSettings {
+        CompileSettings {
+            r1cs: R1csOptions::default(),
+            include_debug_info: false,
+            absolute_paths: false,
+            field,
+        }
+    }
+
     #[test]
     fn compile_output_collisions_are_rejected_before_writing() {
         let dir = tempfile::tempdir().unwrap();
@@ -871,7 +870,7 @@ mod tests {
                     Some(&verifier),
                     CompileSettings {
                         include_debug_info,
-                        ..CompileSettings::default()
+                        ..settings_over(FieldId::Bn254)
                     },
                 )
                 .unwrap_err();
@@ -1071,7 +1070,7 @@ mod tests {
                 None,
                 CompileSettings {
                     include_debug_info: true,
-                    ..CompileSettings::default()
+                    ..settings_over(FieldId::Bn254)
                 }
             )
             .is_err()
@@ -1084,7 +1083,7 @@ mod tests {
                 Some(&PathBuf::from("target/verifier.json")),
                 CompileSettings {
                     include_debug_info: true,
-                    ..CompileSettings::default()
+                    ..settings_over(FieldId::Bn254)
                 }
             )
             .unwrap(),
@@ -1124,7 +1123,7 @@ mod tests {
                     None,
                     CompileSettings {
                         include_debug_info: true,
-                        ..CompileSettings::default()
+                        ..settings_over(FieldId::Bn254)
                     }
                 )
                 .unwrap(),
@@ -1158,11 +1157,11 @@ mod tests {
         .unwrap();
         let output = root.join("target/program.mavros");
         assert_eq!(
-            run_compile(&root, &output, None, CompileSettings::default()).unwrap(),
+            run_compile(&root, &output, None, settings_over(FieldId::Bn254)).unwrap(),
             ExitCode::SUCCESS
         );
         let bytes = fs::read(&output).unwrap();
-        let artifact: Artifact = Artifact::from_bytes(&bytes).unwrap();
+        let artifact: Artifact<Bn254> = Artifact::from_bytes(&bytes).unwrap();
         let manifest = artifact.manifest();
         assert_eq!(manifest.entry_blob_field_count(), 7);
         let abi: noirc_abi::Abi = serde_json::from_slice(artifact.abi()).unwrap();
@@ -1207,7 +1206,7 @@ mod tests {
         // Compiling again yields the same bytes: the digest is a stable identity.
         let again = root.join("target/again.mavros");
         assert_eq!(
-            run_compile(&root, &again, None, CompileSettings::default()).unwrap(),
+            run_compile(&root, &again, None, settings_over(FieldId::Bn254)).unwrap(),
             ExitCode::SUCCESS
         );
         assert_eq!(fs::read(&again).unwrap(), bytes);
@@ -1252,7 +1251,7 @@ mod tests {
                 &dir.path().join("a"),
                 &output,
                 None,
-                CompileSettings::default()
+                settings_over(FieldId::Bn254)
             )
             .unwrap(),
             ExitCode::SUCCESS
@@ -1476,10 +1475,7 @@ mod tests {
                 &root,
                 &output,
                 Some(&verifier),
-                CompileSettings {
-                    field: FieldId::Goldilocks,
-                    ..CompileSettings::default()
-                }
+                settings_over(FieldId::Goldilocks)
             )
             .unwrap(),
             ExitCode::SUCCESS

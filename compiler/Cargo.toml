@@ -23,7 +23,6 @@ noirc_errors = { git = "https://github.com/worldfnd/noir.git", rev = "c0760ecf7b
 noirc_frontend = { git = "https://github.com/worldfnd/noir.git", rev = "c0760ecf7be2b9c0b84d37c7daa24b2b1e394f9e", package = "noirc_frontend" }
 
 # The rest of the dependencies
-ark-bn254.workspace = true
 ark-ff.workspace = true
 bimap = { version = "0.6" }
 bincode.workspace = true

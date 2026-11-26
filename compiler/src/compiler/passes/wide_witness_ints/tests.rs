@@ -1,8 +1,7 @@
 use super::{
     int_limb_widths, multi_cell_int_bits,
     test_utils::{
-        bn254, emitted, fields, guard_every_instruction, limbed_widths, operation_with,
-        operation_with_in, run_pass,
+        bn254, emitted, fields, guard_every_instruction, limbed_widths, operation_with, run_pass,
     },
     types::{limb_types, limb_widths},
 };
@@ -137,7 +136,7 @@ fn a_reference_and_a_sequence_both_expand_by_the_element() {
 
 /// `main(wide) { jmp block_1(wide) }` — a wide value crossing a block boundary.
 fn program_passing_a_wide_value_across_a_block(bits: usize) -> HLSSA {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let mut builder = HLSSABuilder::new(&mut ssa);
     let carried = builder.fresh_value();
@@ -195,14 +194,9 @@ fn a_block_parameter_becomes_one_parameter_per_limb() {
     assert_eq!(args.len(), expected.len());
 }
 
-/// `main(a: WitnessOf(int(from))) -> WitnessOf(int(to)) { a as int(to) }`.
-fn program_widening(from: usize, to: usize) -> HLSSA {
-    program_widening_in(bn254(), from, to)
-}
-
-/// [`program_widening`] over `field`.
-fn program_widening_in(field: FieldConfig, from: usize, to: usize) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+/// `main(a: WitnessOf(int(from))) -> WitnessOf(int(to)) { a as int(to) }` over `field`.
+fn program_widening(field: FieldConfig, from: usize, to: usize) -> HLSSA {
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let value = ssa.fresh_value();
     let result = ssa.fresh_value();
@@ -227,7 +221,7 @@ fn program_widening_in(field: FieldConfig, from: usize, to: usize) -> HLSSA {
 /// `main(value: int(bits)) -> WitnessOf<int(bits)> { value as witness }` over `field`, a
 /// **pure** wide value injected into the representation.
 fn program_injecting(field: FieldConfig, bits: usize) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let value = ssa.fresh_value();
     let result = ssa.fresh_value();
@@ -299,7 +293,7 @@ fn a_pure_value_injected_into_the_representation_is_bounded_per_limb() {
 /// `main(limbs..)` answering the `int(bits)` its limbs spell, all witnessed or all pure.
 fn program_spelling(field: FieldConfig, bits: usize, witnessed: bool) -> (HLSSA, Vec<ValueId>) {
     let wrap = |ty: Type| if witnessed { Type::witness_of(ty) } else { ty };
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let limbs: Vec<ValueId> = int_limb_widths(bits, field)
         .iter()
@@ -433,7 +427,7 @@ fn pure_limbs_are_recombined_into_the_value_they_spell() {
 #[test]
 fn int_from_limbs_of_the_wrong_limb_count_is_refused() {
     let field = bn254();
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let limb = ssa.fresh_value();
     let mut builder = HLSSABuilder::new(&mut ssa);
@@ -459,7 +453,7 @@ fn int_from_limbs_of_the_wrong_limb_count_is_refused() {
 /// arm reads: a hint out of the pure shadow, across the field boundary, into a column, and a
 /// lookup tying that column to the table.
 fn program_reading_a_sequence_at_a_witness_index(bits: usize, slots: usize) -> HLSSA {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let (shadow, table) = (ssa.fresh_value(), ssa.fresh_value());
     let (hint_index, index, flag) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -677,7 +671,7 @@ fn pinned_write_of(
     witnessed: bool,
     location: SourceLocation,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let (param, pure, written) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
@@ -851,7 +845,7 @@ fn a_value_entering_the_representation_is_witnessed_bounded_and_tied_back() {
             FieldId::Bn254 => (200, 320),
             FieldId::Goldilocks => (50, 100),
         };
-        let mut ssa = program_widening_in(field, from, to);
+        let mut ssa = program_widening(field, from, to);
         run_pass(&mut ssa);
 
         let ops = emitted(&ssa);
@@ -906,7 +900,7 @@ fn a_field_read_as_a_wide_integer_is_held_below_the_modulus() {
     for field in fields() {
         let id = field.id();
         let field_bits = field.field_bit_size() as usize;
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let value = ssa.fresh_value();
         let result = ssa.fresh_value();
@@ -996,7 +990,7 @@ fn a_field_read_as_a_wide_integer_is_held_below_the_modulus() {
 /// room for `p + 5`.
 #[test]
 fn a_field_read_as_a_wide_integer_refuses_the_limbs_of_v_plus_p() {
-    check_the_limbs_of_v_plus_p_are_refused::<mavros_artifacts::Field>(bn254());
+    check_the_limbs_of_v_plus_p_are_refused::<mavros_artifacts::Bn254>(bn254());
     check_the_limbs_of_v_plus_p_are_refused::<mavros_artifacts::Goldilocks>(
         FieldConfig::goldilocks(),
     );
@@ -1009,7 +1003,7 @@ fn check_the_limbs_of_v_plus_p_are_refused<F: MavrosField>(field: FieldConfig) {
     // Whether `main(x: Field) -> Field { (x as int(bits)) as Field }` accepts 5 with the limbs
     // cut from `shadow`, which stands in for the element's pure value.
     let accepts = |shadow: &BigUint| {
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
             b.function.add_return_type(Type::field());
@@ -1076,7 +1070,7 @@ fn check_the_limbs_of_v_plus_p_are_refused<F: MavrosField>(field: FieldConfig) {
 /// split into one per limb, so the read is one hint per limb.
 #[test]
 fn a_witness_indexed_read_takes_only_its_element_limb_for_limb() {
-    check_a_read_takes_only_its_element::<mavros_artifacts::Field>(bn254(), 256);
+    check_a_read_takes_only_its_element::<mavros_artifacts::Bn254>(bn254(), 256);
     check_a_read_takes_only_its_element::<mavros_artifacts::Goldilocks>(
         FieldConfig::goldilocks(),
         64,
@@ -1100,7 +1094,7 @@ fn check_a_read_takes_only_its_element<F: MavrosField>(field: FieldConfig, bits:
     // Whether `main(i: int32) -> int32 { [c, c + p, d][i] as int32 }` accepts 0 with its read
     // forged as `read`.
     let accepts = |read: &BigUint| {
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let elements = elements.clone();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
@@ -1184,8 +1178,8 @@ fn check_a_read_takes_only_its_element<F: MavrosField>(field: FieldConfig, bits:
 /// target from a 128-bit source costs three constants, not three columns.
 #[test]
 fn the_limbs_above_the_source_cost_no_witness() {
-    let mut narrow_source = program_widening(128, 320);
-    let mut wider_source = program_widening(192, 320);
+    let mut narrow_source = program_widening(bn254(), 128, 320);
+    let mut wider_source = program_widening(bn254(), 192, 320);
     run_pass(&mut narrow_source);
     run_pass(&mut wider_source);
 
@@ -1199,24 +1193,15 @@ fn the_limbs_above_the_source_cost_no_witness() {
     assert_eq!(count(&wider_source), 3);
 }
 
-/// `main(lhs, rhs: WitnessOf<int(bits)>) { op }`, returning the operation's result where it
-/// has a type.
+/// `main(lhs, rhs: WitnessOf<int(bits)>) { op }` over `field`, returning the operation's result
+/// where it has a type.
 fn program_chaining(
-    bits: usize,
-    returns: Option<Type>,
-    op: impl FnOnce(ValueId, ValueId, ValueId) -> OpCode,
-) -> HLSSA {
-    program_chaining_in(bn254(), bits, returns, op)
-}
-
-/// [`program_chaining`] over `field`.
-fn program_chaining_in(
     field: FieldConfig,
     bits: usize,
     returns: Option<Type>,
     op: impl FnOnce(ValueId, ValueId, ValueId) -> OpCode,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let (lhs, rhs, result) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let mut builder = HLSSABuilder::new(&mut ssa);
@@ -1241,13 +1226,9 @@ fn program_chaining_in(
     ssa
 }
 
-fn difference(bits: usize) -> HLSSA {
-    difference_in(bn254(), bits)
-}
-
-/// [`difference`] over `field`.
-fn difference_in(field: FieldConfig, bits: usize) -> HLSSA {
-    program_chaining_in(
+/// `main(lhs, rhs: WitnessOf<int(bits)>) -> WitnessOf<int(bits)> { lhs - rhs }` over `field`.
+fn difference(field: FieldConfig, bits: usize) -> HLSSA {
+    program_chaining(
         field,
         bits,
         Some(Type::witness_of(Type::int(bits))),
@@ -1275,7 +1256,7 @@ fn every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded() {
         for bits in limbed_widths(field) {
             let k = limb_widths(bits, h).len();
             let sum = |kind| {
-                program_chaining_in(
+                program_chaining(
                     field,
                     bits,
                     Some(Type::witness_of(Type::int(bits))),
@@ -1287,7 +1268,7 @@ fn every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded() {
                     },
                 )
             };
-            let ordering = program_chaining_in(
+            let ordering = program_chaining(
                 field,
                 bits,
                 Some(Type::witness_of(Type::int(1))),
@@ -1298,12 +1279,11 @@ fn every_carry_is_a_bit_and_every_limb_of_the_chain_is_bounded() {
                     rhs,
                 },
             );
-            let assertion =
-                program_chaining_in(field, bits, None, |_, lhs, rhs| OpCode::AssertCmp {
-                    kind: CmpKind::ULt,
-                    lhs,
-                    rhs,
-                });
+            let assertion = program_chaining(field, bits, None, |_, lhs, rhs| OpCode::AssertCmp {
+                kind: CmpKind::ULt,
+                lhs,
+                rhs,
+            });
 
             // A checked operation has no carry out of its top limb, and an ordering witnesses
             // the one it has; an asserted ordering fixes it, so witnesses none either.
@@ -1423,7 +1403,7 @@ fn every_sign_bit_is_cut_out_of_its_top_limb() {
                 checks
             };
             let arith = |kind| {
-                program_chaining_in(
+                program_chaining(
                     field,
                     bits,
                     Some(Type::witness_of(Type::int(bits))),
@@ -1435,7 +1415,7 @@ fn every_sign_bit_is_cut_out_of_its_top_limb() {
                     },
                 )
             };
-            let mut ordering = program_chaining_in(
+            let mut ordering = program_chaining(
                 field,
                 bits,
                 Some(Type::witness_of(Type::int(1))),
@@ -1447,7 +1427,7 @@ fn every_sign_bit_is_cut_out_of_its_top_limb() {
                 },
             );
             let mut assertion =
-                program_chaining_in(field, bits, None, |_, lhs, rhs| OpCode::AssertCmp {
+                program_chaining(field, bits, None, |_, lhs, rhs| OpCode::AssertCmp {
                     kind: CmpKind::SLt,
                     lhs,
                     rhs,
@@ -1479,7 +1459,7 @@ fn every_sign_bit_is_cut_out_of_its_top_limb() {
         // else: every limb past the source is that bit times all ones.
         let source = limbed_widths(field)[1];
         let top = limb_widths(source, h).last().copied().expect("a limb");
-        let mut extension = program_chaining_in(
+        let mut extension = program_chaining(
             field,
             source,
             Some(Type::witness_of(Type::int(1000))),
@@ -1508,7 +1488,7 @@ fn an_operand_sign_is_cut_once_per_block() {
     let top = *limb_widths(bits, witness_limb_bits(bn254()))
         .last()
         .expect("a limb");
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let (lhs, rhs) = (ssa.fresh_value(), ssa.fresh_value());
     let (sum, ordering, double) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -1558,7 +1538,7 @@ fn an_operand_sign_is_cut_once_per_block() {
 /// A sign extension whose source's top limb is known fills at compile time.
 #[test]
 fn a_sign_extension_of_a_known_top_limb_fills_at_compile_time() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let (value, widened, extended) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let mut builder = HLSSABuilder::new(&mut ssa);
@@ -1608,7 +1588,7 @@ fn a_guarded_chain_is_checked_only_under_its_guard() {
     for field in fields() {
         let id = field.id();
         let bits = limbed_widths(field)[1];
-        let mut ssa = difference_in(field, bits);
+        let mut ssa = difference(field, bits);
         let condition = guard_every_instruction(&mut ssa);
         run_pass(&mut ssa);
         let ops = emitted(&ssa);
@@ -1653,7 +1633,7 @@ fn a_sum_the_element_cannot_carry_takes_the_chain_without_limbs() {
         "the band is one width wide"
     );
 
-    let mut ssa = difference(wide);
+    let mut ssa = difference(bn254(), wide);
     let main = ssa.get_unique_entrypoint_id();
     let operands: Vec<ValueId> = ssa
         .get_function(main)
@@ -1680,7 +1660,7 @@ fn a_sum_the_element_cannot_carry_takes_the_chain_without_limbs() {
         "the single-cell difference is gone"
     );
 
-    let mut narrower = difference(wide - 1);
+    let mut narrower = difference(bn254(), wide - 1);
     let before = format!("{:?}", emitted(&narrower));
     run_pass(&mut narrower);
     assert_eq!(
@@ -1704,6 +1684,7 @@ fn a_band_operand_is_decomposed_once_per_block() {
 
     // `x + x`: one value, one decomposition.
     let mut doubled = program_chaining(
+        bn254(),
         bits,
         Some(Type::witness_of(Type::int(bits))),
         |result, lhs, _| OpCode::BinaryArithOp {
@@ -1717,7 +1698,7 @@ fn a_band_operand_is_decomposed_once_per_block() {
     assert_eq!(constraints(&doubled), 1, "x + x decomposes x once");
 
     // `lhs - rhs` and then `lhs < rhs` in the same block: two values, two decompositions.
-    let mut ssa = difference(bits);
+    let mut ssa = difference(bn254(), bits);
     let main = ssa.get_unique_entrypoint_id();
     let operands: Vec<ValueId> = ssa
         .get_function(main)
@@ -1859,7 +1840,7 @@ fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
                     ("evaluated", Type::witness_of(Type::int(bits)), true),
                     ("summed", Type::int(bits), false),
                 ] {
-                    let mut ssa = operation_with_in(field, kind, bits, rhs_type);
+                    let mut ssa = operation_with(field, kind, bits, rhs_type);
                     run_pass(&mut ssa);
                     let audit = Audit::of(&ssa);
                     let what = format!("{id:?} int{bits} {kind:?}, {what}");
@@ -1901,7 +1882,7 @@ fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
 #[test]
 fn a_constant_divisor_narrows_the_quotient_and_the_remainder() {
     let bits = 320usize;
-    let mut ssa = operation_with(BinaryArithOpKind::UDiv, bits, Type::int(bits));
+    let mut ssa = operation_with(bn254(), BinaryArithOpKind::UDiv, bits, Type::int(bits));
     let main = ssa.get_unique_entrypoint_id();
     let ten = ssa.add_const(Constant::Int(IntBits::from_u128(bits, 10)));
     {
@@ -1971,7 +1952,7 @@ fn a_guarded_division_is_checked_only_under_its_guard() {
         let id = field.id();
         let bits = limbed_widths(field)[1];
         let k = limb_widths(bits, witness_limb_bits(field)).len();
-        let mut ssa = operation_with_in(
+        let mut ssa = operation_with(
             field,
             BinaryArithOpKind::URem,
             bits,
@@ -2046,7 +2027,7 @@ fn a_division_the_single_cell_cannot_hold_is_lowered_here() {
     let widest = widest_injective_int_bits(field) / 2;
     for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
         for bits in [widest + 1, 2 * HOST_LIMB_BITS + 1] {
-            let mut ssa = operation_with(kind, bits, Type::witness_of(Type::int(bits)));
+            let mut ssa = operation_with(bn254(), kind, bits, Type::witness_of(Type::int(bits)));
             let main = ssa.get_unique_entrypoint_id();
             let operands: Vec<ValueId> = ssa
                 .get_function(main)
@@ -2065,7 +2046,7 @@ fn a_division_the_single_cell_cannot_hold_is_lowered_here() {
             );
         }
         for bits in [widest, 2 * HOST_LIMB_BITS] {
-            let mut ssa = operation_with(kind, bits, Type::witness_of(Type::int(bits)));
+            let mut ssa = operation_with(bn254(), kind, bits, Type::witness_of(Type::int(bits)));
             let before = format!("{:?}", emitted(&ssa));
             run_pass(&mut ssa);
             assert_eq!(format!("{:?}", emitted(&ssa)), before, "int{bits} {kind:?}");
@@ -2080,6 +2061,7 @@ fn a_value_divided_by_itself_checks_only_that_it_is_not_zero() {
     let bits = 320usize;
     let widths = limb_widths(bits, witness_limb_bits(bn254()));
     let mut ssa = operation_with(
+        bn254(),
         BinaryArithOpKind::UDiv,
         bits,
         Type::witness_of(Type::int(bits)),
@@ -2124,7 +2106,7 @@ fn a_value_divided_by_itself_checks_only_that_it_is_not_zero() {
 /// `main(a, b: WitnessOf<int64>) { (a as int(bits)) == rhs }`, where `rhs` is `b` widened the
 /// same way or the given constant, compared or asserted.
 fn program_comparing_widened(bits: usize, constant: Option<BigUint>, assert: bool) -> HLSSA {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let [a, b, wide_a, wide_b, result] = std::array::from_fn(|_| ssa.fresh_value());
     let mut builder = HLSSABuilder::new(&mut ssa);
@@ -2240,7 +2222,7 @@ fn an_equality_of_limbs_known_at_compile_time_is_decided_here() {
 fn a_known_answer_limb_is_known_to_the_comparison_it_reaches() {
     let bits = 320usize;
     for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let [divisor, answer, result] = std::array::from_fn(|_| ssa.fresh_value());
         let mut builder = HLSSABuilder::new(&mut ssa);
@@ -2318,7 +2300,7 @@ fn a_known_answer_limb_is_known_to_the_comparison_it_reaches() {
 #[test]
 fn a_constant_injected_into_the_representation_costs_nothing() {
     let bits = 328usize;
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let result = ssa.fresh_value();
     let pattern: BigUint = (BigUint::from(1u8) << 320) + 5u8;
@@ -2374,7 +2356,7 @@ fn a_constant_injected_into_the_representation_costs_nothing() {
 fn a_quotient_beside_its_remainder_is_one_division() {
     let bits = 320usize;
     let program = |kinds: &[BinaryArithOpKind]| {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let (lhs, rhs) = (ssa.fresh_value(), ssa.fresh_value());
         let results: Vec<ValueId> = kinds.iter().map(|_| ssa.fresh_value()).collect();
@@ -2469,8 +2451,7 @@ fn every_column_of_a_shift_is_bounded_and_every_half_checked() {
             let amount_limbs = k;
             for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
                 let left = kind == BinaryArithOpKind::UShl;
-                let mut ssa =
-                    operation_with_in(field, kind, bits, Type::witness_of(Type::int(bits)));
+                let mut ssa = operation_with(field, kind, bits, Type::witness_of(Type::int(bits)));
                 run_pass(&mut ssa);
                 let audit = Audit::of(&ssa);
                 let what = format!("{id:?} int{bits} {kind:?}");
@@ -2553,7 +2534,7 @@ fn a_shift_by_a_constant_cuts_each_limb_at_most_once() {
     let bits = 320usize;
     for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
         let left = kind == BinaryArithOpKind::UShl;
-        let mut ssa = operation_with(kind, bits, Type::int(bits));
+        let mut ssa = operation_with(bn254(), kind, bits, Type::int(bits));
         with_constant_rhs(&mut ssa, IntBits::from_u128(bits, 70));
         run_pass(&mut ssa);
         let audit = Audit::of(&ssa);
@@ -2577,7 +2558,7 @@ fn a_shift_by_a_constant_cuts_each_limb_at_most_once() {
         );
         assert_eq!(audit.constraints(), 0, "{kind:?} by 70");
 
-        let mut ssa = operation_with(kind, bits, Type::int(bits));
+        let mut ssa = operation_with(bn254(), kind, bits, Type::int(bits));
         with_constant_rhs(&mut ssa, IntBits::from_u128(bits, 128));
         run_pass(&mut ssa);
         let audit = Audit::of(&ssa);
@@ -2615,7 +2596,7 @@ fn a_pure_amount_is_split_by_a_constant() {
         for guarded in [false, true] {
             let what = format!("{kind:?}, guarded: {guarded}");
             let left = kind == BinaryArithOpKind::UShl;
-            let mut ssa = operation_with(kind, bits, Type::int(bits));
+            let mut ssa = operation_with(bn254(), kind, bits, Type::int(bits));
             let condition = guarded.then(|| guard_every_instruction(&mut ssa));
             run_pass(&mut ssa);
             let audit = Audit::of(&ssa);
@@ -2663,7 +2644,7 @@ fn a_pure_amount_is_split_by_a_constant() {
 #[test]
 fn a_known_limb_of_a_witnessed_operand_drops_out_of_the_product() {
     let bits = 320usize;
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let (narrow, wide, widened, product) = (
         ssa.fresh_value(),
@@ -2736,7 +2717,7 @@ fn program_answering(
     result_types: Vec<Type>,
     op: impl FnOnce(ValueId, &[ValueId]) -> OpCode,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let value = ssa.fresh_value();
     let results: Vec<ValueId> = result_types.iter().map(|_| ssa.fresh_value()).collect();
@@ -2814,7 +2795,7 @@ fn a_guarded_spread_or_unspread_builds_every_check_under_its_guard() {
         let id = field.id();
         let bits = 600usize;
         for unspread in [false, true] {
-            let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+            let mut ssa = HLSSA::with_main(field, "main".to_string());
             let main = ssa.get_unique_entrypoint_id();
             let (condition, value) = (ssa.fresh_value(), ssa.fresh_value());
             let results = [ssa.fresh_value(), ssa.fresh_value()];
@@ -2897,7 +2878,7 @@ fn a_limb_known_to_be_zero_costs_a_spread_or_unspread_nothing() {
     let (from, to) = (200usize, 600usize);
     let limb = witness_limb_bits(bn254());
     for unspread in [false, true] {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let (value, wide) = (ssa.fresh_value(), ssa.fresh_value());
         let results = [ssa.fresh_value(), ssa.fresh_value()];

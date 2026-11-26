@@ -46,7 +46,7 @@ fn sole_context(cc: &ClickCooper, f: FunctionId) -> Context {
 fn scalar_fold_is_the_single_classifier() {
     use super::congruence::pure_op_operands;
 
-    let ssa = HLSSA::with_main("main".to_string());
+    let ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let v = || ssa.fresh_value();
 
@@ -216,7 +216,7 @@ fn scalar_fold_is_the_single_classifier() {
 /// the const → congruence coupling.
 #[test]
 fn equal_constants_are_congruent() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c2 = ssa.add_const(Constant::int(32, 2));
     let c3 = ssa.add_const(Constant::int(32, 3));
@@ -251,7 +251,7 @@ fn equal_constants_are_congruent() {
 /// or operands are not.
 #[test]
 fn structural_congruence_is_commutative() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
     let (a, b, c, d) = (
         ssa.fresh_value(),
@@ -307,7 +307,7 @@ fn structural_congruence_is_commutative() {
 /// `LowerWitnessNarrowingCast` puts in front of a witnessed narrowing.
 #[test]
 fn checked_and_unchecked_int_casts_are_not_congruent() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let x = ssa.fresh_value();
     let (checked, checked_again, unchecked) =
         (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -340,7 +340,7 @@ fn checked_and_unchecked_int_casts_are_not_congruent() {
 /// `MkSeq`s apart.
 #[test]
 fn array_ops_are_value_numbered() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (arr, i, j) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (g1, g2, g3) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (s1, s2, s3, s4) = (
@@ -414,7 +414,7 @@ fn array_ops_are_value_numbered() {
 /// index/value operand classes ride in the key or the signature, so differing ops split.
 #[test]
 fn slice_ops_are_value_numbered() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (s, i, j, x) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -526,7 +526,7 @@ fn slice_ops_are_value_numbered() {
 /// dead in-edge is still congruent to one that agrees on the live edge.
 #[test]
 fn phi_congruence_excludes_dead_edges() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (x, y, p, q) = (
         ssa.fresh_value(),
@@ -562,7 +562,7 @@ fn phi_congruence_excludes_dead_edges() {
 /// reachability-sensitive.
 #[test]
 fn phi_distinguished_when_both_edges_live() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (cond, x, y, p, q) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -598,7 +598,7 @@ fn phi_distinguished_when_both_edges_live() {
 /// that start equal and step identically are congruent across the loop back-edge.
 #[test]
 fn loop_carried_parallel_induction_is_congruent() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -662,7 +662,7 @@ fn loop_carried_parallel_induction_is_congruent() {
 /// dominated occurrence redirects to the dominating one, and the dominating one leads itself.
 #[test]
 fn leader_is_dominating_definition() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y, a, b) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -703,7 +703,7 @@ fn leader_is_dominating_definition() {
 /// Two congruent ops in one block: the earlier one (by instruction index) leads the later.
 #[test]
 fn leader_is_earlier_in_block() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y, a, b) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -741,7 +741,7 @@ fn leader_is_earlier_in_block() {
 /// so no illegal cross-branch redirect is offered.
 #[test]
 fn leader_never_crosses_incomparable_branches() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (cond, x, y, a, b, c) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -801,7 +801,7 @@ fn leader_never_crosses_incomparable_branches() {
 /// that constant — available throughout the function — is its leader.
 #[test]
 fn leader_of_constant_class_is_the_interned_constant() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c2 = ssa.add_const(Constant::int(32, 2));
     let c3 = ssa.add_const(Constant::int(32, 3));
     let c5 = ssa.add_const(Constant::int(32, 5));
@@ -829,7 +829,7 @@ fn leader_of_constant_class_is_the_interned_constant() {
 /// but never unconditionally — so a global fold (SCS) can't fold `x` and vacuum the assert.
 #[test]
 fn assert_eq_const_is_conditional_not_unconditional() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let x = ssa.fresh_value();
 
@@ -876,7 +876,7 @@ fn assert_eq_const_is_conditional_not_unconditional() {
 /// `assert(b)` proves `b == true` conditionally in dominated blocks, never unconditionally.
 #[test]
 fn assert_bool_is_conditional() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let b = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -915,7 +915,7 @@ fn assert_bool_is_conditional() {
 /// structural congruence, which (unconditionally) keeps the two parameters apart.
 #[test]
 fn assert_eq_pure_equality_is_conditional() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -950,7 +950,7 @@ fn assert_eq_pure_equality_is_conditional() {
 /// `def(b)`, the leader of both is the dominating `a` even though `b` has the smaller value id.
 #[test]
 fn asserted_leader_picks_dominating_member() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     // `b` is allocated first so `b.0 < a.0`; a smallest-id leader would (wrongly) pick `b`.
     let b = ssa.fresh_value();
     let a = ssa.fresh_value();
@@ -997,7 +997,7 @@ fn asserted_leader_picks_dominating_member() {
 /// share one leader, which is strictly stronger than the direct-pair `asserted_equal` check.
 #[test]
 fn asserted_leader_is_transitive() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     // Allocated in order, so `a.0 < b.0 < c.0`; all three are entry params (same def site), so the
     // dominance-root-most is the smallest-id `a`.
     let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -1043,7 +1043,7 @@ fn asserted_leader_is_transitive() {
 /// asserting block, only at use-indices strictly after the establishing assert.
 #[test]
 fn asserted_leader_index_granular() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value()); // x.0 < y.0 ⇒ leader x
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1097,7 +1097,7 @@ fn asserted_leader_index_granular() {
 /// but nowhere it fails to dominate — not the merge, the other branch, or before the branch.
 #[test]
 fn asserted_leader_respects_dominance_fanout() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let cond = ssa.fresh_value();
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value()); // x.0 < y.0 ⇒ leader x
 
@@ -1160,7 +1160,7 @@ fn asserted_leader_respects_dominance_fanout() {
 /// touched by no assert at all is in no class — both have no leader.
 #[test]
 fn asserted_leader_none_without_equality() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, z) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -1194,7 +1194,7 @@ fn asserted_leader_none_without_equality() {
 /// `None`, while a participant `a` still resolves to its leader.
 #[test]
 fn asserted_leader_none_for_non_pair_value_amid_classes() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, z) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1225,7 +1225,7 @@ fn asserted_leader_none_for_non_pair_value_amid_classes() {
 /// exercises a value carrying more than one `(threshold, leader)` step and the index binary search.
 #[test]
 fn asserted_leader_multi_threshold_same_block() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     // Allocated in order ⇒ a.0 < c.0 < d.0; all entry params (same def site), so leaders are by id.
     let (a, c, d) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -1270,7 +1270,7 @@ fn asserted_leader_multi_threshold_same_block() {
 /// leader.
 #[test]
 fn asserted_leader_local_merges_two_cross_classes() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     // a.0 < b.0 < c.0 < d.0; all entry params, so leaders are by id.
     let (a, b, c, d) = (
         ssa.fresh_value(),
@@ -1329,7 +1329,7 @@ fn asserted_leader_local_merges_two_cross_classes() {
 /// dominates — and nowhere else.
 #[test]
 fn disequality_from_false_edge() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1369,7 +1369,7 @@ fn disequality_from_false_edge() {
 /// never congruent; a _pinned_ write (a real constraint) forwards nothing.
 #[test]
 fn unpinned_witness_forwards_distinct_not_merged() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (v1, v2) = (ssa.fresh_value(), ssa.fresh_value());
     let (r1, r2, rp) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -1409,7 +1409,7 @@ fn unpinned_witness_forwards_distinct_not_merged() {
 /// Distinct witnesses keep disjoint sets — no cross-witness union.
 #[test]
 fn witness_forward_unions_hint_and_value_of_reads() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (v, v2) = (ssa.fresh_value(), ssa.fresh_value()); // honest hint payloads
     let (r, r2) = (ssa.fresh_value(), ssa.fresh_value()); // witness handles
     let (w1, w2) = (ssa.fresh_value(), ssa.fresh_value()); // two distinct `value_of(r)` reads
@@ -1464,7 +1464,7 @@ fn witness_forward_unions_hint_and_value_of_reads() {
 /// asserting block, in the dominance direction only (nothing precedes the assert there).
 #[test]
 fn post_dominance_not_propagated_at_block_granularity() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let x = ssa.fresh_value();
 
@@ -1534,7 +1534,7 @@ fn post_dominance_not_propagated_at_block_granularity() {
 /// block sails through — only the fact's values need stability, never the target blocks.
 #[test]
 fn post_dominating_assert_unsound_for_loop_carried_value() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c5 = ssa.add_const(Constant::int(32, 5));
@@ -1620,7 +1620,7 @@ fn post_dominating_assert_unsound_for_loop_carried_value() {
 /// the branch, so its fact must not leak there — the other arm reaches `exit` without it.
 #[test]
 fn assert_on_one_branch_does_not_post_dominate() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let cond = ssa.fresh_value();
     let x = ssa.fresh_value();
@@ -1683,7 +1683,7 @@ fn assert_on_one_branch_does_not_post_dominate() {
 /// definition does not dominate.
 #[test]
 fn anticipated_fact_gated_on_scope() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, v) = (ssa.fresh_value(), ssa.fresh_value());
@@ -1733,7 +1733,7 @@ fn anticipated_fact_gated_on_scope() {
 /// not panic on such a CFG.
 #[test]
 fn no_exit_path_assert_contributes_nothing() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -1776,7 +1776,7 @@ fn no_exit_path_assert_contributes_nothing() {
 /// executable views agree and the fact stays out.
 #[test]
 fn anticipated_gains_from_constant_branch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let c5 = ssa.add_const(Constant::int(32, 5));
     let x = ssa.fresh_value();
@@ -1836,7 +1836,7 @@ fn anticipated_gains_from_constant_branch() {
 /// The contextual anticipated view gains the fact; the shared intraprocedural view must not.
 #[test]
 fn anticipated_const_in_gains_from_pinned_branch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, x, x0) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -1904,7 +1904,7 @@ fn anticipated_const_in_gains_from_pinned_branch() {
 /// the fact out.
 #[test]
 fn anticipated_gains_from_dead_back_edge() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (a, b, w, r, wit) = (
@@ -2001,7 +2001,7 @@ fn anticipated_gains_from_dead_back_edge() {
 /// `anticipated_admits_det_call_directly_in_loop`.)
 #[test]
 fn live_back_edge_keeps_call_result_unstable() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (a, b, p, w, r, wit) = (
@@ -2079,7 +2079,7 @@ fn live_back_edge_keeps_call_result_unstable() {
 /// there while staying out of the live loop.
 #[test]
 fn anticipated_finality_gains_from_pruned_back_path() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -2156,7 +2156,7 @@ fn anticipated_finality_gains_from_pruned_back_path() {
 /// forever-spin — either way every run visiting `stuck` reaches the check or hangs.
 #[test]
 fn pruned_build_keeps_static_post_dominance_fact() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_false = ssa.add_const(Constant::int(1, 0));
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (p, x) = (ssa.fresh_value(), ssa.fresh_value());
@@ -2213,7 +2213,7 @@ fn pruned_build_keeps_static_post_dominance_fact() {
 /// reads, which stay strictly after it.
 #[test]
 fn local_anticipated_before_the_assert() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
@@ -2275,7 +2275,7 @@ fn local_anticipated_before_the_assert() {
 /// channel correctly withholds it everywhere else).
 #[test]
 fn local_anticipated_needs_no_stability_gate() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c9 = ssa.add_const(Constant::int(32, 9));
@@ -2335,7 +2335,7 @@ fn local_anticipated_needs_no_stability_gate() {
 /// `0`, a dominance-valid redirect target at every index).
 #[test]
 fn anticipated_equalities_and_leaders() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -2403,7 +2403,7 @@ fn anticipated_equalities_and_leaders() {
 /// bindings), where the dominance-channel leader still sees nothing.
 #[test]
 fn anticipated_leader_before_same_block_assert() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -2457,7 +2457,7 @@ fn anticipated_leader_before_same_block_assert() {
 /// loop-carried, hence unstable, and out of scope at `entry`).
 #[test]
 fn anticipated_leader_before_assert_in_cyclic_block() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -2536,7 +2536,7 @@ fn anticipated_leader_before_assert_in_cyclic_block() {
 /// itself is index-independent.
 #[test]
 fn anticipated_leader_threshold_for_block_defined_leader() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c2 = ssa.add_const(Constant::int(32, 2));
     let (a, b, x, y) = (
@@ -2602,7 +2602,7 @@ fn anticipated_leader_threshold_for_block_defined_leader() {
 /// class `{x, y, z}` — a merge neither single direction produces.
 #[test]
 fn anticipated_leader_merges_across_directions() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     // Allocated in order ⇒ x.0 < y.0 < z.0; all entry params, so leaders are by id.
     let (x, y, z, m) = (
@@ -2659,7 +2659,7 @@ fn anticipated_leader_merges_across_directions() {
 /// its structural self-protection. This pins the documented contract.
 #[test]
 fn anticipated_leader_at_establishing_assert_is_gate3_guarded() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2686,7 +2686,7 @@ fn anticipated_leader_at_establishing_assert_is_gate3_guarded() {
 /// asserted leader — the two queries agree there.
 #[test]
 fn anticipated_leader_cross_only_block_falls_back() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (a, b, m) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -2728,7 +2728,7 @@ fn anticipated_leader_cross_only_block_falls_back() {
 /// operand is multi-valued, so each iteration's rebinding genuinely differs.
 #[test]
 fn anticipated_admits_loop_invariant_pure_chain() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c5 = ssa.add_const(Constant::int(32, 5));
@@ -2812,7 +2812,7 @@ fn anticipated_admits_loop_invariant_pure_chain() {
 /// cyclic block back-reaches itself for binding finality — the fact is withheld mid-loop.
 #[test]
 fn anticipated_rejects_unconstrained_call_result_in_loop() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
@@ -2887,7 +2887,7 @@ fn anticipated_rejects_unconstrained_call_result_in_loop() {
 /// every in-loop block stays rejected exactly as before.
 #[test]
 fn anticipated_admits_accumulator_at_post_loop_block() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -2952,7 +2952,7 @@ fn anticipated_admits_accumulator_at_post_loop_block() {
 /// leads back to the first), because cyclic _target_ blocks re-observe the same final binding.
 #[test]
 fn anticipated_admits_first_loop_value_inside_second_loop() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -3027,7 +3027,7 @@ fn anticipated_admits_first_loop_value_inside_second_loop() {
 /// the post-dominating assert runs.
 #[test]
 fn anticipated_rejects_inner_loop_value_at_outer_block() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -3104,7 +3104,7 @@ fn anticipated_rejects_inner_loop_value_at_outer_block() {
 /// `anticipated_admits_det_call_via_congruence_over_unstable_arg`.)
 #[test]
 fn anticipated_admits_det_call_via_congruence_tier() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
@@ -3203,7 +3203,7 @@ fn anticipated_admits_det_call_via_congruence_tier() {
 /// mid-loop directly.
 #[test]
 fn anticipated_admits_det_call_directly_in_loop() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (a, b, p, w, r) = (
@@ -3278,7 +3278,7 @@ fn anticipated_admits_det_call_directly_in_loop() {
 /// different value and no invariance rule admits the result; the fact is withheld mid-loop.
 #[test]
 fn anticipated_rejects_det_call_over_loop_variant_arg() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
@@ -3360,7 +3360,7 @@ fn anticipated_rejects_det_call_over_loop_variant_arg() {
 /// of one in-loop call only the first is pinned mid-loop.
 #[test]
 fn anticipated_det_call_multi_return_per_index_bits() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -3449,7 +3449,7 @@ fn anticipated_det_call_multi_return_per_index_bits() {
 /// — where the block-level rule 2 and binding finality (`entry` back-reaches itself) both reject.
 #[test]
 fn anticipated_admits_entry_param_in_cyclic_entry_block() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (p, w) = (ssa.fresh_value(), ssa.fresh_value());
@@ -3490,7 +3490,7 @@ fn anticipated_admits_entry_param_in_cyclic_entry_block() {
 /// mid-loop.
 #[test]
 fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
@@ -3594,7 +3594,7 @@ fn anticipated_admits_det_call_via_congruence_over_unstable_arg() {
 /// block's union leader table, redirecting the accumulator to the parameter.
 #[test]
 fn anticipated_eq_pair_mixed_gates() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -3665,7 +3665,7 @@ fn anticipated_eq_pair_mixed_gates() {
 /// reaches a value the terminator forwards (here a return), proving the index convention.
 #[test]
 fn local_assert_reaches_terminator_use() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, doubled) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -3718,7 +3718,7 @@ fn local_assert_reaches_terminator_use() {
 /// Two asserts on different values in one block are each recovered only after their own index.
 #[test]
 fn multiple_local_asserts_each_recovered_after_its_index() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let c6 = ssa.add_const(Constant::int(32, 6));
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
@@ -3771,7 +3771,7 @@ fn multiple_local_asserts_each_recovered_after_its_index() {
 /// never informed by the later one.
 #[test]
 fn contradictory_local_asserts_first_writer_wins() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let c7 = ssa.add_const(Constant::int(32, 7));
     let x = ssa.fresh_value();
@@ -3820,7 +3820,7 @@ fn contradictory_local_asserts_first_writer_wins() {
 /// fact also takes precedence over a contradictory local one.
 #[test]
 fn entry_and_local_assert_facts_layer() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let c6 = ssa.add_const(Constant::int(32, 6));
     let c7 = ssa.add_const(Constant::int(32, 7));
@@ -3880,7 +3880,7 @@ fn entry_and_local_assert_facts_layer() {
 /// (the operand is necessarily defined before the assert), and the pin is recovered after it.
 #[test]
 fn local_assert_on_value_defined_earlier_in_block() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c10 = ssa.add_const(Constant::int(32, 10));
     let (p, y) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -3922,7 +3922,7 @@ fn local_assert_on_value_defined_earlier_in_block() {
 /// the loop header (which the body neither dominates nor post-dominates).
 #[test]
 fn local_assert_in_loop_body() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (n, i, lt, next) = (
@@ -3983,7 +3983,7 @@ fn local_assert_in_loop_body() {
 /// context, while the SCS-visible intraprocedural view leaves it `Bottom`.
 #[test]
 fn interproc_constant_return_folds_at_call_site() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
     let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
@@ -4021,7 +4021,7 @@ fn interproc_constant_return_folds_at_call_site() {
 /// the call site, and the callee's parameter is seeded to it per context.
 #[test]
 fn interproc_passthrough_seeds_param_and_result() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let id = ssa.add_function("id".to_string());
     let p = ssa.fresh_value();
@@ -4067,7 +4067,7 @@ fn interproc_passthrough_seeds_param_and_result() {
 /// is `Bottom` and the call result is unknown.
 #[test]
 fn interproc_writeback_folds_congruent_comparison_return() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -4135,7 +4135,7 @@ fn interproc_writeback_folds_congruent_comparison_return() {
 /// observable only through `contexts`, which the summary solve does not populate.
 #[test]
 fn interproc_writeback_folds_congruent_comparison_in_context() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -4205,7 +4205,7 @@ fn interproc_writeback_folds_congruent_comparison_in_context() {
 /// and the comparison folds in every context.
 #[test]
 fn interproc_writeback_terminates_under_recursion() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -4281,7 +4281,7 @@ fn interproc_writeback_terminates_under_recursion() {
 /// `*_in` conditional tests below.)
 #[test]
 fn context_parameterized_conditional_queries() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let id = ssa.add_function("id".to_string());
     let p = ssa.fresh_value();
@@ -4326,7 +4326,7 @@ fn context_parameterized_conditional_queries() {
 /// eq channel, so `asserted_equal_in` is deliberately not a pointwise superset of `asserted_equal`.
 #[test]
 fn asserted_const_refines_per_context() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (x, p) = (ssa.fresh_value(), ssa.fresh_value());
@@ -4384,7 +4384,7 @@ fn asserted_const_refines_per_context() {
 /// other direction exists too; see `context_constant_can_split_congruence`
 #[test]
 fn witness_forward_in_prunes_context_dead_forward() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, w, r) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -4442,7 +4442,7 @@ fn witness_forward_in_prunes_context_dead_forward() {
 /// every per-context conditional channel coincides with its intraprocedural counterpart.
 #[test]
 fn conditional_queries_parity_under_empty_context() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (d, e) = (ssa.fresh_value(), ssa.fresh_value());
@@ -4525,7 +4525,7 @@ fn conditional_queries_parity_under_empty_context() {
 /// `mid` in both.
 #[test]
 fn anticipated_queries_parity_under_empty_context() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let c5 = ssa.add_const(Constant::int(32, 5));
@@ -4589,7 +4589,7 @@ fn anticipated_queries_parity_under_empty_context() {
 /// holds where the intraprocedural `known_unequal` (two live in-edges) cannot.
 #[test]
 fn known_unequal_in_gains_from_pruned_predecessor() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, d, e, eq) = (
@@ -4659,7 +4659,7 @@ fn known_unequal_in_gains_from_pruned_predecessor() {
 /// channel, whose pairs must be constant-free.
 #[test]
 fn asserted_const_never_aggregate() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let c0 = ssa.add_const(Constant::int(32, 10));
     let c1 = ssa.add_const(Constant::int(32, 20));
@@ -4701,7 +4701,7 @@ fn asserted_const_never_aggregate() {
 /// fact-losing directions the impl docs call out.
 #[test]
 fn asserted_const_in_never_aggregate() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
@@ -4764,7 +4764,7 @@ fn asserted_const_in_never_aggregate() {
 /// Nothing is lost; the documented "no pointwise inclusion" is this migration.
 #[test]
 fn asserted_const_migrates_to_unconditional_channel() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let x = ssa.fresh_value();
@@ -4826,7 +4826,7 @@ fn asserted_const_migrates_to_unconditional_channel() {
 /// between the two views in either direction.
 #[test]
 fn context_constant_can_split_congruence() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let g = ssa.add_function("g".to_string());
@@ -4930,7 +4930,7 @@ fn context_constant_can_split_congruence() {
 /// constants — the 1-CFA win.
 #[test]
 fn interproc_two_call_sites_are_distinguished() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let id = ssa.add_function("id".to_string());
     let p = ssa.fresh_value();
@@ -4988,7 +4988,7 @@ fn interproc_two_call_sites_are_distinguished() {
 /// the callee returns a constant) and stays an opaque singleton.
 #[test]
 fn unconstrained_call_result_is_opaque() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let helper = ssa.add_function("helper".to_string());
     let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
@@ -5033,7 +5033,7 @@ fn unconstrained_call_result_is_opaque() {
 /// and a call with a non-congruent argument does not.
 #[test]
 fn cross_call_congruence_for_deterministic_callee() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let dbl = ssa.add_function("dbl".to_string());
     let p = ssa.fresh_value();
@@ -5111,7 +5111,7 @@ fn cross_call_congruence_for_deterministic_callee() {
 /// determinism gate that protects the free-witness non-merge prohibition).
 #[test]
 fn cross_call_no_congruence_for_nondeterministic_callee() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let rnd = ssa.add_function("rnd".to_string());
     let w = ssa.fresh_value();
@@ -5156,7 +5156,7 @@ fn cross_call_no_congruence_for_nondeterministic_callee() {
 /// its results are numbered cross-call too.
 #[test]
 fn cross_call_congruence_is_transitive() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let inner = ssa.add_function("inner".to_string());
     let outer = ssa.add_function("outer".to_string());
@@ -5240,7 +5240,7 @@ fn cross_call_congruence_is_transitive() {
 /// the return and keep the calls distinct.
 #[test]
 fn cross_call_congruence_for_array_returning_callee() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let pick = ssa.add_function("pick".to_string());
     let p = ssa.fresh_value();
@@ -5324,7 +5324,7 @@ fn cross_call_congruence_for_array_returning_callee() {
 /// reaches this alone.
 #[test]
 fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
@@ -5382,7 +5382,7 @@ fn cmp_eq_of_congruent_operands_folds_and_prunes_dead_edge() {
 /// cannot derive.
 #[test]
 fn writeback_cascades_to_downstream_constant() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c5 = ssa.add_const(Constant::int(32, 5));
     let c7 = ssa.add_const(Constant::int(32, 7));
@@ -5440,7 +5440,7 @@ fn writeback_cascades_to_downstream_constant() {
 /// stay reachable.
 #[test]
 fn cmp_eq_of_noncongruent_operands_is_not_folded() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -5474,7 +5474,7 @@ fn cmp_eq_of_noncongruent_operands_is_not_folded() {
 /// folded — the writeback cannot fabricate an equality an adversarial witness could break.
 #[test]
 fn free_witnesses_are_not_congruent_so_comparison_not_folded() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (w1, w2, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -5506,7 +5506,7 @@ fn free_witnesses_are_not_congruent_so_comparison_not_folded() {
 /// computation yields no new constants (so a function without such a comparison is unchanged).
 #[test]
 fn writeback_is_noop_without_congruent_comparison() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -5531,7 +5531,7 @@ fn writeback_is_noop_without_congruent_comparison() {
 /// `CmpLt(a, b)` with `a` and `b` congruent folds to `false` — `x < x` is never true.
 #[test]
 fn cmp_lt_of_congruent_operands_folds_false() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, lt) = (
         ssa.fresh_value(),
@@ -5576,7 +5576,7 @@ fn cmp_lt_of_congruent_operands_folds_false() {
 /// consumer's job; see the SCS test `witnessed_constant_is_cast_to_witness_of`.
 #[test]
 fn witnessed_comparison_of_congruent_operands_is_promoted() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (w, ww, n, nn) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -5620,7 +5620,7 @@ fn witnessed_comparison_of_congruent_operands_is_promoted() {
 /// nor `j` is constant.
 #[test]
 fn loop_carried_congruent_comparison_folds_true() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -5688,7 +5688,7 @@ fn loop_carried_congruent_comparison_folds_true() {
 /// consumers.
 #[test]
 fn const_array_get_folds_to_scalar() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
     let c1 = ssa.add_const(Constant::int(32, 20));
     let c2 = ssa.add_const(Constant::int(32, 30));
@@ -5731,7 +5731,7 @@ fn const_array_get_folds_to_scalar() {
 /// the resulting aggregate (the length is always `u32`).
 #[test]
 fn const_repeated_array_get_and_slice_len() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let elem = ssa.add_const(Constant::int(32, 7));
     let idx = ssa.add_const(Constant::int(32, 2));
     let (seq, got, len) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -5772,7 +5772,7 @@ fn const_repeated_array_get_and_slice_len() {
 /// the updated cell at the set index and the original value elsewhere.
 #[test]
 fn const_array_set_then_get() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
     let c1 = ssa.add_const(Constant::int(32, 20));
     let c2 = ssa.add_const(Constant::int(32, 30));
@@ -5827,7 +5827,7 @@ fn const_array_set_then_get() {
 /// `SlicePush` extends a constant aggregate at the front or back, preserving element order.
 #[test]
 fn const_slice_push_front_and_back() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let mid = ssa.add_const(Constant::int(32, 1));
     let front = ssa.add_const(Constant::int(32, 0));
     let back = ssa.add_const(Constant::int(32, 2));
@@ -5892,7 +5892,7 @@ fn const_slice_push_front_and_back() {
 /// A front pop of the shrunk slice keeps folding (pops compose).
 #[test]
 fn const_slice_pop_folds_both_results() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
     let c1 = ssa.add_const(Constant::int(32, 20));
     let c2 = ssa.add_const(Constant::int(32, 30));
@@ -5950,7 +5950,7 @@ fn const_slice_pop_folds_both_results() {
 /// inserted element is visible at its index, the removed element and the shrunk length both fold.
 #[test]
 fn const_slice_insert_and_remove_fold() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
     let c2 = ssa.add_const(Constant::int(32, 30));
     let mid = ssa.add_const(Constant::int(32, 20));
@@ -6022,7 +6022,7 @@ fn const_slice_insert_and_remove_fold() {
 /// `MkSeqOfBlob` re-views a constant blob as a sequence; projecting a constant index folds.
 #[test]
 fn const_mk_seq_of_blob_folds() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let blob = ssa.add_const(Constant::Blob(Blob::new(
         Type::int(32),
         vec![Constant::int(32, 100), Constant::int(32, 200)],
@@ -6058,7 +6058,7 @@ fn const_mk_seq_of_blob_folds() {
 /// constant index, a non-constant element, and an over-cap `MkRepeated`.
 #[test]
 fn aggregate_folding_negative_cases() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
     let c1 = ssa.add_const(Constant::int(32, 20));
     let idx0 = ssa.add_const(Constant::int(32, 0));
@@ -6129,7 +6129,7 @@ fn aggregate_folding_negative_cases() {
 /// (non-constant) aggregate.
 #[test]
 fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
     let c1 = ssa.add_const(Constant::int(32, 20));
     let idx0 = ssa.add_const(Constant::int(32, 0));
@@ -6208,7 +6208,7 @@ fn aggregate_folding_refuses_oob_set_and_over_cap_constructors() {
 /// the canonical rejecter.
 #[test]
 fn slice_pop_insert_remove_refuse_oob() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 10));
     let idx_oob = ssa.add_const(Constant::int(32, 5));
     let (empty, rest, elem) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -6279,7 +6279,7 @@ fn slice_pop_insert_remove_refuse_oob() {
 /// numbering cannot see), while a call differing in the _used_ argument stays distinct.
 #[test]
 fn symbolic_jump_ignores_dead_argument() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let c1 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(1u64)));
@@ -6341,7 +6341,7 @@ fn symbolic_jump_ignores_dead_argument() {
 /// so the SCS contract (the `eval_call` constant channel untouched) holds.
 #[test]
 fn symbolic_jump_relates_call_to_open_expression() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
@@ -6406,7 +6406,7 @@ fn symbolic_jump_relates_call_to_open_expression() {
 /// def-less id as an illegal leader).
 #[test]
 fn symbolic_jump_depth_two_grafts_via_synthetic() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
@@ -6488,7 +6488,7 @@ fn symbolic_jump_depth_two_grafts_via_synthetic() {
 /// `CallDet[x, y]`.
 #[test]
 fn symbolic_jump_dead_argument_behind_depth_two() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let c5 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(5u64)));
@@ -6562,7 +6562,7 @@ fn symbolic_jump_dead_argument_behind_depth_two() {
 /// but the result is _not_ related to the caller-local full expression.
 #[test]
 fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let c1 = ssa.add_const(Constant::Field(FieldConfig::bn254().constant(1u64)));
@@ -6657,7 +6657,7 @@ fn symbolic_jump_depth_over_cap_falls_back_to_calldet() {
 /// and a distinct argument distinct, but does not graft the open expression.
 #[test]
 fn symbolic_jump_nested_call_falls_back_to_calldet() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let h = ssa.add_function("h".to_string());
     let g = ssa.add_function("g".to_string());
@@ -6734,7 +6734,7 @@ fn symbolic_jump_nested_call_falls_back_to_calldet() {
 /// match.
 #[test]
 fn symbolic_jump_preserves_noncommutativity() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let (x, y, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -6787,7 +6787,7 @@ fn symbolic_jump_preserves_noncommutativity() {
 /// `CallDet`-numbered either, so two such calls stay distinct.
 #[test]
 fn symbolic_jump_witness_operand_is_not_grafted() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
     let (x, wit, fa) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -6840,7 +6840,7 @@ fn symbolic_jump_witness_operand_is_not_grafted() {
 /// minting its synthetic scaffolding onto a real value's id.
 #[test]
 fn symbolic_jump_synthetic_does_not_collide_with_callee_only_constant() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let f = ssa.add_function("f".to_string());
 
