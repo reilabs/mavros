@@ -571,8 +571,9 @@ mod tests {
             Blob, Constant, SequenceTargetType, Type, TypeExpr,
             builder::{HLEmitter, HLSSABuilder},
         },
-        util::test::{falloc, fr},
+        util::test::{bn254_const, falloc},
     };
+    use mavros_artifacts::FieldConfig;
     use mavros_int_semantics::IntBits;
 
     fn idx_set(ks: &[usize]) -> HashSet<usize> {
@@ -586,7 +587,7 @@ mod tests {
     }
 
     fn solve_unlowered_boundary(param_type: Type) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         let (callee, ()) = sb.add_function("sink".to_string(), |fb| {
@@ -634,7 +635,7 @@ mod tests {
     /// merge — where unification welds them forever.
     #[test]
     fn merged_refs_do_not_alias() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -646,7 +647,7 @@ mod tests {
                 let cond = e.add_parameter(Type::bool());
                 let ra = falloc(&mut e);
                 let rb = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(ra, c);
                 e.store(rb, c);
 
@@ -686,7 +687,7 @@ mod tests {
     /// not alias.
     #[test]
     fn unmerged_refs_stay_separate() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -697,7 +698,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let ra = falloc(&mut e);
                 let rb = falloc(&mut e);
-                let c = e.field_const(fr(7));
+                let c = e.field_const(bn254_const(7));
                 e.store(ra, c);
                 let r = e.load(rb);
                 e.terminate_return(vec![r]);
@@ -715,7 +716,7 @@ mod tests {
     /// loaded ref aliases the stored ref.
     #[test]
     fn store_load_forwards_pointee_object() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -746,7 +747,7 @@ mod tests {
     /// singleton-reached (promotable) while the returned one is not.
     #[test]
     fn returned_ref_escapes_local_does_not() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -757,7 +758,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let kept = falloc(&mut e);
                 let returned = falloc(&mut e);
-                let c = e.field_const(fr(1));
+                let c = e.field_const(bn254_const(1));
                 e.store(kept, c);
                 e.store(returned, c);
                 e.terminate_return(vec![returned]);
@@ -787,7 +788,7 @@ mod tests {
     /// argument unconditionally.
     #[test]
     fn non_leaking_callee_keeps_arg_local() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -807,7 +808,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let q = falloc(&mut e);
-                let c = e.field_const(fr(3));
+                let c = e.field_const(bn254_const(3));
                 e.store(q, c);
                 e.call(reader, vec![q], 0);
                 let r = e.load(q);
@@ -830,7 +831,7 @@ mod tests {
     /// single, concrete, non-escaping object.
     #[test]
     fn returned_ref_resolves_to_callee_alloc() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -873,7 +874,7 @@ mod tests {
     /// arg-escape).
     #[test]
     fn callee_stashing_arg_in_global_escapes_it() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
@@ -893,7 +894,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let q = falloc(&mut e);
-                let c = e.field_const(fr(0));
+                let c = e.field_const(bn254_const(0));
                 e.store(q, c);
                 e.call(stash, vec![q], 0);
                 e.terminate_return(vec![]);
@@ -915,7 +916,7 @@ mod tests {
     /// to the caller's argument object through the recursion.
     #[test]
     fn recursion_converges_and_returns_resolve() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -954,7 +955,7 @@ mod tests {
     /// though the polymorphic (context-insensitive) view conflates them.
     #[test]
     fn distinct_call_sites_get_distinct_objects() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1008,7 +1009,7 @@ mod tests {
     /// their distinct elements and do not alias, and `splittable_cells` reports both indices.
     #[test]
     fn const_array_cells_split_per_index() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1057,7 +1058,7 @@ mod tests {
     /// with an empty points-to set — the structural splitting gate the SROA transform consumes.
     #[test]
     fn scalar_array_is_splittable() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1066,8 +1067,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c0 = e.field_const(fr(7));
-                let c1 = e.field_const(fr(9));
+                let c0 = e.field_const(bn254_const(7));
+                let c1 = e.field_const(bn254_const(9));
                 let arr = e.mk_seq(vec![c0, c1], SequenceTargetType::Array(2), Type::field());
                 let i1 = e.int_const(IntBits::one(32));
                 let got = e.array_get(arr, i1);
@@ -1088,7 +1089,7 @@ mod tests {
     /// read conservatively sees every element (the union), not one cell.
     #[test]
     fn dynamic_index_collapses_group() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1127,7 +1128,7 @@ mod tests {
     /// predecessors (the wholesale-copy soundness obligation) and never cell 1.
     #[test]
     fn phi_merged_array_is_cell_aligned() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1183,7 +1184,7 @@ mod tests {
     /// splittable.
     #[test]
     fn array_under_ref_collapses() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1217,7 +1218,7 @@ mod tests {
     /// all alias the one source value until an `ArraySet` diverges them — the O1 refinement).
     #[test]
     fn mk_repeated_scalar_is_splittable() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1226,7 +1227,7 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c = e.field_const(fr(3));
+                let c = e.field_const(bn254_const(3));
                 let arr = e.mk_repeated(c, SequenceTargetType::Array(4), 4, Type::field());
                 let i0 = e.int_const(IntBits::zero(32));
                 let got = e.array_get(arr, i0);
@@ -1246,7 +1247,7 @@ mod tests {
     /// pointless and the analysis reports it un-splittable.
     #[test]
     fn mk_repeated_ref_is_not_splittable() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1256,7 +1257,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let r = falloc(&mut e);
-                let c = e.field_const(fr(3));
+                let c = e.field_const(bn254_const(3));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(4), 4, Type::field().ref_of());
                 let i0 = e.int_const(IntBits::zero(32));
@@ -1275,7 +1276,7 @@ mod tests {
     /// `MkSeqOfBlob` refinement — it used to collapse unconditionally).
     #[test]
     fn const_blob_array_is_splittable() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1287,9 +1288,9 @@ mod tests {
                 let blob = e.emit_constant(Constant::Blob(Blob {
                     elem_type: Type::field(),
                     elements: vec![
-                        Constant::Field(fr(1)),
-                        Constant::Field(fr(2)),
-                        Constant::Field(fr(3)),
+                        Constant::Field(bn254_const(1)),
+                        Constant::Field(bn254_const(2)),
+                        Constant::Field(bn254_const(3)),
                     ],
                 }));
                 let arr = e.mk_seq_of_blob(Type::field(), blob);
@@ -1311,7 +1312,7 @@ mod tests {
     /// — and the object is a single, distinct one (not the may-alias-anything `External`).
     #[test]
     fn two_reads_same_global_alias() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
@@ -1345,7 +1346,7 @@ mod tests {
     /// (which would have forced may-alias-anything).
     #[test]
     fn read_global_does_not_alias_local() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
@@ -1374,7 +1375,7 @@ mod tests {
     /// (unknown memory), so the loaded value may-aliases anything — not the unsound empty set.
     #[test]
     fn load_through_global_yields_external() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of().ref_of()]); // Ref<Ref<Field>>
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
@@ -1404,7 +1405,7 @@ mod tests {
     /// it to unknown memory, so the stored object escapes.
     #[test]
     fn store_through_opaque_global_escapes() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of().ref_of()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
@@ -1442,7 +1443,7 @@ mod tests {
     /// opaque `External`.
     #[test]
     fn callee_write_through_param_resolves_precisely() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1500,7 +1501,7 @@ mod tests {
     /// object.
     #[test]
     fn callee_copies_param_into_param_pointee() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1547,7 +1548,7 @@ mod tests {
     /// precision the old "ignore the init value" builder lacked.
     #[test]
     fn alloc_seeds_cell_with_init_value() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;
         {
@@ -1578,7 +1579,7 @@ mod tests {
     /// the init seed, and `p` is published to a global, so `q` escapes through it.
     #[test]
     fn escape_through_alloc_init_value() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of().ref_of()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let mut captured = None;

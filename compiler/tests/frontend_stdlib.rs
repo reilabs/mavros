@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, FieldConfig, FieldId, Goldilocks, MavrosField};
+use mavros_artifacts::{Bn254, FieldConfig, FieldId, Goldilocks, MavrosField};
 use mavros_compiler::{
     Project, abi_helpers, api,
     compiler::codegen::CodeGenOptions,
@@ -173,7 +173,7 @@ fn sha256_goldilocks_unconstrained_matches_known_digests() {
 
 #[test]
 fn sha256_bn254_witnesses_match_known_digests() {
-    check_sha256::<Field>(false);
+    check_sha256::<Bn254>(false);
 }
 
 #[test]
@@ -201,6 +201,7 @@ fn blake_goldilocks_witnesses_match_reference_digests() {
 #[test]
 fn unsafe_cast_is_internal_to_the_standard_library() {
     common::assert_frontend_refused(
+        FieldConfig::bn254(),
         "use std::mavros::unsafe_cast;\n\nfn main(x: u8) -> pub u8 {\n    unsafe_cast(x as Field)\n}",
         "unsafe_cast is private and not visible from the current module",
     );
@@ -221,7 +222,7 @@ fn field_narrowing_casts_truncate_on_both_fields() {
              let x = Field::from_le_bytes_checked(x); \
              [(x as u8) as u32, x as u32, (x as i8) as u32] }}"
         );
-        check_program::<Field>(&source, &inputs, !mode.is_empty());
+        check_program::<Bn254>(&source, &inputs, !mode.is_empty());
         check_program::<Goldilocks>(&source, &inputs, !mode.is_empty());
     }
 }
@@ -241,7 +242,7 @@ fn field_to_u128_truncates_above_the_host_word() {
             "{mode}fn main(x: [u8; 32]) -> pub [u32; 2] {{ \
              let w = Field::from_le_bytes_checked(x) as u128; [(w >> 127) as u32, w as u32] }}"
         );
-        check_program::<Field>(&source, &inputs, !mode.is_empty());
+        check_program::<Bn254>(&source, &inputs, !mode.is_empty());
     }
 }
 
@@ -312,6 +313,6 @@ fn to_le_bytes_past_the_element_compiles_and_fails_at_its_bound() {
             F::ID
         );
     }
-    check::<Field>();
+    check::<Bn254>();
     check::<Goldilocks>();
 }

@@ -583,7 +583,7 @@ fn cast_target_for_integer_type(ty: &Type) -> CastTarget {
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+    use mavros_artifacts::{Bn254, Goldilocks, InputValueOrdered, MavrosField};
 
     use super::*;
     use crate::{
@@ -607,7 +607,7 @@ mod tests {
         for endianness in [Endianness::Little, Endianness::Big] {
             for count in [MIN_LOOPED_RUN, 8] {
                 for guarded in [false, true] {
-                    check_every_radix_byte_is_held_to_a_byte::<Field>(
+                    check_every_radix_byte_is_held_to_a_byte::<Bn254>(
                         FieldConfig::bn254(),
                         endianness,
                         count,
@@ -630,7 +630,7 @@ mod tests {
         count: usize,
         guarded: bool,
     ) {
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let bytes = ssa.fresh_value();
 
@@ -724,7 +724,7 @@ mod tests {
     }
 
     fn lowered_to_bits(guarded: bool, endianness: Endianness) -> (HLSSA, ValueId) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let value = ssa.fresh_value();
         let condition = guarded.then(|| ssa.fresh_value());
         let result = ssa.fresh_value();

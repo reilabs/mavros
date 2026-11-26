@@ -215,7 +215,7 @@ pub(crate) fn check_determinism(tests: &[String], runs: usize, jobs: usize, fiel
     let scratch = tempfile::tempdir().expect("Cannot create scratch dir");
     let total = resolved.len() * runs;
     eprintln!(
-        "Checking determinism: {} test(s) x {runs} run(s), {jobs} parallel job(s)",
+        "Checking determinism over {field}: {} test(s) x {runs} run(s), {jobs} parallel job(s)",
         resolved.len()
     );
 
@@ -262,6 +262,7 @@ pub(crate) fn check_determinism(tests: &[String], runs: usize, jobs: usize, fiel
         .collect();
 
     let mut all_deterministic = true;
+    println!("## {field}\n");
     println!("| Test | Deterministic | First divergence |");
     println!("|------|---------------|------------------|");
     for (t, entry) in resolved.iter().enumerate() {
@@ -282,6 +283,7 @@ pub(crate) fn check_determinism(tests: &[String], runs: usize, jobs: usize, fiel
             println!("| {} | ❌ | {} |", entry.display_name, divergent.join(", "));
         }
     }
+    println!();
 
     if all_deterministic {
         eprintln!("All outputs deterministic across {runs} runs");

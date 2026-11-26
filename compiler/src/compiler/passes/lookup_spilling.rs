@@ -797,7 +797,7 @@ fn extract_low_chunk(
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+    use mavros_artifacts::{Bn254, Goldilocks, InputValueOrdered, MavrosField};
 
     use super::*;
     use crate::{
@@ -815,7 +815,7 @@ mod tests {
     /// guard gates every lookup.
     fn check_looped_chunks<F: MavrosField>(bits: usize, guarded: bool) {
         let field = F::CONFIG;
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             let entry = b.function.get_entry_id();
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn a_looped_chunk_of_a_spilled_range_check_is_held_to_its_width() {
         for guarded in [false, true] {
-            check_looped_chunks::<Field>(128, guarded);
+            check_looped_chunks::<Bn254>(128, guarded);
             check_looped_chunks::<Goldilocks>(60, guarded);
         }
     }

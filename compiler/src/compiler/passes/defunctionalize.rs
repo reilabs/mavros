@@ -1278,10 +1278,11 @@ fn replace_function_types_in_instruction(instr: &mut OpCode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mavros_artifacts::FieldConfig;
 
     #[test]
     fn function_types_are_normalized_without_any_function_values_or_calls() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
             let function_type = Type::function_returning(vec![Type::field()]);
@@ -1308,7 +1309,7 @@ mod tests {
 
     #[test]
     fn storing_through_a_dynamically_indexed_reference_updates_the_original_target() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let f = ssa.add_function("f".into());
         let g = ssa.add_function("g".into());
@@ -1342,7 +1343,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "unsupported function-valued instruction")]
     fn an_unsupported_producer_is_not_mistaken_for_an_empty_target_set() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
             let entry = b.function.get_entry_id();
@@ -1361,7 +1362,7 @@ mod tests {
 
     #[test]
     fn array_to_slice_preserves_function_targets_by_tuple_field() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let f = ssa.add_function("f".to_string());
         let g = ssa.add_function("g".to_string());
@@ -1439,7 +1440,7 @@ mod tests {
     /// dispatchers would never fold in merge_identical_functions.
     #[test]
     fn dispatch_function_is_located_at_its_synthetic_source() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let f = ssa.add_function("f".to_string());
         let g = ssa.add_function("g".to_string());
 
@@ -1470,7 +1471,7 @@ mod tests {
     fn identical_dispatchers_fold_in_merge_identical_functions() {
         use crate::compiler::passes::merge_identical_functions::MergeIdenticalFunctions;
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let f = ssa.add_function("f".to_string());
         let g = ssa.add_function("g".to_string());
 
@@ -1503,7 +1504,7 @@ mod tests {
     fn fn_ptr_nested_in_blob_constant_reaches_its_call_site() {
         use crate::compiler::ssa::hlssa::Blob;
 
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let callee;
         let mut elem = None;
@@ -1540,7 +1541,7 @@ mod tests {
 
     #[test]
     fn fn_ptr_stored_through_a_field_reference_reaches_its_call_site() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (bar, qux, callee) = {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1575,7 +1576,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Guard")]
     fn guarded_instruction_is_rejected() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);

@@ -141,8 +141,8 @@ pub mod test {
         ssa::{ValueId, hlssa::builder::HLEmitter},
     };
 
-    /// Convert the provided `n` into a field value.
-    pub fn fr(n: u64) -> Field {
+    /// `n` as a bn254 element.
+    pub fn bn254_const(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
     }
 
@@ -196,7 +196,7 @@ pub mod test {
     /// `op_counts`; tests that care about the contents `store` to the cell afterward (the store
     /// overwrites the seed).
     pub fn falloc(e: &mut impl HLEmitter) -> ValueId {
-        let init = e.field_const(fr(0));
+        let init = e.field_const(bn254_const(0));
         e.alloc(init)
     }
 }

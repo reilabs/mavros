@@ -12,7 +12,7 @@ use std::{
 
 use cargo_metadata::MetadataCommand;
 
-use mavros_artifacts::{Field as Bn254, FieldId, Goldilocks, MavrosField, WitnessManifest};
+use mavros_artifacts::{Bn254, FieldId, Goldilocks, MavrosField, WitnessManifest};
 use mavros_compiler::{
     Project, abi_helpers, api,
     collections::{HashMap, HashSet},
@@ -46,8 +46,8 @@ use scoring::*;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Child mode: --run-single <path> [--expect-failure] [--expected-error TEXT] [--analyze-r1cs]
-    // [--field F], as `child_args` spells it.
+    // Child mode: --run-single <path> --field F [--expect-failure] [--expected-error TEXT]
+    // [--analyze-r1cs], as `child_args` spells it.
     if let Some(child) = ChildArgs::parse(&args) {
         run_single(
             child.path,
@@ -110,13 +110,17 @@ fn main() {
 
     // Determinism check mode: --check-determinism [--runs N] [--jobs N] [--field F] [test names...]
     // Compiles each test several times in fresh processes and verifies the compiler
-    // output (SSA dumps, bytecode, R1CS shape) is byte-identical across runs.
+    // output (SSA dumps, bytecode, R1CS shape) is byte-identical across runs, over `--field` or
+    // over every field.
     if args.len() >= 2 && args[1] == "--check-determinism" {
         let runs = parse_runs_arg(&args);
         let jobs = parse_jobs_arg(&args);
         let tests = parse_determinism_tests(&args);
-        let field = parse_field_arg(&args);
-        std::process::exit(check_determinism(&tests, runs, jobs, field));
+        let codes: Vec<i32> = parse_fields_arg(&args)
+            .into_iter()
+            .map(|field| check_determinism(&tests, runs, jobs, field))
+            .collect();
+        std::process::exit(first_failure(codes));
     }
 
     // Parent mode
@@ -166,7 +170,12 @@ impl<'a> ChildArgs<'a> {
             expect_failure: flags.iter().any(|a| a == "--expect-failure"),
             expected_error: parse_expected_error_arg(flags),
             analyze: flags.iter().any(|a| a == "--analyze-r1cs"),
-            field: parse_field_arg(args),
+            field: parse_field_arg(args).unwrap_or_else(|| {
+                panic!(
+                    "--run-single requires --field, one of {}",
+                    FieldId::ALL.map(FieldId::name).join(", ")
+                )
+            }),
         })
     }
 }
@@ -254,21 +263,24 @@ fn parse_only_args(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn parse_field_arg(args: &[String]) -> FieldId {
-    let Some(index) = args.iter().position(|arg| arg == "--field") else {
-        return FieldId::Bn254;
-    };
-    let name = args.get(index + 1).map_or("", String::as_str);
-    name.parse()
-        .unwrap_or_else(|error| panic!("--field: {error}"))
+/// The first nonzero exit code among `codes`, or 0 when every one succeeded.
+fn first_failure(codes: impl IntoIterator<Item = i32>) -> i32 {
+    codes.into_iter().find(|&code| code != 0).unwrap_or(0)
 }
 
+/// The field `--field` names, or `None` without the flag.
+fn parse_field_arg(args: &[String]) -> Option<FieldId> {
+    let index = args.iter().position(|arg| arg == "--field")?;
+    let name = args.get(index + 1).map_or("", String::as_str);
+    Some(
+        name.parse()
+            .unwrap_or_else(|error| panic!("--field: {error}")),
+    )
+}
+
+/// The field `--field` names, or every field without the flag.
 fn parse_fields_arg(args: &[String]) -> Vec<FieldId> {
-    if args.iter().any(|arg| arg == "--field") {
-        vec![parse_field_arg(args)]
-    } else {
-        FieldId::ALL.to_vec()
-    }
+    parse_field_arg(args).map_or_else(|| FieldId::ALL.to_vec(), |field| vec![field])
 }
 
 // ── Parent: discover & run all tests ──────────────────────────────────
@@ -435,12 +447,9 @@ fn run_parent(
     // If children built it themselves, their `cargo metadata`/`cargo build` invocations would
     // walk the noir git checkout while other children create and delete `mavros_debug` dirs for
     // tests living inside it, crashing whichever child loses the race.
-    let wasm_runtime_lib = fields
-        .contains(&FieldId::Bn254)
-        .then(|| wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}")));
-    if let Some(path) = &wasm_runtime_lib {
-        eprintln!("Built wasm runtime at: {}", path.display());
-    }
+    let wasm_runtime_lib =
+        wasm_runtime::locate_or_build().unwrap_or_else(|error| panic!("{error}"));
+    eprintln!("Built wasm runtime at: {}", wasm_runtime_lib.display());
 
     let exe = env::current_exe().expect("Cannot determine own exe path");
     let total = entries.len() * fields.len();
@@ -469,14 +478,12 @@ fn run_parent(
                     for (field_idx, &field) in fields.iter().enumerate() {
                         let ignored = is_ignored_test(entry, ignored_tests);
                         let expectation = expectation_on(entry, field);
-                        let mut result = if ignored {
-                            ignored_test_result(&entry.display_name)
+                        let result = if ignored {
+                            ignored_test_result(&entry.display_name, field)
                         } else {
                             let mut cmd = Command::new(&exe);
                             cmd.args(child_args(&entry.path, field, expectation, analyze));
-                            if let Some(path) = &wasm_runtime_lib {
-                                cmd.env(wasm_runtime::WASM_RUNTIME_LIB_ENV, path);
-                            }
+                            cmd.env(wasm_runtime::WASM_RUNTIME_LIB_ENV, &wasm_runtime_lib);
                             let mut child = cmd
                                 .stdout(Stdio::piped())
                                 .stderr(Stdio::inherit())
@@ -488,9 +495,8 @@ fn run_parent(
                                 .map_while(Result::ok)
                                 .collect();
                             let _ = child.wait();
-                            parse_child_output(&entry.display_name, expectation, &lines)
+                            parse_child_output(&entry.display_name, field, expectation, &lines)
                         };
-                        result.field = field;
                         let n = completed.fetch_add(1, Ordering::SeqCst) + 1;
                         let suffix = if ignored { " (ignored)" } else { "" };
                         eprintln!(

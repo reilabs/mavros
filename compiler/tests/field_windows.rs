@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, Goldilocks, MavrosField};
+use mavros_artifacts::{Bn254, Goldilocks, MavrosField};
 
 /// `u8`, `u16` and `u32` windows of the witnessed element `f = x + y`, and a `u16` window of the
 /// `u32` one.
@@ -32,7 +32,7 @@ fn several_windows_of_one_element_each_read_their_bits<F: MavrosField>() {
 
 #[test]
 fn several_windows_of_one_element_each_read_their_bits_on_bn254() {
-    several_windows_of_one_element_each_read_their_bits::<Field>();
+    several_windows_of_one_element_each_read_their_bits::<Bn254>();
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn the_windows_of_one_element_share_a_decomposition<F: MavrosField>() {
 
 #[test]
 fn the_windows_of_one_element_share_a_decomposition_on_bn254() {
-    the_windows_of_one_element_share_a_decomposition::<Field>();
+    the_windows_of_one_element_share_a_decomposition::<Bn254>();
 }
 
 #[test]

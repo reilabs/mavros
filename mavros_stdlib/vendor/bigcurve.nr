@@ -54,6 +54,11 @@ pub mod scalar_field {
             result
         }
 
+        // FIELD-ASSUMPTION: the reconstruction reads `bignum`'s 120-bit lower limbs and a high
+        // limb of the remaining bits (see `ecdsa::verify` for the slice count). Each lower limb
+        // accumulates signed nibbles in a native `Field`, and `handle_overflow` tells a negative
+        // sum by its `u128` truncation reaching 2^120, which holds because BN254's modulus is
+        // about 2^125 modulo 2^128.
         pub fn from_bignum<BN>(x: BN) -> Self
         where
             BN: BigNum,

@@ -70,6 +70,7 @@ mod tests {
             hlssa::{BinaryArithOpKind, Type},
         },
     };
+    use mavros_artifacts::FieldConfig;
 
     /// Run only the witness-agnostic normalization (no `SimplifyAsserts`, no DCE).
     fn normalize(ssa: &mut HLSSA) {
@@ -104,7 +105,7 @@ mod tests {
     /// to the R1CS-native `AssertR1C`, even for a `Field`-mul left-hand side.
     #[test]
     fn assert_of_eq_cmp_becomes_assert_cmp_eq_without_r1c() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (a, b, mul, c, eq) = (
             ssa.fresh_value(),
             ssa.fresh_value(),
@@ -144,7 +145,7 @@ mod tests {
     /// `assert(a < b)` normalizes to `AssertCmp{Lt, a, b}`.
     #[test]
     fn assert_of_lt_cmp_becomes_assert_cmp_lt() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (a, b, lt) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
         let f = ssa.get_unique_entrypoint_mut();
@@ -168,7 +169,7 @@ mod tests {
     /// `assert(l & r)` over `u1` splits into `assert(l)`, `assert(r)`.
     #[test]
     fn assert_of_u1_and_splits_into_two_asserts() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (l, r, and) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
         let f = ssa.get_unique_entrypoint_mut();
@@ -201,7 +202,7 @@ mod tests {
     /// An asserted boolean that is neither a comparison nor a `u1`-`And` is left as a bare `Assert`.
     #[test]
     fn opaque_assert_is_left_unchanged() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let w = ssa.fresh_value();
 
         let f = ssa.get_unique_entrypoint_mut();

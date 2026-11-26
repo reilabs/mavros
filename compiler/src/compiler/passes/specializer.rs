@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn an_unknown_branch_declines_speculation() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let body = ssa.take_function(ssa.get_unique_entrypoint_id());
         let unknown = Val(ssa.fresh_value());
         let mut ctx = SpecializationState {
@@ -1184,11 +1184,11 @@ mod tests {
         a: (usize, u128),
         b: (usize, u128),
     ) -> Option<(usize, u128)> {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa
             .get_function_ids()
             .next()
-            .expect("HLSSA::new makes a main");
+            .expect("HLSSA::with_main makes a main");
         let body = ssa.take_function(fid);
 
         let lhs = ssa.add_const(Constant::int(a.0, a.1));
@@ -1217,11 +1217,11 @@ mod tests {
     /// includes the width.
     #[test]
     fn a_constant_eq_assertion_compares_values_and_not_widths() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa
             .get_function_ids()
             .next()
-            .expect("HLSSA::new makes a main");
+            .expect("HLSSA::with_main makes a main");
         let body = ssa.take_function(fid);
         let mut ctx = SpecializationState {
             ssa: &ssa,
@@ -1251,11 +1251,11 @@ mod tests {
     /// not in `IntBits`'s `Debug` form (`8'hc8 != 8'h64`).
     #[test]
     fn a_failed_constant_eq_names_its_operands_in_decimal() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa
             .get_function_ids()
             .next()
-            .expect("HLSSA::new makes a main");
+            .expect("HLSSA::with_main makes a main");
         let body = ssa.take_function(fid);
         let mut ctx = SpecializationState {
             ssa: &ssa,
@@ -1275,11 +1275,11 @@ mod tests {
     /// `of_int` records the constant at the width it was handed.
     #[test]
     fn a_seeded_constant_is_recorded_at_its_own_width() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa
             .get_function_ids()
             .next()
-            .expect("HLSSA::new makes a main");
+            .expect("HLSSA::with_main makes a main");
         let body = ssa.take_function(fid);
         let mut ctx = SpecializationState {
             ssa: &ssa,
@@ -1305,11 +1305,11 @@ mod tests {
     /// underflowing the big-endian position or reading a bit the decomposition does not have.
     #[test]
     fn a_constant_bit_read_past_the_decomposition_is_left_to_fail() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let fid = ssa
             .get_function_ids()
             .next()
-            .expect("HLSSA::new makes a main");
+            .expect("HLSSA::with_main makes a main");
         let body = ssa.take_function(fid);
         let mut ctx = SpecializationState {
             ssa: &ssa,

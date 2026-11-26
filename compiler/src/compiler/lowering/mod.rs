@@ -101,7 +101,7 @@ impl SSAConverter {
         file_manager: Option<&FileManager>,
         field: FieldConfig,
     ) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         self.declared_parameters = Self::collect_declared_parameters(program);
 
         // Phase 1: Register all functions to handle mutual recursion.
@@ -584,11 +584,6 @@ impl SSAConverter {
 }
 
 impl HLSSA {
-    /// Create SSA over bn254 directly from a monomorphized program.
-    pub fn from_program(program: &Program) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
-        Self::from_program_with_file_manager(program, None, FieldConfig::bn254())
-    }
-
     /// Create SSA over `field` directly from a monomorphized program, preserving source locations
     /// when a Noir file manager is available.
     pub fn from_program_with_file_manager(

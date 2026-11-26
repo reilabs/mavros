@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, FieldConfig};
+use mavros_artifacts::{Bn254, FieldConfig};
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions, driver::Error};
 
 /// Exercise source parsing, monomorphization, input decoding, witness generation and R1CS.
@@ -16,7 +16,7 @@ fn check(source: &str, inputs: &str) {
         )
         .unwrap();
     }
-    let (mut driver, r1cs) = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false)
+    let (mut driver, r1cs) = api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false)
         .unwrap_or_else(|error| panic!("{source}: {error:?}"));
     let mut binary = api::compile_bytecode(
         &mut driver,
@@ -244,7 +244,7 @@ fn field_cast_differential(
 /// generation or the constraints otherwise.
 fn assert_cast_refused(lane: CastLane, source: &str, inputs: &str) {
     let dir = common::noir_project(source);
-    let compiled = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false);
+    let compiled = api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false);
     if let CastLane::Constant = lane {
         let error = compiled.err().unwrap_or_else(|| panic!("{source}"));
         assert!(
@@ -375,7 +375,7 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
             }}"
         ));
         let (mut driver, r1cs) =
-            api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+            api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
         let binary = api::compile_bytecode(
             &mut driver,
             CodeGenOptions {
@@ -421,7 +421,7 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
 fn wide_abi_checks_input_ranges_and_declared_returns() {
     let dir = common::noir_project(include_str!("../../noir_tests/bigint_abi/src/main.nr"));
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {
@@ -462,7 +462,7 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         result.out_wit_post_comm.as_slice(),
     ]
     .concat();
-    forged[high_column] = mavros_artifacts::Field::from(wrong_high);
+    forged[high_column] = Bn254::from(wrong_high);
     assert!(
         r1cs.unsatisfied_constraint(&forged).is_some(),
         "wrong high return limb must violate R1CS"
@@ -474,7 +474,7 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         format!("a = ['{out_of_range}', 0]\nb = [0, 0]\nreturn = [0, 0]"),
     )
     .unwrap();
-    assert!(api::read_prover_inputs::<Field>(dir.path(), driver.abi()).is_err());
+    assert!(api::read_prover_inputs::<Bn254>(dir.path(), driver.abi()).is_err());
 }
 
 /// Each refusal is matched by the diagnostic the rule under test emits, so that a program that
@@ -500,7 +500,7 @@ fn frontend_rejects_widths_outside_the_language() {
             "Integer literal does not fit its type",
         ),
     ] {
-        common::assert_frontend_refused(source, expected);
+        common::assert_frontend_refused(FieldConfig::bn254(), source, expected);
     }
 }
 
@@ -520,7 +520,7 @@ fn entry_integers_of_any_width_up_to_the_field_cross() {
          z = ['0x80000000000000000000000000000000000000000000000000', 1]\n\
          return = '0x80000000000000000000000000000000000000000000000001'",
     );
-    let compiled = common::compile::<Field>(source);
+    let compiled = common::compile::<Bn254>(source);
     let manifest = compiled.driver.witness_manifest(&compiled.r1cs).unwrap();
     let widths: Vec<_> = manifest
         .parameters
@@ -582,7 +582,7 @@ fn frontend_refuses_a_cast_into_field_past_the_modulus() {
             SIGNED.to_string(),
         ),
     ] {
-        common::assert_frontend_refused(source, &expected);
+        common::assert_frontend_refused(FieldConfig::bn254(), source, &expected);
     }
 
     let dir = common::noir_project("fn main() { let x: u253 = 5; let _ = x as Field; }");

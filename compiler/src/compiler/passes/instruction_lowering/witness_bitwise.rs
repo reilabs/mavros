@@ -1210,7 +1210,7 @@ mod tests {
     #[test]
     fn a_ragged_decomposition_bounds_its_top_limb_at_its_own_width() {
         let bits = 100usize;
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let value = ssa.fresh_value();
         {
@@ -1289,7 +1289,7 @@ mod tests {
     /// would still pass at the shortest widths. The test below pins the mismatch check.
     #[test]
     fn a_bitwise_decomposition_is_lowered_limb_by_limb_at_any_length() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1329,7 +1329,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "decomposed into different limb counts")]
     fn a_bitwise_pair_of_unequal_length_is_refused_rather_than_truncated() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -1434,7 +1434,7 @@ mod tests {
     /// or pure, lowered by this rule alone, so that what it emits is not lowered further, and the
     /// value its result is cast from.
     fn guarded_signed_shr(witnessed_amount: bool) -> (HLSSA, ValueId, ValueId) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (condition, lhs, rhs, result) = (
             ssa.fresh_value(),
             ssa.fresh_value(),

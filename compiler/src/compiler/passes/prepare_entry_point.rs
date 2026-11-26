@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn reference_arguments_preserve_mixed_order_and_call_location() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let params = vec![Type::field().ref_of(), Type::int(8), Type::int(32).ref_of()];
         let callee = add_sink(&mut ssa, &params);
@@ -1106,7 +1106,7 @@ mod tests {
 
     #[test]
     fn reference_wrapper_is_shared_across_callers_and_ordinary_calls_stay_intact() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let callee = add_sink(&mut ssa, &[Type::field().ref_of()]);
         let other = ssa.add_function("other".to_string());
@@ -1157,7 +1157,7 @@ mod tests {
 
     #[test]
     fn ordinary_reference_calls_are_unchanged() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let callee = add_sink(&mut ssa, &[Type::field().ref_of()]);
         HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
@@ -1174,7 +1174,7 @@ mod tests {
 
     #[test]
     fn reference_free_boundary_calls_need_no_wrapper_or_loads() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let callee = add_sink(&mut ssa, &[Type::field(), Type::int(8).array_of(3)]);
         HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
@@ -1194,7 +1194,7 @@ mod tests {
 
     #[test]
     fn reference_wrapper_preserves_returns_and_witness_preparation() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let callee = HLSSABuilder::new(&mut ssa)
             .add_function("read".to_string(), |fb| {
@@ -1249,7 +1249,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "reference wrapper expects 1")]
     fn malformed_reference_call_reports_arity_as_an_ice() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let callee = add_sink(&mut ssa, &[Type::field().ref_of()]);
         HLSSABuilder::new(&mut ssa).modify_function(main, |fb| {
@@ -1271,7 +1271,7 @@ mod tests {
             (Type::field().slice_of(), true),
             (Type::tuple_of(vec![unit, Type::field()]), true),
         ] {
-            let mut ssa = HLSSA::with_main("main".into());
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".into());
             let main = ssa.get_unique_entrypoint_id();
             let callee = ssa.add_function("callee".into());
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1334,7 +1334,7 @@ mod tests {
 
     #[test]
     fn absent_abi_return_has_no_slots_or_return_reconstruction() {
-        let mut ssa = HLSSA::with_main("main".into());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".into());
         let main = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
             b.function.add_return_type(Type::tuple_of(vec![]));
@@ -1392,7 +1392,7 @@ mod tests {
 
     #[test]
     fn public_params_are_written_pinned_before_private_unpinned() {
-        let mut ssa = HLSSA::with_main("main".into());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".into());
         let main = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
             let entry = b.function.get_entry_id();
@@ -1434,7 +1434,7 @@ mod tests {
     fn absent_abi_return_rejects_live_ssa_results() {
         for typ in [Type::int(8), Type::field().array_of(0)] {
             let failure = std::panic::catch_unwind(|| {
-                let mut ssa = HLSSA::with_main("main".into());
+                let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".into());
                 let main = ssa.get_unique_entrypoint_id();
                 HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
                     b.function.add_return_type(typ.clone());

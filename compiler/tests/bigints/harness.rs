@@ -27,7 +27,7 @@ use std::{
     sync::OnceLock,
 };
 
-use mavros_artifacts::{Field, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
+use mavros_artifacts::{Bn254, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
 use mavros_int_semantics::{IntBits, IntOp, Outcome, residue};
 use num_bigint::BigUint;
 use rand::{SeedableRng as _, rngs::StdRng};
@@ -69,9 +69,9 @@ pub trait HarnessField: MavrosField {
     fn of_biguint(value: &BigUint) -> Self;
 }
 
-impl HarnessField for Field {
+impl HarnessField for Bn254 {
     fn of_biguint(value: &BigUint) -> Self {
-        Field::from(value.clone())
+        Bn254::from(value.clone())
     }
 }
 
@@ -90,26 +90,17 @@ impl HarnessField for Goldilocks {
 // Building programs
 // ---------------------------------------------------------------------------
 
-/// Builds `main(params...) -> returns...` over bn254 with `body` as its single-block body.
+/// Builds `main(params...) -> returns...` over `field` with `body` as its single-block body.
 ///
 /// Each parameter becomes a witness column, range-checked for an integer, so the body runs on the
 /// witnessed lane; constants folded in it take the pure lane.
 pub fn main_program(
-    params: &[Type],
-    returns: &[Type],
-    body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> Vec<ValueId>,
-) -> HLSSA {
-    main_program_in(FieldConfig::bn254(), params, returns, body)
-}
-
-/// [`main_program`] over `field`.
-pub fn main_program_in(
     field: FieldConfig,
     params: &[Type],
     returns: &[Type],
     body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> Vec<ValueId>,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let mut sb = HLSSABuilder::new(&mut ssa);
     sb.modify_function(main_id, |b| {
@@ -129,8 +120,8 @@ pub fn main_program_in(
 }
 
 /// Builds `main(lhs: int(bits), rhs: int(bits)) -> int(bits) { lhs op rhs }` over `field`.
-pub fn binary_op_program_in(field: FieldConfig, kind: BinaryArithOpKind, bits: usize) -> HLSSA {
-    main_program_in(
+pub fn binary_op_program(field: FieldConfig, kind: BinaryArithOpKind, bits: usize) -> HLSSA {
+    main_program(
         field,
         &[Type::int(bits), Type::int(bits)],
         &[Type::int(bits)],
@@ -141,29 +132,17 @@ pub fn binary_op_program_in(field: FieldConfig, kind: BinaryArithOpKind, bits: u
 // INPUTS
 // ================================================================================================
 
-/// The bn254 element the entry point expects for one integer input: its unsigned magnitude, however
-/// the operation reads it.
-#[must_use]
-pub fn input_field(value: &IntBits) -> Field {
-    input_element(value)
-}
-
-/// [`input_field`] in `F`.
+/// The element of `F` the entry point expects for one integer input: its unsigned magnitude,
+/// however the operation reads it.
 #[must_use]
 pub fn input_element<F: HarnessField>(value: &IntBits) -> F {
     F::of_biguint(&BigUint::from(value))
 }
 
-/// The positional input block over bn254: the entry point's parameters followed by its declared
-/// return values, in declaration order, each flattened by [`input_field`].
+/// The positional input block in `F`: the entry point's parameters followed by its declared return
+/// values, in declaration order, each flattened by [`input_element`].
 #[must_use]
-pub fn input_block(values: &[&IntBits]) -> Vec<InputValueOrdered> {
-    input_block_in(values)
-}
-
-/// [`input_block`] in `F`.
-#[must_use]
-pub fn input_block_in<F: HarnessField>(values: &[&IntBits]) -> Vec<InputValueOrdered<F>> {
+pub fn input_block<F: HarnessField>(values: &[&IntBits]) -> Vec<InputValueOrdered<F>> {
     values
         .iter()
         .map(|v| InputValueOrdered::Field(input_element(v)))
@@ -174,7 +153,7 @@ pub fn input_block_in<F: HarnessField>(values: &[&IntBits]) -> Vec<InputValueOrd
 // ================================================================================================
 
 /// The results of one run of a compiled program.
-pub enum Verdict<F: MavrosField = Field> {
+pub enum Verdict<F: MavrosField> {
     /// Witness generation ran, every constraint holds against the witness it produced, and the
     /// `a`/`b`/`c` evaluations the VM emitted agree with the constraint system.
     Accepted { witness: Vec<F> },
@@ -250,7 +229,7 @@ impl<F: MavrosField> Verdict<F> {
 /// A hand-built program compiled all the way to executable artifacts.
 ///
 /// The R1CS and the VM binary are positionally coupled, so they are kept together.
-pub struct Compiled<F: HarnessField = Field> {
+pub struct Compiled<F: HarnessField> {
     /// The compiled constraint system: the two layouts witness generation runs against, and the
     /// constraints a witness is judged by.
     r1cs: SealedR1CS<F>,
@@ -324,13 +303,6 @@ pub const KEEP_DUMPS_ENV: &str = "MAVROS_ORACLE_DUMPS";
 /// Environment variable fixing the seed the AD check draws its coefficients from, to replay a
 /// failure it reported.
 pub const AD_SEED_ENV: &str = "MAVROS_ORACLE_AD_SEED";
-
-impl Compiled {
-    /// [`Self::compile`] for a program over bn254.
-    pub fn new(ssa: HLSSA) -> Result<Self, DriverError> {
-        Self::compile(ssa)
-    }
-}
 
 impl<F: HarnessField> Compiled<F> {
     /// Whether the WASM lane was built for this program.
@@ -653,7 +625,7 @@ impl<F: HarnessField> Compiled<F> {
 // ================================================================================================
 
 /// One compiled binary-operation program, held across operand pairs.
-pub struct BinaryOpOracle<F: HarnessField = Field> {
+pub struct BinaryOpOracle<F: HarnessField> {
     /// The SSA operation the program computes.
     kind: BinaryArithOpKind,
 
@@ -669,17 +641,6 @@ pub struct BinaryOpOracle<F: HarnessField = Field> {
     compiled: Compiled<F>,
 }
 
-impl BinaryOpOracle {
-    /// [`Self::compile`] over bn254.
-    ///
-    /// # Errors
-    ///
-    /// Propagates a pipeline refusal. A pipeline _panic_ is not caught.
-    pub fn new(kind: BinaryArithOpKind, bits: usize) -> Result<Self, DriverError> {
-        Self::compile(kind, bits)
-    }
-}
-
 impl<F: HarnessField> BinaryOpOracle<F> {
     /// Compiles `main(lhs, rhs) -> result { lhs op rhs }` over `F` at the given width.
     ///
@@ -691,7 +652,7 @@ impl<F: HarnessField> BinaryOpOracle<F> {
             kind,
             op: IntOp::from(kind),
             bits,
-            compiled: Compiled::compile(binary_op_program_in(F::CONFIG, kind, bits))?,
+            compiled: Compiled::compile(binary_op_program(F::CONFIG, kind, bits))?,
         })
     }
 
@@ -725,7 +686,7 @@ impl<F: HarnessField> BinaryOpOracle<F> {
         let expectation = eval_expectation(self.op, lhs, rhs);
         let verdict = self
             .compiled
-            .run(&input_block_in(&[lhs, rhs, &expectation.declared_return]));
+            .run(&input_block(&[lhs, rhs, &expectation.declared_return]));
 
         if expectation.accepted {
             if verdict.is_accepted() {
@@ -780,7 +741,7 @@ impl<F: HarnessField> BinaryOpOracle<F> {
         let expected = mavros_int_semantics::eval(self.op, lhs, rhs)
             .value()
             .expect("operands the model rejects have no right answer to perturb");
-        let honest = self.compiled.run(&input_block_in(&[lhs, rhs, &expected]));
+        let honest = self.compiled.run(&input_block(&[lhs, rhs, &expected]));
         let Some(witness) = honest.witness() else {
             return Err(format!(
                 "{:?}({lhs:?}, {rhs:?}): the honest run was not accepted, so there is no witness \

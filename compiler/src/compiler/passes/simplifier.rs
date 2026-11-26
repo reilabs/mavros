@@ -645,12 +645,13 @@ fn const_as_usize(ssa: &HLSSA, v: ValueId) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::compiler::ssa::{Terminator, hlssa::builder::HLEmitter};
+    use mavros_artifacts::FieldConfig;
 
     /// A strip of a value a fold has made pure folds away, not an ICE: `w * 0` folds to the
     /// constant zero, leaving a `ValueOf` of a pure value.
     #[test]
     fn a_strip_of_a_value_folded_pure_is_that_value() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let (witness, product, stripped) =
             (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
@@ -692,7 +693,7 @@ mod tests {
     /// `main(x: WitnessOf<typ>) -> (0 - (0 - x))` after simplification: what it returns, and how
     /// many instructions are left.
     fn double_subtraction_of(typ: Type, zero: Constant) -> (ValueId, ValueId, usize) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let (x, inner, outer) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
         let zero = ssa.add_const(zero);
@@ -729,7 +730,7 @@ mod tests {
     /// unused for DCE.
     #[test]
     fn a_double_negation_of_an_element_is_the_element() {
-        let field = HLSSA::with_main("main".to_string()).field();
+        let field = HLSSA::with_main(FieldConfig::bn254(), "main".to_string()).field();
         let (x, returned, left) =
             double_subtraction_of(Type::field(), Constant::Field(field.zero()));
         assert_eq!(returned, x);
@@ -740,7 +741,7 @@ mod tests {
     /// witness, the cast of `c` to one.
     #[test]
     fn a_fold_to_a_pure_value_keeps_a_witnessed_result_witnessed() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let (w, inner, outer) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
         let five = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));

@@ -543,6 +543,7 @@ mod tests {
             builder::{HLEmitter, HLSSABuilder},
         },
     };
+    use mavros_artifacts::FieldConfig;
 
     fn test_location() -> SourceLocation {
         SourceLocation::new(
@@ -556,7 +557,7 @@ mod tests {
     /// the counter lives on the SSA, not the function.
     #[test]
     fn global_value_ids_are_unique_across_functions() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let main_id = sb.ssa().get_unique_entrypoint_id();
         let other_id = sb.ssa().add_function("other".to_string());
@@ -571,7 +572,7 @@ mod tests {
     /// rebuild continue from where the original counter left off.
     #[test]
     fn prepare_rebuild_preserves_value_counter() {
-        let ssa = HLSSA::with_main("main".to_string());
+        let ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let _v0 = ssa.fresh_value();
         let _v1 = ssa.fresh_value();
         let _v2 = ssa.fresh_value();
@@ -589,7 +590,7 @@ mod tests {
     /// all preserved.
     #[test]
     fn modify_function_noop_roundtrip() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let _ = ssa.add_function("other".to_string());
 
@@ -613,7 +614,7 @@ mod tests {
 
     #[test]
     fn block_emitter_emit_accepts_located_instruction() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let loc = test_location();
 
@@ -638,7 +639,7 @@ mod tests {
 
     #[test]
     fn instr_builder_accepts_source_locations_for_temporary_buffers() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut function = Function::<OpCode, Type>::empty("tmp".to_string());
         let mut instructions = Vec::new();
         let loc = test_location();
@@ -664,7 +665,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "outside an `emit_with_location` scope")]
     fn scoped_locations_emitter_ices_outside_a_scope() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
 
         let mut sb = HLSSABuilder::new(&mut ssa);
@@ -677,7 +678,7 @@ mod tests {
 
     #[test]
     fn scoped_locations_emitter_emits_inside_a_scope() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let loc = test_location();
 
@@ -698,7 +699,7 @@ mod tests {
 
     #[test]
     fn block_emitter_stamps_new_instructions_across_block_splits() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let loc = test_location();
 

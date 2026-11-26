@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 use num_bigint::BigUint;
 use tracing::{instrument, warn};
 
-use mavros_artifacts::{Field as RawField, FieldConfig, MavrosField};
+use mavros_artifacts::{FieldConfig, MavrosField};
 use mavros_int_semantics::{self as semantics, CmpOp, IntBits, int_bits::HOST_WORD_BITS};
 
 use crate::compiler::{
@@ -37,7 +37,7 @@ pub struct R1CSProfile {
 }
 
 #[derive(Debug)]
-pub struct R1CSProfileDisabled<F: MavrosField = RawField> {
+pub struct R1CSProfileDisabled<F: MavrosField> {
     r1cs: Box<R1CS<F>>,
 }
 
@@ -56,14 +56,14 @@ impl<F: MavrosField> std::fmt::Display for R1CSProfileDisabled<F> {
 impl<F: MavrosField> std::error::Error for R1CSProfileDisabled<F> {}
 
 #[derive(Clone, Debug)]
-pub struct ArrayData<F: MavrosField = RawField> {
+pub struct ArrayData<F: MavrosField> {
     table_id: Option<usize>,
     data: Vec<Value<F>>,
 }
 
 /// What R1CS generation knows of one SSA value as it executes the program symbolically.
 #[derive(Clone, Debug)]
-pub enum Value<F: MavrosField = RawField> {
+pub enum Value<F: MavrosField> {
     /// A Field element value known at compile time.
     Const(Field),
 
@@ -398,7 +398,7 @@ fn flatten_array_into_table<F: MavrosField>(arr: &ArrayData<F>, out: &mut Vec<LC
 }
 
 #[derive(Clone, Debug)]
-pub struct LookupConstraint<F: MavrosField = RawField> {
+pub struct LookupConstraint<F: MavrosField> {
     pub table_id: usize,
     pub elements: Vec<LC<F>>,
     pub flag: LC<F>,
@@ -407,7 +407,7 @@ pub struct LookupConstraint<F: MavrosField = RawField> {
 }
 
 #[derive(Clone, Debug)]
-pub enum Table<F: MavrosField = RawField> {
+pub enum Table<F: MavrosField> {
     Range(u64),
     OfElems(Vec<LC<F>>),
     Spread(u8),
@@ -462,7 +462,7 @@ impl<F: MavrosField> Table<F> {
 }
 
 #[derive(Clone)]
-pub struct R1CGen<F: MavrosField = RawField> {
+pub struct R1CGen<F: MavrosField> {
     /// The field the program operates over.
     field: FieldConfig,
     constraints: Vec<R1C<F>>,
@@ -1360,6 +1360,8 @@ impl<F: MavrosField> R1CGen<F> {
         // Repetition `k` checks the shared multiplicities against `alpha_k` (and the
         // column-folding `beta_k` when a table has a value column), laid out `[alpha_0, beta_0,
         // alpha_1, beta_1, ...]`. Each repetition adds about `log2(p) - log2(D)` bits of soundness.
+        // A shared `beta` would leave the column-folding collision term un-amplified, capping the
+        // soundness however many repetitions there are.
         witness_layout.logup_repetitions = logup_repetitions;
         let challenges_per_repetition = if max_width > 1 { 2 } else { 1 };
         let challenges: Vec<(usize, usize)> = (0..logup_repetitions)
@@ -1608,28 +1610,30 @@ impl<F: MavrosField> R1CGen<F> {
 /// bn254's raw form of a middle-end element, for the tests' hand-built linear combinations.
 #[cfg(test)]
 trait ToArk {
-    fn to_ark(self) -> RawField;
+    fn to_ark(self) -> mavros_artifacts::Bn254;
 }
 
 #[cfg(test)]
 impl ToArk for Field {
-    fn to_ark(self) -> RawField {
-        <RawField as MavrosField>::from_element(self)
+    fn to_ark(self) -> mavros_artifacts::Bn254 {
+        <mavros_artifacts::Bn254 as MavrosField>::from_element(self)
     }
 }
 
 #[cfg(test)]
 mod r1cs_profile_tests {
+    use mavros_artifacts::Bn254;
+
     use super::{ArrayData, FieldConfig, R1CGen, ToArk, Value, hlssa, symbolic_executor};
     use std::{cell::RefCell, rc::Rc};
 
-    fn witness(generator: &mut R1CGen) -> Value {
+    fn witness(generator: &mut R1CGen<Bn254>) -> Value<Bn254> {
         let witness = generator.next_witness();
         generator.record_witnesses(1);
         Value::LC(vec![(witness, generator.field().one().to_ark())])
     }
 
-    fn array_table(values: &[u64]) -> Value {
+    fn array_table(values: &[u64]) -> Value<Bn254> {
         Value::Array(Rc::new(RefCell::new(ArrayData {
             table_id: None,
             data: values
@@ -1639,8 +1643,12 @@ mod r1cs_profile_tests {
         })))
     }
 
-    fn lookup(generator: &mut R1CGen, target: hlssa::LookupTarget<Value>, args: Vec<Value>) {
-        <R1CGen as symbolic_executor::Context<Value>>::lookup(
+    fn lookup(
+        generator: &mut R1CGen<Bn254>,
+        target: hlssa::LookupTarget<Value<Bn254>>,
+        args: Vec<Value<Bn254>>,
+    ) {
+        <R1CGen<Bn254> as symbolic_executor::Context<Value<Bn254>>>::lookup(
             generator,
             target,
             args,
@@ -1721,7 +1729,7 @@ mod r1cs_profile_tests {
 // ================================================================================================
 
 /// The outcome of sizing the LogUp lookup argument for a requested bits-of-security
-/// target. See `docs/field-agnosticism.md` (`L4-logup-challenges`) for the model.
+/// target. See `compute_logup_soundness` for the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoundnessReport {
     /// The requested bits of security (from `--logup-soundness`).
@@ -1863,8 +1871,8 @@ mod logup_soundness_tests {
     }
 
     #[test]
-    fn live_bn254_alias_yields_a_single_repetition_at_the_default() {
-        // The real configured field (bn254) at the 128-bit default must be a genuine no-op.
+    fn bn254_yields_a_single_repetition_at_the_default() {
+        // BN254 at the 128-bit default must be a genuine no-op.
         let r = logup_soundness_report(FieldConfig::bn254(), 128, 1 << 20).unwrap();
         assert_eq!(r.field_bits, 253);
         assert_eq!(r.repetitions, 1);
@@ -1970,24 +1978,42 @@ mod logup_soundness_tests {
 
 #[cfg(test)]
 mod comparison_tests {
+    use mavros_artifacts::Bn254;
     use mavros_int_semantics::{CmpOp, corners};
 
     use super::{CmpKind, FieldConfig, R1CGen, Value, symbolic_executor};
 
-    fn constant(v: u64) -> Value {
+    fn bn254_value(v: u64) -> Value<Bn254> {
         Value::Const(FieldConfig::bn254().constant(v))
     }
 
-    fn cmp(a: &Value, b: &Value, kind: CmpKind, bits: Option<usize>) -> bool {
+    fn cmp(a: &Value<Bn254>, b: &Value<Bn254>, kind: CmpKind, bits: Option<usize>) -> bool {
         let mut generator = R1CGen::new(FieldConfig::bn254());
-        <Value as symbolic_executor::Value<R1CGen>>::cmp(a, b, kind, bits, &mut generator)
-            .expect_u1()
+        <Value<Bn254> as symbolic_executor::Value<R1CGen<Bn254>>>::cmp(
+            a,
+            b,
+            kind,
+            bits,
+            &mut generator,
+        )
+        .expect_u1()
     }
 
-    fn assert_cmp_holds(a: &Value, b: &Value, kind: CmpKind, bits: Option<usize>) -> bool {
+    fn assert_cmp_holds(
+        a: &Value<Bn254>,
+        b: &Value<Bn254>,
+        kind: CmpKind,
+        bits: Option<usize>,
+    ) -> bool {
         let mut generator = R1CGen::new(FieldConfig::bn254());
-        <Value as symbolic_executor::Value<R1CGen>>::assert_cmp(kind, a, b, bits, &mut generator)
-            .is_ok()
+        <Value<Bn254> as symbolic_executor::Value<R1CGen<Bn254>>>::assert_cmp(
+            kind,
+            a,
+            b,
+            bits,
+            &mut generator,
+        )
+        .is_ok()
     }
 
     /// Both comparison paths read their operands as the opcode says. An integer type carries no
@@ -1997,8 +2023,8 @@ mod comparison_tests {
     fn a_comparison_reads_its_operands_the_way_the_opcode_says() {
         // 0xFB in eight bits is 251 read as a magnitude and -5 read as two's complement, so the
         // two readings disagree about every comparison of it against a small positive.
-        let a = constant(0xFB);
-        let b = constant(2);
+        let a = bn254_value(0xFB);
+        let b = bn254_value(2);
 
         assert!(!cmp(&a, &b, CmpKind::ULt, Some(8)), "251 < 2 is false");
         assert!(cmp(&a, &b, CmpKind::SLt, Some(8)), "-5 < 2 is true");
@@ -2062,8 +2088,8 @@ mod comparison_tests {
     /// by the opcode alone.
     #[test]
     fn a_field_comparison_needs_no_width() {
-        let a = constant(2);
-        let b = constant(0xFB);
+        let a = bn254_value(2);
+        let b = bn254_value(0xFB);
 
         assert!(cmp(&a, &b, CmpKind::ULt, None));
         assert!(assert_cmp_holds(&a, &b, CmpKind::ULt, None));
@@ -2078,18 +2104,19 @@ mod comparison_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mavros_artifacts::Bn254;
     use symbolic_executor::{Context as _, Value as _};
 
     // These tests compute over bn254.
-    type Value = super::Value<RawField>;
-    type R1CGen = super::R1CGen<RawField>;
+    type Value = super::Value<Bn254>;
+    type R1CGen = super::R1CGen<Bn254>;
 
-    fn field() -> FieldConfig {
+    fn bn254() -> FieldConfig {
         FieldConfig::bn254()
     }
 
-    fn constant(value: u64) -> Value {
-        Value::Const(field().constant(value))
+    fn bn254_value(value: u64) -> Value {
+        Value::Const(bn254().constant(value))
     }
 
     /// A field element wider than a host word is **refused readably**, neither read as a residue
@@ -2157,56 +2184,61 @@ mod tests {
     /// A select by a constant condition is the arm it names, over elements and wide patterns alike.
     #[test]
     fn a_constant_select_is_the_arm_its_condition_names() {
-        let mut generator = R1CGen::new(field());
-        let (yes, no) = (constant(5), constant(9));
-        let wide = Value::of_pattern(field(), IntBits::from_u128(256, 1).shifted_left(254));
-        for (condition, want) in [(field().one(), 5u64), (field().zero(), 9)] {
+        let mut generator = R1CGen::new(bn254());
+        let (yes, no) = (bn254_value(5), bn254_value(9));
+        let wide = Value::of_pattern(bn254(), IntBits::from_u128(256, 1).shifted_left(254));
+        for (condition, want) in [(bn254().one(), 5u64), (bn254().zero(), 9)] {
             let picked = Value::Const(condition).select(&yes, &no, &Type::field(), &mut generator);
-            assert_eq!(picked.expect_constant(), field().constant(want));
+            assert_eq!(picked.expect_constant(), bn254().constant(want));
         }
         let picked =
-            Value::Const(field().one()).select(&wide, &no, &Type::int(256), &mut generator);
+            Value::Const(bn254().one()).select(&wide, &no, &Type::int(256), &mut generator);
         assert!(matches!(picked, Value::Wide(_)));
         let picked =
-            Value::Const(field().zero()).select(&wide, &no, &Type::int(256), &mut generator);
-        assert_eq!(picked.expect_constant(), field().constant(9u64));
+            Value::Const(bn254().zero()).select(&wide, &no, &Type::int(256), &mut generator);
+        assert_eq!(picked.expect_constant(), bn254().constant(9u64));
     }
 
     /// A witness condition selects as `c·t + (1 − c)·f`.
     #[test]
     fn a_witness_select_is_the_affine_blend_of_its_arms() {
-        let mut generator = R1CGen::new(field());
-        let condition = Value::LC(vec![(1, field().one().to_ark())]);
-        let picked = condition.select(&constant(5), &constant(9), &Type::field(), &mut generator);
+        let mut generator = R1CGen::new(bn254());
+        let condition = Value::LC(vec![(1, bn254().one().to_ark())]);
+        let picked = condition.select(
+            &bn254_value(5),
+            &bn254_value(9),
+            &Type::field(),
+            &mut generator,
+        );
         assert_eq!(
             picked.expect_linear_combination(),
             vec![
-                (0, field().constant(9u64).to_ark()),
-                (1, -field().constant(4u64).to_ark())
+                (0, bn254().constant(9u64).to_ark()),
+                (1, -bn254().constant(4u64).to_ark())
             ]
         );
     }
 
     #[test]
     fn a_constant_boolean_is_true_exactly_at_one() {
-        let mut generator = R1CGen::new(field());
+        let mut generator = R1CGen::new(bn254());
         assert!(
-            Value::Const(field().one())
+            Value::Const(bn254().one())
                 .try_constant_bool(&mut generator)
                 .unwrap()
         );
         assert!(
-            !Value::Const(field().zero())
+            !Value::Const(bn254().zero())
                 .try_constant_bool(&mut generator)
                 .unwrap()
         );
         assert!(
-            Value::Const(field().one())
+            Value::Const(bn254().one())
                 .assert_bool(&mut generator)
                 .is_ok()
         );
         assert!(
-            Value::Const(field().zero())
+            Value::Const(bn254().zero())
                 .assert_bool(&mut generator)
                 .is_err()
         );
@@ -2216,7 +2248,7 @@ mod tests {
     /// order the endianness names.
     #[test]
     fn a_constant_decomposes_into_its_digits_in_either_order() {
-        let mut generator = R1CGen::new(field());
+        let mut generator = R1CGen::new(bn254());
         let digits = |value: Value| -> Vec<u64> {
             value
                 .expect_array()
@@ -2226,7 +2258,7 @@ mod tests {
                 .map(Value::expect_u64)
                 .collect()
         };
-        let six = constant(6);
+        let six = bn254_value(6);
         for (endianness, want) in [
             (hlssa::Endianness::Little, vec![0, 1, 1, 0, 0]),
             (hlssa::Endianness::Big, vec![0, 0, 1, 1, 0]),
@@ -2234,7 +2266,7 @@ mod tests {
             let bits = six.to_bits(endianness, 5, &Type::field(), &mut generator);
             assert_eq!(digits(bits), want);
         }
-        let value = constant(0x0102);
+        let value = bn254_value(0x0102);
         for (endianness, want) in [
             (hlssa::Endianness::Little, vec![2, 1, 0]),
             (hlssa::Endianness::Big, vec![0, 1, 2]),
@@ -2247,8 +2279,8 @@ mod tests {
 
     #[test]
     fn a_slice_length_is_its_element_count() {
-        let mut generator = R1CGen::new(field());
-        let slice = Value::mk_array(vec![constant(7), constant(8), constant(9)]);
+        let mut generator = R1CGen::new(bn254());
+        let slice = Value::mk_array(vec![bn254_value(7), bn254_value(8), bn254_value(9)]);
         assert_eq!(generator.slice_len(&slice).expect_u64(), 3);
     }
 
@@ -2256,17 +2288,17 @@ mod tests {
     /// cancels leaves no entry.
     #[test]
     fn linear_combination_arithmetic_keeps_constants_on_column_zero() {
-        let (one, two) = (field().one().to_ark(), field().constant(2u64).to_ark());
+        let (one, two) = (bn254().one().to_ark(), bn254().constant(2u64).to_ark());
         let witness = Value::LC(vec![(1, one), (2, two)]);
         assert_eq!(
-            witness.add(&constant(4)).expect_linear_combination(),
-            vec![(0, field().constant(4u64).to_ark()), (1, one), (2, two)]
+            witness.add(&bn254_value(4)).expect_linear_combination(),
+            vec![(0, bn254().constant(4u64).to_ark()), (1, one), (2, two)]
         );
         assert_eq!(
-            witness.mul(&constant(5)).expect_linear_combination(),
+            witness.mul(&bn254_value(5)).expect_linear_combination(),
             vec![
-                (1, field().constant(5u64).to_ark()),
-                (2, field().constant(10u64).to_ark())
+                (1, bn254().constant(5u64).to_ark()),
+                (2, bn254().constant(10u64).to_ark())
             ]
         );
         assert_eq!(
@@ -2279,16 +2311,16 @@ mod tests {
 
     #[test]
     fn a_written_witness_is_its_column_with_coefficient_one() {
-        let mut generator = R1CGen::new(field());
-        let written = constant(3).write_witness(None, &mut generator);
+        let mut generator = R1CGen::new(bn254());
+        let written = bn254_value(3).write_witness(None, &mut generator);
         let fresh = Value::fresh_witness(&Type::field(), &mut generator);
-        let one = field().one().to_ark();
+        let one = bn254().one().to_ark();
         assert_eq!(written.expect_linear_combination(), vec![(0, one)]);
         assert_eq!(fresh.expect_linear_combination(), vec![(1, one)]);
     }
 
     /// A witness under construction: `None` marks a column not yet known.
-    type PartialWitness = Vec<Option<RawField>>;
+    type PartialWitness = Vec<Option<Bn254>>;
 
     /// The multiplicity columns, relative to the section, of the entries the lookups of
     /// [`sealed_lookup_argument`] hit: each table has 4 rows except the array's 3, in lookup order.
@@ -2298,23 +2330,23 @@ mod tests {
     /// `(3, 5)` in a 2-bit spread table, `(3, 8)` in a 2-bit pow2 table and `(1, 20)` in
     /// `[10, 20, 30]`, and its witness with the cells, the challenges (distinct primes) and zero
     /// multiplicities known.
-    fn sealed_lookup_argument(repetitions: usize) -> (R1CS<RawField>, PartialWitness) {
+    fn sealed_lookup_argument(repetitions: usize) -> (R1CS<Bn254>, PartialWitness) {
         sealed_lookups(repetitions, true)
     }
 
     /// [`sealed_lookup_argument`], or with `value_columns` false its range lookup alone.
-    fn sealed_lookups(repetitions: usize, value_columns: bool) -> (R1CS<RawField>, PartialWitness) {
-        let mut generator = R1CGen::new(field());
+    fn sealed_lookups(repetitions: usize, value_columns: bool) -> (R1CS<Bn254>, PartialWitness) {
+        let mut generator = R1CGen::new(bn254());
         // Column 0 is the constant one.
         assert_eq!(generator.next_witness(), 0);
-        let mut known = vec![(0, field().one())];
+        let mut known = vec![(0, bn254().one())];
         let mut cell = |generator: &mut R1CGen, value: u64| {
             let column = generator.next_witness();
-            known.push((column, field().constant(value)));
-            Value::LC(vec![(column, field().one().to_ark())])
+            known.push((column, bn254().constant(value)));
+            Value::LC(vec![(column, bn254().one().to_ark())])
         };
         let range = cell(&mut generator, 2);
-        let flag = Value::Const(field().one());
+        let flag = Value::Const(bn254().one());
         generator.lookup(
             hlssa::LookupTarget::Rangecheck(2),
             vec![range],
@@ -2334,7 +2366,7 @@ mod tests {
                 vec![pow2.0, pow2.1],
                 flag.clone(),
             );
-            let table = Value::mk_array(vec![constant(10), constant(20), constant(30)]);
+            let table = Value::mk_array(vec![bn254_value(10), bn254_value(20), bn254_value(30)]);
             generator.lookup(
                 hlssa::LookupTarget::Array(table),
                 vec![array.0, array.1],
@@ -2349,7 +2381,7 @@ mod tests {
             w[column] = Some(value.to_ark());
         }
         for i in layout.multiplicities_start()..layout.multiplicities_end() {
-            w[i] = Some(<RawField as ark_ff::Zero>::zero());
+            w[i] = Some(<Bn254 as ark_ff::Zero>::zero());
         }
         const PRIMES: [u64; 8] = [
             1009,
@@ -2362,19 +2394,19 @@ mod tests {
             22801763489,
         ];
         for (i, challenge) in (layout.challenges_start()..layout.challenges_end()).zip(PRIMES) {
-            w[i] = Some(field().constant(challenge).to_ark());
+            w[i] = Some(bn254().constant(challenge).to_ark());
         }
         (r1cs, w)
     }
 
-    fn evaluate(lc: &LC, w: &[Option<RawField>]) -> Option<RawField> {
+    fn evaluate(lc: &LC<Bn254>, w: &[Option<Bn254>]) -> Option<Bn254> {
         lc.iter().map(|(i, c)| w[*i].map(|v| *c * v)).sum()
     }
 
     /// Fills, in row order, each row's single unknown column: every table and lookup row defines
     /// one.
-    fn solve(r1cs: &R1CS<RawField>, w: &mut PartialWitness) {
-        let fresh = |lc: &LC, w: &[Option<RawField>]| match lc.as_slice() {
+    fn solve(r1cs: &R1CS<Bn254>, w: &mut PartialWitness) {
+        let fresh = |lc: &LC<Bn254>, w: &[Option<Bn254>]| match lc.as_slice() {
             [(column, coefficient)] if w[*column].is_none() => Some((*column, *coefficient)),
             _ => None,
         };
@@ -2387,8 +2419,8 @@ mod tests {
         }
     }
 
-    fn failing_rows(r1cs: &R1CS<RawField>, w: &[Option<RawField>]) -> Vec<usize> {
-        let at = |lc: &LC| evaluate(lc, w).expect("every column is known");
+    fn failing_rows(r1cs: &R1CS<Bn254>, w: &[Option<Bn254>]) -> Vec<usize> {
+        let at = |lc: &LC<Bn254>| evaluate(lc, w).expect("every column is known");
         (0..r1cs.constraints.len())
             .filter(|index| {
                 let row = &r1cs.constraints[*index];
@@ -2397,17 +2429,17 @@ mod tests {
             .collect()
     }
 
-    fn strides(r1cs: &R1CS<RawField>) -> mavros_artifacts::LogupStrides {
+    fn strides(r1cs: &R1CS<Bn254>) -> mavros_artifacts::LogupStrides {
         mavros_artifacts::LogupStrides::new(&r1cs.witness_layout, &r1cs.constraints_layout)
     }
 
     /// The column of repetition `k`'s `α`.
-    fn alpha(r1cs: &R1CS<RawField>, k: usize) -> usize {
+    fn alpha(r1cs: &R1CS<Bn254>, k: usize) -> usize {
         r1cs.witness_layout.challenges_start() + strides(r1cs).alpha(k)
     }
 
     /// The rows of repetition `k`: its table rows, then its lookup rows.
-    fn repetition_rows(r1cs: &R1CS<RawField>, k: usize) -> Vec<usize> {
+    fn repetition_rows(r1cs: &R1CS<Bn254>, k: usize) -> Vec<usize> {
         let (layout, strides) = (&r1cs.constraints_layout, strides(r1cs));
         let (tables, lookups) = (strides.constraint_tables, strides.constraint_lookups);
         let tables_start = layout.tables_data_start() + k * tables;
@@ -2450,7 +2482,7 @@ mod tests {
                 single.constraints_layout.lookups_data_size
             );
             for hit in HITS {
-                w[wl.multiplicities_start() + hit] = Some(field().one().to_ark());
+                w[wl.multiplicities_start() + hit] = Some(bn254().one().to_ark());
             }
             solve(&r1cs, &mut w);
             assert_eq!(
@@ -2462,7 +2494,7 @@ mod tests {
     }
 
     /// The challenge columns repetition `k`'s rows name, in order.
-    fn named_challenges(r1cs: &R1CS<RawField>, k: usize) -> Vec<usize> {
+    fn named_challenges(r1cs: &R1CS<Bn254>, k: usize) -> Vec<usize> {
         let layout = &r1cs.witness_layout;
         let challenges = layout.challenges_start()..layout.challenges_end();
         let mut named = std::collections::BTreeSet::new();
@@ -2506,7 +2538,7 @@ mod tests {
                 "repetition {k}"
             );
         }
-        w[layout.multiplicities_start() + HITS[0]] = Some(field().one().to_ark());
+        w[layout.multiplicities_start() + HITS[0]] = Some(bn254().one().to_ark());
         solve(&r1cs, &mut w);
         assert_eq!(failing_rows(&r1cs, &w), Vec::<usize>::new());
     }
@@ -2518,7 +2550,7 @@ mod tests {
         let (r1cs, mut w) = sealed_lookup_argument(2);
         let layout = r1cs.witness_layout;
         for hit in HITS {
-            w[layout.multiplicities_start() + hit] = Some(field().one().to_ark());
+            w[layout.multiplicities_start() + hit] = Some(bn254().one().to_ark());
         }
         solve(&r1cs, &mut w);
         let strides = strides(&r1cs);
@@ -2546,7 +2578,7 @@ mod tests {
     fn a_multiplicity_forged_for_one_challenge_is_rejected_by_another() {
         let (r1cs, mut w) = sealed_lookup_argument(2);
         let layout = r1cs.witness_layout;
-        let one = field().one().to_ark();
+        let one = bn254().one().to_ark();
         for hit in &HITS[1..] {
             w[layout.multiplicities_start() + hit] = Some(one);
         }
@@ -2571,13 +2603,13 @@ mod tests {
 mod int_semantics_conformance {
     use mavros_int_semantics::{IntBits, IntOp, Sign, corners, residue};
 
-    use super::{
-        BinaryArithOpKind, FieldConfig, RawField, Type, field_constant, symbolic_executor,
-    };
+    use mavros_artifacts::{Bn254, Goldilocks};
+
+    use super::{BinaryArithOpKind, FieldConfig, Type, field_constant, symbolic_executor};
 
     // These tests compute over bn254.
-    type Value = super::Value<RawField>;
-    type R1CGen = super::R1CGen<RawField>;
+    type Value = super::Value<Bn254>;
+    type R1CGen = super::R1CGen<Bn254>;
 
     /// Every operation, spelled out so a new variant cannot quietly skip the sweep.
     const ALL_ARITH: [BinaryArithOpKind; 17] = [
@@ -2907,8 +2939,8 @@ mod int_semantics_conformance {
     /// may not decline, so a pattern past the modulus answers its residue.
     #[test]
     fn the_field_casts_agree_with_the_model_on_both_fields() {
-        check_field_casts::<RawField>(FieldConfig::bn254());
-        check_field_casts::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks());
+        check_field_casts::<Bn254>(FieldConfig::bn254());
+        check_field_casts::<Goldilocks>(FieldConfig::goldilocks());
     }
 
     fn check_field_casts<F: mavros_artifacts::MavrosField>(field: FieldConfig) {
@@ -2956,8 +2988,8 @@ mod int_semantics_conformance {
     /// unsigned comparison with a pattern past the modulus, which only the magnitudes answer.
     #[test]
     fn the_element_folds_read_the_canonical_integer_on_both_fields() {
-        check_element_folds::<RawField>(FieldConfig::bn254());
-        check_element_folds::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks());
+        check_element_folds::<Bn254>(FieldConfig::bn254());
+        check_element_folds::<Goldilocks>(FieldConfig::goldilocks());
     }
 
     fn check_element_folds<F: mavros_artifacts::MavrosField>(field: FieldConfig) {

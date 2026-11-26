@@ -74,6 +74,7 @@ impl Status {
 
 pub(crate) fn parse_child_output(
     name: &str,
+    field: FieldId,
     expectation: TestExpectation,
     lines: &[String],
 ) -> TestResult {
@@ -168,7 +169,7 @@ pub(crate) fn parse_child_output(
 
     TestResult {
         name: name.to_string(),
-        field: FieldId::Bn254,
+        field,
         steps,
         rows,
         cols,
@@ -276,7 +277,7 @@ pub(crate) fn expected_step_status(
 }
 
 /// The result of a test the run skips: every stage ➖.
-pub(crate) fn ignored_test_result(name: &str) -> TestResult {
+pub(crate) fn ignored_test_result(name: &str, field: FieldId) -> TestResult {
     let steps = STEP_KEYS
         .iter()
         .map(|&key| (key.to_string(), Status::Skip))
@@ -284,7 +285,7 @@ pub(crate) fn ignored_test_result(name: &str) -> TestResult {
 
     TestResult {
         name: name.to_string(),
-        field: FieldId::Bn254,
+        field,
         steps,
         rows: None,
         cols: None,

@@ -27,7 +27,7 @@ fn determinism_tests_skip_the_field_selector() {
         "sha256",
     ]);
     assert_eq!(parse_determinism_tests(&args), ["sha256"]);
-    assert_eq!(parse_field_arg(&args), FieldId::Goldilocks);
+    assert_eq!(parse_field_arg(&args), Some(FieldId::Goldilocks));
 }
 
 #[test]
@@ -37,6 +37,7 @@ fn separate_field_reports_merge_to_the_combined_report() {
         for field in FieldId::ALL {
             let mut result = parse_child_output(
                 name,
+                field,
                 TestExpectation::ExecutionSuccess,
                 &lines(&[
                     "START:COMPILED",
@@ -52,7 +53,6 @@ fn separate_field_reports_merge_to_the_combined_report() {
                     "END:WASM_COMPILE:ok:50:60",
                 ]),
             );
-            result.field = field;
             result
                 .steps
                 .insert("AD_CORRECT".into(), Status::NotApplicable);
@@ -85,6 +85,10 @@ fn merging_refuses_incomplete_or_ambiguous_field_reports() {
         merge_status_reports(&[bn254.clone(), goldilocks.replace("suite/test", "other")]).is_err()
     );
     assert!(merge_status_reports(&[bn254.clone(), goldilocks.replace("✅", "unknown")]).is_err());
+    let unknown =
+        merge_status_reports(&[bn254.clone(), goldilocks.replace("goldilocks", "babybear")])
+            .unwrap_err();
+    assert!(unknown.contains("unsupported report field"), "{unknown}");
     let duplicate = format!("{goldilocks}{}\n", goldilocks.lines().nth(2).unwrap());
     assert!(merge_status_reports(&[bn254.clone(), duplicate]).is_err());
     let mixed = format!("{goldilocks}{}\n", bn254.lines().nth(2).unwrap());
@@ -93,16 +97,14 @@ fn merging_refuses_incomplete_or_ambiguous_field_reports() {
 
 #[test]
 fn fields_have_independent_rates_and_round_trip_without_collisions() {
-    let mut bn254 = ignored_test_result("same/test");
+    let mut bn254 = ignored_test_result("same/test", FieldId::Bn254);
     bn254
         .steps
         .values_mut()
         .for_each(|status| *status = Status::Pass);
-    let mut goldilocks = ignored_test_result("same/test");
-    goldilocks.field = FieldId::Goldilocks;
+    let mut goldilocks = ignored_test_result("same/test", FieldId::Goldilocks);
     goldilocks.steps.insert("COMPILED".into(), Status::Fail);
-    let mut ignored = ignored_test_result("ignored/test");
-    ignored.field = FieldId::Goldilocks;
+    let ignored = ignored_test_result("ignored/test", FieldId::Goldilocks);
     let results = [bn254, goldilocks, ignored];
     assert_eq!(success_counts(&results, FieldId::Bn254), (16, 16));
     assert_eq!(success_counts(&results, FieldId::Goldilocks), (0, 16));
@@ -163,6 +165,7 @@ fn host_failure_fixtures_accept_only_their_intended_rejection() {
         for kind in ["input-error", "return-mismatch", "error", "fail", "ok"] {
             let result = parse_child_output(
                 &display_name,
+                FieldId::Bn254,
                 expectation,
                 &lines(&[
                     "START:COMPILED",
@@ -184,12 +187,14 @@ fn host_failure_fixtures_accept_only_their_intended_rejection() {
         }
         let rejected = parse_child_output(
             &display_name,
+            FieldId::Bn254,
             expectation,
             &lines(&["START:COMPILED", "END:COMPILED:reject"]),
         );
         assert_eq!(rejected.steps["COMPILED"], Status::Fail);
         let crashed = parse_child_output(
             &display_name,
+            FieldId::Bn254,
             expectation,
             &lines(&["START:WITGEN_RUN", "START:WITGEN_WASM_RUN"]),
         );
@@ -208,18 +213,21 @@ fn an_expected_trap_is_not_satisfied_by_a_crash() {
     ] {
         let trapped = parse_child_output(
             "trap",
+            FieldId::Bn254,
             expectation,
             &lines(&["START:WITGEN_RUN", "END:WITGEN_RUN:fail"]),
         );
         assert_eq!(trapped.steps["WITGEN_RUN"], Status::Pass, "{expectation:?}");
         let ran = parse_child_output(
             "trap",
+            FieldId::Bn254,
             expectation,
             &lines(&["START:WITGEN_RUN", "END:WITGEN_RUN:ok"]),
         );
         assert_eq!(ran.steps["WITGEN_RUN"], Status::Fail, "{expectation:?}");
         let crashed = parse_child_output(
             "trap",
+            FieldId::Bn254,
             expectation,
             &lines(&["START:WITGEN_RUN", "START:WITGEN_WASM_RUN"]),
         );
@@ -233,6 +241,7 @@ fn input_errors_do_not_satisfy_expected_runtime_failures() {
     for kind in ["error", "input-error", "return-mismatch"] {
         let result = parse_child_output(
             "invalid_input",
+            FieldId::Bn254,
             TestExpectation::ExecutionFailure,
             &lines(&["START:WITGEN_RUN", &format!("END:WITGEN_RUN:{kind}")]),
         );
@@ -292,6 +301,20 @@ fn frontend_field_selection_reaches_the_noir_compiler() {
     }
     run::<Bn254>();
     run::<Goldilocks>();
+}
+
+#[test]
+#[should_panic(expected = "--run-single requires --field, one of bn254, goldilocks")]
+fn a_child_without_a_field_is_refused() {
+    ChildArgs::parse(&lines(&["runner", "--run-single", "suite/fixture"]));
+}
+
+#[test]
+fn a_determinism_check_fails_when_any_field_fails() {
+    assert_eq!(first_failure([0, 0]), 0);
+    assert_eq!(first_failure([0, 1]), 1);
+    assert_eq!(first_failure([1, 0]), 1);
+    assert_eq!(first_failure([]), 0);
 }
 
 /// The text a fixture expects reaches its child, which is told to expect a failure; a fixture
@@ -727,6 +750,7 @@ fn workspace_discovery_accepts_members_outside_the_test_directory() {
 fn execution_success_uses_raw_statuses() {
     let result = parse_child_output(
         "ok",
+        FieldId::Bn254,
         TestExpectation::ExecutionSuccess,
         &lines(&["START:COMPILED", "END:COMPILED:ok"]),
     );
@@ -739,6 +763,7 @@ fn execution_success_uses_raw_statuses() {
 fn parses_executable_and_debug_sidecar_sizes() {
     let result = parse_child_output(
         "sizes",
+        FieldId::Bn254,
         TestExpectation::ExecutionSuccess,
         &lines(&[
             "START:COMPILE",
@@ -826,6 +851,7 @@ fn legacy_status_rows_are_normalized_for_baseline_comparisons() {
 fn a_compile_rejection_passes_when_compilation_refuses_the_program() {
     let result = parse_child_output(
         "refused",
+        FieldId::Bn254,
         TestExpectation::CompileRejection(DATA_BUS_REFUSAL),
         &lines(&["START:COMPILED", "END:COMPILED:reject"]),
     );
@@ -842,6 +868,7 @@ fn a_compile_rejection_passes_when_compilation_refuses_the_program() {
 fn a_compile_rejection_fails_when_the_program_compiles_or_fails_otherwise() {
     let compiled = parse_child_output(
         "refused",
+        FieldId::Bn254,
         TestExpectation::CompileRejection(DATA_BUS_REFUSAL),
         &lines(&[
             "START:COMPILED",
@@ -855,6 +882,7 @@ fn a_compile_rejection_fails_when_the_program_compiles_or_fails_otherwise() {
 
     let failed = parse_child_output(
         "refused",
+        FieldId::Bn254,
         TestExpectation::CompileRejection(DATA_BUS_REFUSAL),
         &lines(&["START:COMPILED", "END:COMPILED:fail"]),
     );
@@ -865,6 +893,7 @@ fn a_compile_rejection_fails_when_the_program_compiles_or_fails_otherwise() {
 fn execution_failure_passes_when_witgen_runs_fail() {
     let result = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&[
             "START:COMPILED",
@@ -890,6 +919,7 @@ fn execution_failure_reports_native_ad_steps_as_not_applicable() {
     // N/A, not ➖.
     let result = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&[
             "START:COMPILED",
@@ -908,6 +938,7 @@ fn execution_failure_reports_native_ad_steps_as_not_applicable() {
 fn execution_failure_uses_raw_ad_wasm_statuses() {
     let result = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&[
             "START:AD_WASM_RUN",
@@ -932,6 +963,7 @@ fn execution_failure_passes_when_r1cs_rejects_program() {
     // nor dilutes the success rate (whose denominator counts every non-N/A cell).
     let result = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&[
             "START:COMPILED",
@@ -964,6 +996,7 @@ fn execution_failure_passes_when_noir_frontend_rejects_program() {
     // never ran — reads N/A rather than dragging the success rate down.
     let result = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&["START:COMPILED", "END:COMPILED:reject"]),
     );
@@ -987,6 +1020,7 @@ fn execution_failure_does_not_accept_plain_r1cs_failure() {
     // real problem and must not be silently turned green by the expected-failure flag.
     let failed = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&[
             "START:COMPILED",
@@ -999,6 +1033,7 @@ fn execution_failure_does_not_accept_plain_r1cs_failure() {
 
     let crashed = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&["START:COMPILED", "END:COMPILED:ok", "START:R1CS"]),
     );
@@ -1010,6 +1045,7 @@ fn execution_success_treats_r1cs_rejection_as_failure() {
     // A program that is supposed to execute should never be rejected as unsatisfiable.
     let result = parse_child_output(
         "ok",
+        FieldId::Bn254,
         TestExpectation::ExecutionSuccess,
         &lines(&[
             "START:COMPILED",
@@ -1025,6 +1061,7 @@ fn execution_success_treats_r1cs_rejection_as_failure() {
 fn execution_failure_fails_when_witgen_runs_succeed() {
     let result = parse_child_output(
         "exec_fail",
+        FieldId::Bn254,
         TestExpectation::ExecutionFailure,
         &lines(&[
             "START:WITGEN_RUN",
@@ -1042,6 +1079,7 @@ fn execution_failure_fails_when_witgen_runs_succeed() {
 fn r1cs_line_parses_rows_and_cols() {
     let result = parse_child_output(
         "ok",
+        FieldId::Bn254,
         TestExpectation::ExecutionSuccess,
         &lines(&["START:R1CS", "END:R1CS:ok:100:50"]),
     );
@@ -1057,6 +1095,7 @@ fn r1cs_line_parses_rows_and_cols() {
 fn info_lines_are_ignored_but_analysis_is_captured() {
     let result = parse_child_output(
         "ok",
+        FieldId::Bn254,
         TestExpectation::ExecutionSuccess,
         &lines(&[
             "START:R1CS",
@@ -1261,6 +1300,7 @@ fn a_compile_rejection_scores_other_outcomes_by_what_ran() {
     let expectation = TestExpectation::CompileRejection(DATA_BUS_REFUSAL);
     let refused_late = parse_child_output(
         "refused",
+        FieldId::Bn254,
         expectation,
         &lines(&[
             "START:COMPILED",
@@ -1272,11 +1312,17 @@ fn a_compile_rejection_scores_other_outcomes_by_what_ran() {
     assert_eq!(refused_late.steps["COMPILED"], Status::Fail);
     assert_eq!(refused_late.steps["R1CS"], Status::Fail);
 
-    let crashed = parse_child_output("refused", expectation, &lines(&["START:COMPILED"]));
+    let crashed = parse_child_output(
+        "refused",
+        FieldId::Bn254,
+        expectation,
+        &lines(&["START:COMPILED"]),
+    );
     assert_eq!(crashed.steps["COMPILED"], Status::Crash);
 
     let ran = parse_child_output(
         "refused",
+        FieldId::Bn254,
         expectation,
         &lines(&[
             "START:COMPILED",

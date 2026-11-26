@@ -39,7 +39,8 @@ read. The magic, format version and compiler version are not hashed.
 
 Pass `--field` to choose the prime field that the whole pipeline uses: `bn254` (the default) or
 `goldilocks`. The standard library's BN254-specific items (elliptic curves, ECDSA, Poseidon2 and the
-bignum library) are unavailable on Goldilocks, so a program that uses them fails to compile.
+bignum library) are unavailable on Goldilocks, so a program that uses them fails to compile. See
+[Fields in Mavros](./docs/field-agnosticism.md) for how the fields differ.
 
 Pass `--include-debug-info` to additionally write `target/program.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;

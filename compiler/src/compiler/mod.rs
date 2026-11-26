@@ -10,7 +10,7 @@ pub mod untaint_control_flow;
 pub mod util;
 
 // The compiler middle-end's field value type, spelled `Field` everywhere in this crate. This is
-// distinct from a field's raw type (`mavros_artifacts::Field` is bn254's), which the VM, the R1CS
-// and the backends are generic over; codegen translates at the boundary with
+// distinct from a field's raw type (`mavros_artifacts::Bn254`, `mavros_artifacts::Goldilocks`),
+// which the VM, the R1CS and the backends are generic over; codegen translates at the boundary with
 // `MavrosField::from_element` and `FieldElement::storage_cells`.
 pub use mavros_artifacts::FieldElement as Field;

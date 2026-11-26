@@ -38,10 +38,6 @@ impl HLSSA {
     pub(crate) fn mark_witness_slices_purified(&mut self) {
         self.witness_slices_purified = true;
     }
-
-    pub fn new() -> Self {
-        Self::with_main("main".to_string())
-    }
 }
 
 // CONSTANT STORAGE

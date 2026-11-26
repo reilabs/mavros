@@ -1,5 +1,9 @@
 // Pure-Noir implementation of Noir's `derive_pedersen_generators` builtin.
-// FIELD-ASSUMPTION: L5-embedded-curve
+//
+// FIELD-ASSUMPTION: the square root below is Tonelli-Shanks over BN254's scalar field:
+// `TONELLI_SHANKS_*` and `LEGENDRE_EXPONENT_*` encode its modulus and two-adicity, and 5 is a
+// non-residue of it. The curve equation's `-17` and the cached coordinates are Grumpkin's. Another
+// field needs all of these derived for an embedded curve defined over it.
 //
 // This follows the backend's canonical generator derivation exactly: BLAKE3 hashes the domain,
 // then a 64-byte preimage is formed from that 32-byte hash followed by 32 zero bytes. The

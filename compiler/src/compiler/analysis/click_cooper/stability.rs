@@ -482,10 +482,11 @@ impl CyclicBlocks {
 mod tests {
     use super::*;
     use crate::compiler::ssa::hlssa::HLSSA;
+    use mavros_artifacts::FieldConfig;
 
     #[test]
     fn two_block_cycle_reaches_itself() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let cond = ssa.fresh_value();
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_id();
@@ -522,7 +523,7 @@ mod tests {
 
     #[test]
     fn diamond_has_no_back_reach() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let cond = ssa.fresh_value();
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_id();
@@ -555,7 +556,7 @@ mod tests {
 
     #[test]
     fn self_loop_reaches_itself() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let cond = ssa.fresh_value();
         let f = ssa.get_unique_entrypoint_mut();
         let looping = f.add_block();
@@ -582,7 +583,7 @@ mod tests {
     /// executable-subgraph use of `from_edges` (see `exec_view`).
     #[test]
     fn pruned_edge_list_drops_cycles_and_paths() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let cond = ssa.fresh_value();
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_id();
@@ -621,7 +622,7 @@ mod tests {
     /// dominator tree.
     #[test]
     fn no_exit_path_block_is_cyclic() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let cond = ssa.fresh_value();
         let f = ssa.get_unique_entrypoint_mut();
         let dead = f.add_block();

@@ -24,10 +24,6 @@ native integers.
 
 That said, there are currently a few small limits, most of which we hope to lift in future:
 
-- **Parameters to and Returns from `main`:** The frontend permits only the standard integer types
-  (`u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, and `i64`) at this boundary, including
-  inside arrays and structs. Wider values can be assembled from arrays of these types inside a
-  program.
 - **Field Casts:** Casting an integer to a `Field` is a compile-time error when its type is as wide
   as the field's modulus or wider, because two of its values would then produce the same field
   element (a soundness hole). Internally to Mavros, the cast is defined to reduce modulo the field

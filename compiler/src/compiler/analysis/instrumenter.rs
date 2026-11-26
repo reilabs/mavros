@@ -2674,7 +2674,7 @@ mod tests {
 
     #[test]
     fn field_to_bits_zero_pads_before_big_endian_output() {
-        let ssa = HLSSA::with_main("main".to_string());
+        let ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let value = Value::Field(ssa.field().constant(5));
         let Value::Array(bits) = value.to_bits(&Endianness::Big, 260) else {
             panic!("ToBits must produce an array");
@@ -2691,7 +2691,7 @@ mod tests {
     /// plus one recomposition constraint. `SpecSplitValue::to_bits` must not charge it again.
     #[test]
     fn lowered_witness_to_bits_cost_is_explicit() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let value = ssa.fresh_value();
         let result = ssa.fresh_value();
         let function = ssa.get_unique_entrypoint_mut();
@@ -2724,7 +2724,7 @@ mod tests {
     /// byte rangecheck and the recomposition constraint are recorded explicitly.
     #[test]
     fn lowered_witness_to_radix_cost_is_explicit() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let value = ssa.fresh_value();
         let result = ssa.fresh_value();
         let function = ssa.get_unique_entrypoint_mut();
@@ -2769,7 +2769,7 @@ mod tests {
 
     /// `main` with a single `Constrain { a, b, c }` over compile-time field constants.
     fn ssa_constraining_constants(a: u64, b: u64, c: u64) -> HLSSA {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let a = ssa.add_const(Constant::Field(ssa.field().constant(a)));
         let b = ssa.add_const(Constant::Field(ssa.field().constant(b)));
         let c = ssa.add_const(Constant::Field(ssa.field().constant(c)));

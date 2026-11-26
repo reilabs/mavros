@@ -412,6 +412,7 @@ mod tests {
             },
         },
     };
+    use mavros_artifacts::FieldConfig;
 
     fn empty_type() -> Type {
         Type::tuple_of(vec![])
@@ -465,7 +466,7 @@ mod tests {
         returns: Vec<Type>,
         body: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId, ValueId) -> Vec<ValueId>,
     ) -> (HLSSA, ValueId, ValueId) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut params = (ValueId(0), ValueId(0));
         program(&mut ssa, returns, |e| {
             let s = e.add_parameter(zst_slice());
@@ -657,7 +658,7 @@ mod tests {
 
     #[test]
     fn a_leaf_less_array_access_is_bounded() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut index = ValueId(0);
         program(&mut ssa, vec![], |e| {
             let array = e.add_parameter(empty_type().array_of(4));
@@ -681,7 +682,7 @@ mod tests {
 
     #[test]
     fn a_leafy_slice_program_is_untouched() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         program(&mut ssa, vec![Type::int(32)], |e| {
             let s = e.add_parameter(Type::field().slice_of());
             let i = e.add_parameter(Type::int(32));
@@ -705,7 +706,7 @@ mod tests {
 
     #[test]
     fn global_types_become_lengths() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![zst_slice(), Type::field()]);
         program(&mut ssa, vec![], |_| vec![]);
         lower(&mut ssa);
@@ -719,7 +720,7 @@ mod tests {
 
     #[test]
     fn read_global_result_types_become_lengths() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![zst_slice()]);
         program(&mut ssa, vec![zst_slice()], |e| {
             vec![e.read_global(0, zst_slice())]
@@ -734,7 +735,7 @@ mod tests {
 
     #[test]
     fn signatures_and_block_parameters_become_lengths() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut successor = BlockId(0);
         let mut sb = HLSSABuilder::new(&mut ssa);
@@ -766,7 +767,7 @@ mod tests {
 
     #[test]
     fn mk_tuple_element_types_become_lengths() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let elements = vec![zst_slice(), Type::field()];
         program(&mut ssa, vec![Type::tuple_of(elements.clone())], |e| {
             let s = e.add_parameter(zst_slice());
@@ -788,7 +789,7 @@ mod tests {
             empty_type().ref_of(),
             Type::witness_of(empty_type().ref_of()),
         ]);
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         program(&mut ssa, vec![element.clone()], |e| {
             let s = e.add_parameter(element.clone().slice_of());
             let i = e.add_parameter(Type::int(32));
@@ -821,7 +822,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_block_is_left_to_the_elision() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut orphan = BlockId(0);
         let mut sb = HLSSABuilder::new(&mut ssa);

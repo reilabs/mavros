@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    Field, FieldId, LogupStrides, MavrosField, R1CS, SealedR1CS, field_tag,
+    FieldId, LogupStrides, MavrosField, R1CS, SealedR1CS, field_tag,
     program_header::{ENTRY_AD, ENTRY_WITGEN, NO_ENTRY_POINT, ProgramHeader},
 };
 
@@ -289,7 +289,7 @@ struct BodyRef<'a, F: MavrosField> {
 }
 
 #[derive(Debug)]
-pub struct Artifact<F: MavrosField = Field> {
+pub struct Artifact<F: MavrosField> {
     compiler: String,
     manifest: WitnessManifest,
     r1cs: SealedR1CS<F>,
@@ -301,7 +301,7 @@ pub struct Artifact<F: MavrosField = Field> {
 
 /// The owned contents of an [`Artifact`]; see [`Artifact::into_parts`].
 #[derive(Debug)]
-pub struct ArtifactParts<F: MavrosField = Field> {
+pub struct ArtifactParts<F: MavrosField> {
     pub compiler: String,
     pub manifest: WitnessManifest,
     pub r1cs: SealedR1CS<F>,
@@ -533,7 +533,7 @@ fn check_bytecode<F: MavrosField>(
 mod tests {
     use super::*;
     use crate::{
-        ConstraintsLayout, Field, Goldilocks, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout,
+        Bn254, ConstraintsLayout, Goldilocks, MAX_LOGUP_REPETITIONS, R1C, WitnessLayout,
         program_header::{
             ConstraintLayouts, FUNCTION_MARKER, NO_ENTRY_POINT_WORD, PROGRAM_FORMAT_VERSION,
             PROGRAM_MAGIC,
@@ -542,7 +542,7 @@ mod tests {
 
     /// `fn main(x: Field, y: pub Field) -> pub Field { x * y }`: columns are
     /// `[1, y, x, t3, t4, ret]`, with one constraint `y * x = ret`.
-    fn r1cs() -> R1CS {
+    fn r1cs() -> R1CS<Bn254> {
         R1CS {
             witness_layout: WitnessLayout {
                 algebraic_size: 6,
@@ -558,9 +558,9 @@ mod tests {
                 lookups_data_size: 0,
             },
             constraints: vec![R1C {
-                a: vec![(1, Field::from(1u64))],
-                b: vec![(2, Field::from(1u64))],
-                c: vec![(5, Field::from(1u64))],
+                a: vec![(1, Bn254::from(1u64))],
+                b: vec![(2, Bn254::from(1u64))],
+                c: vec![(5, Bn254::from(1u64))],
             }],
         }
     }
@@ -591,7 +591,7 @@ mod tests {
 
     /// A header agreeing with `manifest` and `r1cs`: no constant pool or globals, witgen and AD
     /// entries at the one function that follows, which is a marker, a frame size and one opcode.
-    fn bytecode(manifest: &WitnessManifest, r1cs: &R1CS) -> Vec<u64> {
+    fn bytecode(manifest: &WitnessManifest, r1cs: &R1CS<Bn254>) -> Vec<u64> {
         let mut words = vec![
             PROGRAM_MAGIC,
             PROGRAM_FORMAT_VERSION,
@@ -617,7 +617,12 @@ mod tests {
     }
 
     /// Unchecked, so a test can write the artifact [`Artifact::new`] refuses and read it back.
-    fn build(manifest: WitnessManifest, r1cs: R1CS, bytecode: Vec<u64>, abi: Vec<u8>) -> Artifact {
+    fn build(
+        manifest: WitnessManifest,
+        r1cs: R1CS<Bn254>,
+        bytecode: Vec<u64>,
+        abi: Vec<u8>,
+    ) -> Artifact<Bn254> {
         Artifact::assemble(
             "test".into(),
             manifest,
@@ -627,22 +632,25 @@ mod tests {
         )
     }
 
-    fn artifact(manifest: WitnessManifest, r1cs: R1CS) -> Artifact {
+    fn artifact(manifest: WitnessManifest, r1cs: R1CS<Bn254>) -> Artifact<Bn254> {
         let bytecode = bytecode(&manifest, &r1cs);
         build(manifest, r1cs, bytecode, abi())
     }
 
-    fn bytes_of(manifest: WitnessManifest, r1cs: R1CS) -> Vec<u8> {
+    fn bytes_of(manifest: WitnessManifest, r1cs: R1CS<Bn254>) -> Vec<u8> {
         artifact(manifest, r1cs).to_bytes().unwrap()
     }
 
-    fn read(bytes: &[u8]) -> Result<Artifact, ArtifactError> {
+    fn read(bytes: &[u8]) -> Result<Artifact<Bn254>, ArtifactError> {
         Artifact::from_bytes(bytes)
     }
 
     /// Reads back the unchecked artifact's bytes, after asserting that [`Artifact::new`] accepts
     /// or refuses the same parts the same way.
-    fn round_trip(manifest: WitnessManifest, r1cs: R1CS) -> Result<Artifact, ArtifactError> {
+    fn round_trip(
+        manifest: WitnessManifest,
+        r1cs: R1CS<Bn254>,
+    ) -> Result<Artifact<Bn254>, ArtifactError> {
         let built = Artifact::new(
             "test".into(),
             manifest.clone(),
@@ -651,7 +659,7 @@ mod tests {
             abi(),
         );
         let decoded = read(&bytes_of(manifest, r1cs));
-        let outcome = |result: &Result<Artifact, ArtifactError>| match result {
+        let outcome = |result: &Result<Artifact<Bn254>, ArtifactError>| match result {
             Ok(artifact) => Ok(artifact.digest()),
             Err(error) => Err(error.to_string()),
         };
@@ -667,7 +675,7 @@ mod tests {
 
     #[test]
     fn artifact_round_trips() {
-        let cases: [fn(&mut WitnessManifest, &mut R1CS); 5] = [
+        let cases: [fn(&mut WitnessManifest, &mut R1CS<Bn254>); 5] = [
             |_, _| {},
             |m, _| m.returns = None,
             // A zero-width return has no columns.
@@ -803,7 +811,7 @@ mod tests {
 
     #[test]
     fn artifact_rejects_inconsistent_entry_slots() {
-        let cases: [fn(&mut WitnessManifest, &mut R1CS); 8] = [
+        let cases: [fn(&mut WitnessManifest, &mut R1CS<Bn254>); 8] = [
             // A public parameter always has columns, and they come first.
             |m, _| m.parameters[1].column_start = None,
             |m, _| m.parameters[1].column_start = Some(2),
@@ -832,7 +840,7 @@ mod tests {
     fn artifact_rejects_logup_layouts_the_compiler_does_not_emit() {
         // Two repetitions of a two-entry range table looked up once: one challenge, two inverse
         // columns, two entry rows and the sum row, and one lookup column and row.
-        let repeated = |r: &mut R1CS| {
+        let repeated = |r: &mut R1CS<Bn254>| {
             r.witness_layout.multiplicities_size = 2;
             r.witness_layout.logup_repetitions = 2;
             r.witness_layout.challenges_size = 2;
@@ -841,7 +849,8 @@ mod tests {
             r.constraints_layout.tables_data_size = 6;
             r.constraints_layout.lookups_data_size = 2;
         };
-        let accepted: [fn(&mut R1CS); 2] = [|_| {}, |r| r.witness_layout.challenges_size = 4];
+        let accepted: [fn(&mut R1CS<Bn254>); 2] =
+            [|_| {}, |r| r.witness_layout.challenges_size = 4];
         for (case, mutate) in accepted.into_iter().enumerate() {
             let mut r = r1cs();
             repeated(&mut r);
@@ -852,7 +861,7 @@ mod tests {
             );
         }
 
-        let refused: [fn(&mut R1CS); 11] = [
+        let refused: [fn(&mut R1CS<Bn254>); 11] = [
             |r| r.witness_layout.logup_repetitions = 0,
             |r| r.witness_layout.logup_repetitions = 3,
             |r| r.witness_layout.multiplicities_size = 0,
@@ -887,7 +896,7 @@ mod tests {
 
     #[test]
     fn artifact_rejects_overflowing_ranges_and_totals() {
-        let cases: [fn(&mut WitnessManifest, &mut R1CS); 2] = [
+        let cases: [fn(&mut WitnessManifest, &mut R1CS<Bn254>); 2] = [
             |m, _| m.parameters[0].width = usize::MAX,
             |m, _| m.returns.as_mut().unwrap().len = usize::MAX,
         ];
@@ -1107,7 +1116,7 @@ mod tests {
         rejects(&flipped, "flipped digest byte");
 
         let mut other = r1cs();
-        other.constraints[0].c[0].1 = Field::from(2u64);
+        other.constraints[0].c[0].1 = Bn254::from(2u64);
         rejects(
             &with_honest_digest(bytes_of(manifest(), other)),
             "changed coefficient",
@@ -1155,7 +1164,7 @@ mod tests {
     #[test]
     fn non_canonical_coefficient_is_a_body_error() {
         let honest = bytes_of(manifest(), r1cs());
-        let one = Field::from(1u64);
+        let one = Bn254::from(1u64);
         let limbs = bincode::serialize(&(5usize, [u64::MAX; 4])).unwrap();
         let honest_limbs = bincode::serialize(&(5usize, {
             use ark_ff::PrimeField as _;

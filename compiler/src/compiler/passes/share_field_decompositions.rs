@@ -235,7 +235,7 @@ fn rewrite_block(block: &mut HLBlock, groups: &[&Group], fresh: &mut Vec<ValueId
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{Field, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
+    use mavros_artifacts::{Bn254, FieldConfig, Goldilocks, InputValueOrdered, MavrosField};
 
     use super::*;
     use crate::{
@@ -253,7 +253,7 @@ mod tests {
     /// `main(x: WitnessOf<Field>)` returning `bit_range(x, offset, width)` for each window, in one
     /// block.
     fn windows_of_a_witness(field: FieldConfig, windows: &[(usize, usize)]) -> (HLSSA, ValueId) {
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let x = HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             for _ in windows {
@@ -389,7 +389,7 @@ mod tests {
     /// would be paid for on paths that never reach the other.
     #[test]
     fn windows_in_different_blocks_are_not_shared() {
-        let mut ssa = HLSSA::with_main_in(FieldConfig::bn254(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             b.function.add_return_type(Type::witness_of(Type::field()));
@@ -416,7 +416,7 @@ mod tests {
     /// window is taken from the prefix unguarded.
     #[test]
     fn a_computed_element_and_a_guarded_window_share_the_prefix() {
-        let mut ssa = HLSSA::with_main_in(FieldConfig::bn254(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (guarded, sum) = (ssa.fresh_value(), ssa.fresh_value());
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
@@ -462,7 +462,7 @@ mod tests {
     /// is defined.
     #[test]
     fn a_window_of_a_shared_window_is_shared_in_turn() {
-        let mut ssa = HLSSA::with_main_in(FieldConfig::bn254(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             for _ in 0..3 {
@@ -493,7 +493,7 @@ mod tests {
     fn a_window_of_the_prefix_is_held_to_its_width() {
         let field = FieldConfig::bn254();
         let narrow = SourceLocation::synthetic("narrow");
-        let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+        let mut ssa = HLSSA::with_main(field, "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             b.function.add_return_type(Type::field());
@@ -511,8 +511,8 @@ mod tests {
 
         // `0x1234`'s low byte and the byte above it, as the window and its high part.
         let accepts = |window: u64, high: u64| {
-            let input = InputValueOrdered::Field(Field::from_element(field.constant(0x1234u64)));
-            accepts_the_forgery::<Field>(ssa.clone(), &[input], |ssa| {
+            let input = InputValueOrdered::Field(Bn254::from_element(field.constant(0x1234u64)));
+            accepts_the_forgery::<Bn254>(ssa.clone(), &[input], |ssa| {
                 let forged =
                     [window, high].map(|v| ssa.add_const(Constant::Field(field.constant(v))));
                 let mut writes = 0;
@@ -551,7 +551,7 @@ mod tests {
         fn check<F: MavrosField>() {
             let field = F::CONFIG;
             let narrow = SourceLocation::synthetic("narrow");
-            let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+            let mut ssa = HLSSA::with_main(field, "main".to_string());
             let main_id = ssa.get_unique_entrypoint_id();
             HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
                 b.function.add_return_type(Type::field());
@@ -610,7 +610,7 @@ mod tests {
                 "{at}: a window of 0x24 is accepted"
             );
         }
-        check::<Field>();
+        check::<Bn254>();
         check::<Goldilocks>();
     }
 }

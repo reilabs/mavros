@@ -75,10 +75,10 @@ tests. To run a few tests into a partial report, pass `--only <test>` (repeatabl
 `--output <path>`.
 
 To investigate one package and field, run
-`cargo run --bin test-runner -- --run-single <package-path>` inside the devshell. `--run-single` and
-`--check-determinism` default take `--field` to select a field, defaulting to `bn254` if not
-specified. Library callers name the field as the `FieldConfig` they pass to
-`Driver::run_noir_compiler`, or as the type parameter of `mavros_compiler::api`'s functions.
+`cargo run --bin test-runner -- --run-single <package-path> --field <field>` inside the devshell.
+`--check-determinism` takes `--field` too, and checks every field without it. Library callers name
+the field as the `FieldConfig` they pass to `Driver::run_noir_compiler`, or as the type parameter of
+`mavros_compiler::api`'s functions.
 
 `make unit-test` uses [cargo-nextest](https://nexte.st/), pinned by the Nix flake, to schedule tests
 across all workspace test binaries in parallel. It first builds the WASM runtime once and shares its

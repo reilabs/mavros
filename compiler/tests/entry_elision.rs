@@ -3,7 +3,7 @@
 
 mod common;
 
-use mavros_artifacts::{Field, Goldilocks, InputValueOrdered, MavrosField};
+use mavros_artifacts::{Bn254, Goldilocks, InputValueOrdered, MavrosField};
 use mavros_compiler::{
     api,
     compiler::ssa::hlssa::{Type, builder::HLEmitter as _},
@@ -50,6 +50,6 @@ fn an_unread_private_parameter_gets_no_column() {
             F::ID
         );
     }
-    check::<Field>();
+    check::<Bn254>();
     check::<Goldilocks>();
 }

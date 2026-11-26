@@ -119,11 +119,10 @@ pub(crate) fn merge_status_reports(reports: &[String]) -> Result<String, String>
         if table.rows.is_empty() || !table.columns.contains_key("Field") {
             return Err("field report must contain a Field column and test rows".into());
         }
-        let field = match table.rows[0].field.as_str() {
-            "bn254" => FieldId::Bn254,
-            "goldilocks" => FieldId::Goldilocks,
-            other => return Err(format!("unsupported report field: {other}")),
-        };
+        let field: FieldId = table.rows[0]
+            .field
+            .parse()
+            .map_err(|error| format!("unsupported report field: {error}"))?;
         if seen_fields.contains(&field) {
             return Err(format!("duplicate report for {}", field.name()));
         }

@@ -20,6 +20,7 @@ use crate::compiler::{
         },
     },
 };
+use mavros_artifacts::FieldConfig;
 
 // EDGE SPLITTING
 // ================================================================================================
@@ -30,7 +31,7 @@ fn diamond_arms() -> (
     crate::compiler::ssa::BlockId,
     crate::compiler::ssa::BlockId,
 ) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let cond = ssa.fresh_value();
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
@@ -86,7 +87,7 @@ fn split_false_arm_leaves_true_arm_alone() {
 /// split gets its own block.
 #[test]
 fn split_both_arms_of_shared_target() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let cond = ssa.fresh_value();
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
@@ -116,7 +117,7 @@ fn split_both_arms_of_shared_target() {
 #[test]
 #[should_panic(expected = "must end in JmpIf")]
 fn split_panics_on_jmp_predecessor() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
     f.get_entry_mut().set_terminator(Terminator::Jmp(t, vec![]));
@@ -130,7 +131,7 @@ fn split_panics_on_jmp_predecessor() {
 #[test]
 #[should_panic(expected = "parameterized block")]
 fn split_panics_on_parameterized_target() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (cond, param) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let t = f.add_block();
@@ -162,7 +163,7 @@ fn oracle_env(ssa: &HLSSA) -> (FunctionId, ClickCooper, TypeInfo) {
 /// return. Ops under test are queried hypothetically — the oracle only reads operand types — so
 /// nothing needs to be pushed into the block.
 fn main_with_params(params: &[Type]) -> (HLSSA, Vec<crate::compiler::ssa::ValueId>) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let values: Vec<_> = params.iter().map(|_| ssa.fresh_value()).collect();
     let f = ssa.get_unique_entrypoint_mut();
     let entry = f.get_entry_mut();
@@ -361,7 +362,7 @@ fn division_requires_a_provably_nonzero_divisor() {
 /// the false edge of an equality branch, not the entry or the equal arm.
 #[test]
 fn division_discharged_by_disequality_branch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, d, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let r = ssa.fresh_value();
@@ -401,7 +402,7 @@ fn division_discharged_by_disequality_branch() {
 /// concern.
 #[test]
 fn signed_64_bit_division_minus_one_hazard() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, d, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(64, 0));
     let c2 = ssa.add_const(Constant::int(64, 2));
@@ -946,7 +947,7 @@ fn mul_const_unifies_with_mul() {
 /// the body redirects to its class leader — a match no expression hashing can find.
 #[test]
 fn loop_carried_congruent_increments_redirect() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -1256,7 +1257,7 @@ fn array_get_deduplicates() {
 
 #[test]
 fn read_global_deduplicates() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     ssa.set_global_types(vec![Type::field()]);
     let (r1, r2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
@@ -1284,7 +1285,7 @@ fn read_global_deduplicates() {
 /// each other.
 #[test]
 fn mismatched_type_leader_does_not_block_same_typed_dedup() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     ssa.set_global_types(vec![Type::field()]);
     let (m, r1, r2) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
@@ -1351,7 +1352,7 @@ fn invariant_loop(
     crate::compiler::ssa::BlockId,
     crate::compiler::ssa::BlockId,
 ) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -1637,7 +1638,7 @@ fn tainted_invariant_loop(
     crate::compiler::ssa::BlockId,
     crate::compiler::ssa::BlockId,
 ) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -1776,7 +1777,7 @@ fn post_loop_only_shape() -> (
     crate::compiler::ssa::BlockId,
     crate::compiler::ssa::ValueId,
 ) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -1848,7 +1849,7 @@ fn post_loop_only_occurrence_is_not_hoisted() {
 /// outer-body operand recomputes the SAME value per iteration and the hoist fires.)
 #[test]
 fn loop_carried_operand_blocks_hoist() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -1959,7 +1960,7 @@ fn outer_body_operand_shape(
     crate::compiler::ssa::BlockId,
     crate::compiler::ssa::BlockId,
 ) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -2140,7 +2141,7 @@ fn call_result_operand_shape(
     crate::compiler::ssa::BlockId,
     crate::compiler::ssa::BlockId,
 ) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let g = ssa.add_function("g".to_string());
     let (p, r) = (ssa.fresh_value(), ssa.fresh_value());
@@ -2287,7 +2288,7 @@ fn nondet_call_result_operand_blocks_hoist() {
 /// would let the lattice's `ArrayGet` projection fold the occurrences away entirely.
 #[test]
 fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let idx = ssa.fresh_value();
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -2400,7 +2401,7 @@ fn aggregate_const_phi_operand_hoists_via_congruence_tier() {
 /// place the computation in the split block, leaving the branch's other arm untouched.
 #[test]
 fn jmp_if_entry_edge_is_split_for_the_hoist() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (c, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let inv = ssa.fresh_value();
 
@@ -2459,7 +2460,7 @@ fn jmp_if_entry_edge_is_split_for_the_hoist() {
 /// entry terminator keeps its targets, and the invariant stays in the header.
 #[test]
 fn jmp_if_entry_edge_hoist_is_refused_when_preserving_structure() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (c, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let inv = ssa.fresh_value();
 
@@ -2515,7 +2516,7 @@ fn jmp_if_entry_edge_hoist_is_refused_when_preserving_structure() {
 /// join-insertion machinery); nothing moves.
 #[test]
 fn multi_entry_header_is_skipped() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (c, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -2643,7 +2644,7 @@ fn diamond() -> (
     crate::compiler::ssa::BlockId,
     crate::compiler::ssa::BlockId,
 ) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
     let left = f.add_block();
@@ -2851,7 +2852,7 @@ fn key_available_on_no_edge_is_refused() {
 /// lengthen the paths entering through the bare edge, so it must be refused.
 #[test]
 fn merge_without_dominated_occurrence_is_refused() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (t1, t2) = (ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
@@ -2899,7 +2900,7 @@ fn merge_without_dominated_occurrence_is_refused() {
 /// split block hosts both the materialized copy and the argument.
 #[test]
 fn branching_predecessor_edge_is_split_to_carry_the_argument() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let t1 = ssa.fresh_value();
     let f = ssa.get_unique_entrypoint_mut();
@@ -2953,7 +2954,7 @@ fn branching_predecessor_edge_is_split_to_carry_the_argument() {
 /// dominating both splits), and both split jumps carry the copy as their argument.
 #[test]
 fn both_arms_predecessor_hosts_one_copy_and_two_arguments() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let t1 = ssa.fresh_value();
     let f = ssa.get_unique_entrypoint_mut();
@@ -3054,7 +3055,7 @@ fn merge_with_unreachable_predecessor_is_refused() {
 /// existing arguments left aligned in front of the new ones.
 #[test]
 fn existing_parameters_and_arguments_stay_aligned() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, c, q) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -3111,7 +3112,7 @@ fn existing_parameters_and_arguments_stay_aligned() {
 /// the loop body computes nothing.
 #[test]
 fn multi_entry_loop_header_joins_with_self_carrying_back_edge() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let (t1, tb, te) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let f = ssa.get_unique_entrypoint_mut();
@@ -3249,7 +3250,7 @@ fn speculation_requires_the_speculate_level() {
 /// oracle refuses it and the body-only occurrence must stay put even at the speculation level.
 #[test]
 fn wrapping_integer_invariant_is_not_speculated() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -3305,7 +3306,7 @@ fn wrapping_integer_invariant_is_not_speculated() {
 /// moves onto the guarded entry edge.
 #[test]
 fn guarded_division_is_speculated_where_the_fact_holds() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, d) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -3390,7 +3391,7 @@ fn guarded_division_is_speculated_where_the_fact_holds() {
 /// the body (a zero-trip run would come to trap on a hoisted copy).
 #[test]
 fn unguarded_division_is_not_speculated() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, d) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -3486,7 +3487,7 @@ fn mul(
 /// its traps. The down-safe LICM shape of [`invariant_loop`] with located occurrences.
 #[test]
 fn hoisted_copy_carries_the_template_source_location() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
@@ -3594,7 +3595,7 @@ fn pre_two_ops(
     op1: BinaryArithOpKind,
     op2: BinaryArithOpKind,
 ) -> (crate::compiler::ssa::ValueId, crate::compiler::ssa::ValueId) {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -3652,7 +3653,7 @@ fn a_signed_chain_does_not_absorb_an_unsigned_one() {
     // come out as `(x s+ y) s+ z`. Both are built here and must stay distinct computations.
     use BinaryArithOpKind::*;
     let build = |inner: BinaryArithOpKind| {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (x, y, z) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
         let (inner_r, outer_r, other_r) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -3693,7 +3694,7 @@ fn a_signed_chain_does_not_absorb_an_unsigned_one() {
 
 #[test]
 fn the_two_signed_forms_of_a_comparison_are_not_one_expression() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 

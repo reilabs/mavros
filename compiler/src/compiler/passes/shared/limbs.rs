@@ -2,7 +2,13 @@
 //!
 //! This governs witness layout and the widths the spread-based bitwise lowering works at. It is
 //! also the width the carry chain and the schoolbook product in `passes::wide_witness_ints` work
-//! at — see `docs/field-agnosticism.md`, Layer 6.
+//! at.
+//!
+//! A single-cell integer lowering holds only while the exact span of its result stays below the
+//! modulus, which a small field reaches at ordinary widths: on Goldilocks a `u64` already has more
+//! values than the field. The predicates here decide when a lowering may take one cell, and
+//! [`narrow_int_bits`] says where each operation goes past them. The predicates are separate, since
+//! the limb width certifies only that a product of two limbs is injective.
 
 use num_bigint::BigInt;
 use num_traits::One;
@@ -796,7 +802,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "recombining an int256 reaches 2^256")]
     fn a_recombination_too_wide_for_the_field_is_refused_rather_than_wrapped() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -818,7 +824,7 @@ mod tests {
     fn a_three_limb_split_recombines_with_ascending_place_values() {
         // The caller reaches three limbs only from `int96` up, so the loop past the first place
         // value is pinned here.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);

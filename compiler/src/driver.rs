@@ -1619,7 +1619,7 @@ mod tests {
         use super::Driver;
         use crate::compiler::ssa::hlssa::{HLSSA, builder::HLSSABuilder};
 
-        let mut ssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::goldilocks(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             let entry = b.function.get_entry_id();
@@ -1639,7 +1639,7 @@ mod tests {
     /// The same layouts as an R1CS over bn254, which stands in for a host over another field.
     fn over_bn254(
         r1cs: &mavros_artifacts::R1CS<mavros_artifacts::Goldilocks>,
-    ) -> mavros_artifacts::R1CS {
+    ) -> mavros_artifacts::R1CS<mavros_artifacts::Bn254> {
         mavros_artifacts::R1CS {
             witness_layout: r1cs.witness_layout,
             constraints_layout: r1cs.constraints_layout,
@@ -1705,7 +1705,7 @@ mod tests {
     /// The empty Goldilocks `main`, linked, with its R1CS over bn254 for a host over another field.
     fn linked_goldilocks_module() -> (
         crate::wasm_host::LoadedModule,
-        mavros_artifacts::R1CS,
+        mavros_artifacts::R1CS<mavros_artifacts::Bn254>,
         tempfile::TempDir,
     ) {
         use crate::compiler::codegen::{CodeGenOptions, llssa_to_llvm::WasmCompileOpts};
@@ -1763,12 +1763,12 @@ mod tests {
     /// R1CS generation refuses coefficients in a field other than the program's.
     #[test]
     fn r1cs_generation_refuses_a_field_other_than_the_programs() {
-        use mavros_artifacts::{Field, FieldConfig, FieldId};
+        use mavros_artifacts::{Bn254, FieldConfig, FieldId};
 
         use super::Driver;
         use crate::compiler::ssa::hlssa::{HLSSA, builder::HLSSABuilder};
 
-        let mut ssa = HLSSA::with_main_in(FieldConfig::goldilocks(), "main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::goldilocks(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             let entry = b.function.get_entry_id();
@@ -1781,7 +1781,7 @@ mod tests {
         driver.make_struct_access_static().unwrap();
         driver.monomorphize().unwrap();
         driver.spill_witness().unwrap();
-        match driver.generate_r1cs::<Field>() {
+        match driver.generate_r1cs::<Bn254>() {
             Err(Error::R1csFieldMismatch {
                 requested: FieldId::Bn254,
                 program: FieldId::Goldilocks,
@@ -1795,13 +1795,13 @@ mod tests {
     #[test]
     fn r1cs_coefficients_serialize_as_their_canonical_limbs() {
         use ark_ff::PrimeField;
-        use mavros_artifacts::{Field, Goldilocks, MavrosField, R1C};
+        use mavros_artifacts::{Bn254, Goldilocks, MavrosField, R1C};
 
-        let minus_one = -<Field as MavrosField>::ONE;
+        let minus_one = -<Bn254 as MavrosField>::ONE;
         let bn254 = R1C {
             a: vec![(3, minus_one)],
             b: vec![],
-            c: vec![(0, <Field as MavrosField>::ONE)],
+            c: vec![(0, <Bn254 as MavrosField>::ONE)],
         };
         let bytes = bincode::serialize(&bn254).unwrap();
         let expected = bincode::serialize(&(
@@ -1811,7 +1811,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(bytes, expected);
-        let back: R1C<Field> = bincode::deserialize(&bytes).unwrap();
+        let back: R1C<Bn254> = bincode::deserialize(&bytes).unwrap();
         assert_eq!((back.a, back.c), (bn254.a, bn254.c));
 
         let top = -Goldilocks::ONE;

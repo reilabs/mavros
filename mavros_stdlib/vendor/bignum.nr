@@ -1,6 +1,13 @@
 // Adapted compatibility subset of zkpassport/noir-bignum v0.10.0-1. Kept inside the injected std
 // crate so low-level foreign replacements follow Mavros' existing pure-Noir path. See the root
 // THIRD_PARTY_LICENSES file.
+//
+// FIELD-ASSUMPTION: the limbs are radix 2^120, and the multiplication, reduction and range-check
+// gadgets accumulate them in a native `Field`, up to the 2^246 borrow shift and the 2^126 borrow
+// carry below, which needs BN254's headroom. A smaller proving field needs new limb widths and a
+// fresh audit of every product, sum, carry and range-check bound, together with the limb encodings
+// and reduction parameters in `fields` and in `bigcurve::curves`. The non-native fields themselves
+// (the ECDSA curves' moduli, coefficients and half-orders) do not depend on the proving field.
 
 use crate::prelude::{Eq, Ord, From, Into, Default, Option, panic};
 pub mod constants {

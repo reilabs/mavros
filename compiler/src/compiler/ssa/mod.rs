@@ -97,9 +97,10 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// maintained by routing all insertions through [`SSA::add_const`], which interns by value.
     constants: SSAConstants<C>,
 
-    /// The field the program operates over. The middle-end mints and inspects field values through
-    /// this instance (see [`SSA::field`]) so no pass names a concrete prime. [`SSA::empty`] seeds
-    /// bn254, and a program lowered from another SSA takes that SSA's field ([`SSA::with_field`]).
+    /// The field the program operates over. The middle-end mints and inspects field values
+    /// through this instance (see [`SSA::field`]) so no pass names a concrete prime. Every
+    /// constructor takes it, and a program lowered from another SSA takes that SSA's field
+    /// ([`SSA::with_field`]).
     field: FieldConfig,
 
     /// Whether HLSSA slice lengths may represent physical capacity after purification.
@@ -126,14 +127,9 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
 }
 
 impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> {
-    /// Constructs an empty SSA over bn254: no functions and no entry points. Functions are added
+    /// Constructs an empty SSA over `field`: no functions and no entry points. Functions are added
     /// with [`Self::add_function`] / [`Self::insert_function`] and registered as entry points with
     /// [`Self::add_entry_point`].
-    pub fn empty() -> Self {
-        Self::with_field(FieldConfig::bn254())
-    }
-
-    /// Constructs an empty SSA over `field`, as [`Self::empty`] does over bn254.
     pub fn with_field(field: FieldConfig) -> Self {
         SSA {
             functions: HashMap::default(),
@@ -149,12 +145,8 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
         }
     }
 
-    pub fn with_main(name: String) -> Self {
-        Self::with_main_in(FieldConfig::bn254(), name)
-    }
-
     /// Constructs an SSA over `field` whose only function, `name`, is its entry point.
-    pub fn with_main_in(field: FieldConfig, name: String) -> Self {
+    pub fn with_main(field: FieldConfig, name: String) -> Self {
         let mut ssa = Self::with_field(field);
         let main_id = ssa.add_function(name);
         ssa.add_entry_point(main_id);
@@ -1178,6 +1170,7 @@ impl SSAAnotator for DefaultSSAAnnotator {}
 #[cfg(test)]
 mod tests {
     use crate::collections::HashMap;
+    use mavros_artifacts::FieldConfig;
 
     use crate::compiler::ssa::{
         DefaultSSAAnnotator, Located, SourceLocation, SourcePosition, ValueId,
@@ -1195,7 +1188,7 @@ mod tests {
     /// `for_each_const` visits every interned constant exactly once, in place.
     #[test]
     fn for_each_const_visits_all() {
-        let ssa = HLSSA::with_main("main".to_string());
+        let ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let a = ssa.add_const(Constant::int(8, 1));
         let b = ssa.add_const(Constant::int(8, 2));
 
@@ -1211,7 +1204,7 @@ mod tests {
 
     #[test]
     fn test_block_instructions_default_to_test_source_location() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
         entry.push_test_instruction(OpCode::Not {
@@ -1248,7 +1241,7 @@ mod tests {
 
     #[test]
     fn block_can_store_source_location_for_instruction() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let location = test_location();
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
@@ -1269,7 +1262,7 @@ mod tests {
 
     #[test]
     fn instruction_replacement_requires_explicit_source_location() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 
         entry.push_instruction_with_source_location(
@@ -1296,7 +1289,7 @@ mod tests {
 
     #[test]
     fn instruction_replacement_preserves_source_locations() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let location = test_location();
         let entry = ssa.get_unique_entrypoint_mut().get_entry_mut();
 

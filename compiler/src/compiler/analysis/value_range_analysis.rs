@@ -2236,7 +2236,7 @@ mod tests {
     use super::*;
     use crate::compiler::ssa::hlssa::builder::{HLEmitter, HLSSABuilder};
 
-    fn f() -> FieldConfig {
+    fn bn254() -> FieldConfig {
         FieldConfig::bn254()
     }
 
@@ -2316,14 +2316,14 @@ mod tests {
         // One reading, and no sign bit: the pattern _is_ the value, so `p − 1` is `p − 1` and not
         // `−1`. The divmod discharge only ever asks a field range about zero, which is what the
         // first two assertions pin.
-        let nonzero = ValueRange::from_unsigned(Width::Field(f()), iv(1, 9));
+        let nonzero = ValueRange::from_unsigned(Width::Field(bn254()), iv(1, 9));
         assert!(nonzero.proves_excludes_pattern(&BigInt::zero()));
-        let maybe_zero = ValueRange::from_unsigned(Width::Field(f()), iv(0, 9));
+        let maybe_zero = ValueRange::from_unsigned(Width::Field(bn254()), iv(0, 9));
         assert!(!maybe_zero.proves_excludes_pattern(&BigInt::zero()));
         // Above the range but still a legal field element.
         assert!(nonzero.proves_excludes_pattern(&BigInt::from(10)));
         // Outside `[0, p)` entirely: not a field element, so trivially excluded.
-        assert!(nonzero.proves_excludes_pattern(&field_modulus(f())));
+        assert!(nonzero.proves_excludes_pattern(&field_modulus(bn254())));
     }
 
     #[test]
@@ -2359,13 +2359,13 @@ mod tests {
         // struct must not be able to represent one. `opt_mul`'s `inf * 0 = 0` rule and the
         // equality-driven `overwrite` together mean a second representation of the same value
         // would make the fixpoint oscillate.
-        let r = ValueRange::from_unsigned(Width::Field(f()), iv(3, 9));
+        let r = ValueRange::from_unsigned(Width::Field(bn254()), iv(3, 9));
         assert_eq!(r.unsigned(), r.signed());
-        let r = ValueRange::from_signed(Width::Field(f()), iv(3, 9));
+        let r = ValueRange::from_signed(Width::Field(bn254()), iv(3, 9));
         assert_eq!(r.unsigned(), r.signed());
         assert_eq!(
-            ValueRange::full(Width::Field(f())).unsigned(),
-            &Interval::field_top(f())
+            ValueRange::full(Width::Field(bn254())).unsigned(),
+            &Interval::field_top(bn254())
         );
     }
 
@@ -2419,7 +2419,7 @@ mod tests {
         assert_eq!(r.signed(), &iv(-56, -56));
 
         // A field element has one reading, so the two agree.
-        let r = ValueRange::from_unsigned(Width::Field(f()), iv(0, 7));
+        let r = ValueRange::from_unsigned(Width::Field(bn254()), iv(0, 7));
         assert_eq!(r.unsigned(), &iv(0, 7));
     }
 
@@ -2509,7 +2509,7 @@ mod tests {
             &iv(255, 255)
         );
         assert_eq!(
-            minus_one.reinterpret_to(Width::Field(f())).unsigned(),
+            minus_one.reinterpret_to(Width::Field(bn254())).unsigned(),
             &iv(255, 255)
         );
 
@@ -2576,16 +2576,17 @@ mod tests {
         // `MulConst` with a multiplier of `[2, 3]` and a value of `p - 1` produces a raw
         // `[2p - 2, 3p - 3]`. Intersecting that with `[0, p)` — which is what capping to the
         // declared type amounts to — reports a value that definitely exists as unreachable.
-        let p = field_modulus(f());
+        let p = field_modulus(bn254());
         let raw = Interval::closed(&p - BigInt::from(1), &p - BigInt::from(1))
             .mul(&Interval::closed(2, 3));
-        let capped = raw.intersect(&Interval::field_top(f()));
+        let capped = raw.intersect(&Interval::field_top(bn254()));
         assert!(
             capped.is_empty(),
             "the old capping really did produce bottom"
         );
 
-        let wrapped = ValueRangeAnalysis::wrap_or_trap(Width::Field(f()), false, raw.clone(), raw);
+        let wrapped =
+            ValueRangeAnalysis::wrap_or_trap(Width::Field(bn254()), false, raw.clone(), raw);
         assert!(!wrapped.is_empty());
     }
 
@@ -2627,7 +2628,7 @@ mod tests {
 
     #[test]
     fn a_field_element_is_always_non_negative_as_signed() {
-        assert!(ValueRange::full(Width::Field(f())).is_non_negative_as_signed());
+        assert!(ValueRange::full(Width::Field(bn254())).is_non_negative_as_signed());
         assert!(!ValueRange::full(Width::NonScalar).is_non_negative_as_signed());
     }
 
@@ -2688,13 +2689,16 @@ mod tests {
         // The whole point of the rewrite: `u32` and `i32` are the same bit pattern, so they must
         // produce the same width. When `TypeExpr::U` disappears this becomes the only rule left.
         assert_eq!(
-            Width::of_type(&Type::int(32), f()),
-            Width::of_type(&Type::int(32), f())
+            Width::of_type(&Type::int(32), bn254()),
+            Width::of_type(&Type::int(32), bn254())
         );
-        assert_eq!(Width::of_type(&Type::int(32), f()), Width::Bits(32));
-        assert_eq!(Width::of_type(&Type::field(), f()), Width::Field(f()));
+        assert_eq!(Width::of_type(&Type::int(32), bn254()), Width::Bits(32));
         assert_eq!(
-            Width::of_type(&Type::int(8).array_of(3), f()),
+            Width::of_type(&Type::field(), bn254()),
+            Width::Field(bn254())
+        );
+        assert_eq!(
+            Width::of_type(&Type::int(8).array_of(3), bn254()),
             Width::NonScalar
         );
     }
@@ -2816,7 +2820,7 @@ mod tests {
 
         // A ⊥ _field_ element likewise proves nothing, even though every reachable field element
         // is non-negative.
-        let bottom_field = ValueRange::from_unsigned(Width::Field(f()), Interval::empty());
+        let bottom_field = ValueRange::from_unsigned(Width::Field(bn254()), Interval::empty());
         assert!(!bottom_field.is_non_negative_as_signed());
     }
 
@@ -2911,7 +2915,7 @@ mod tests {
 
         // Field division is multiplication by a modular inverse, which no interval bounds. The old
         // rule reached for `div_const_pos` here and got an answer that is simply wrong.
-        let fw = Width::Field(f());
+        let fw = Width::Field(bn254());
         let quot = arith(
             UDiv,
             fw,
@@ -3049,7 +3053,7 @@ mod tests {
         // joins its own back-edge argument, which is derived from the parameter. The guard breaks
         // that circle — the body sees `i < 16`, so the increment is bounded by 16, so the join
         // closes on `[0, 16]` instead of the full width.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (_, _, counter, _, _) = counted_loop(&mut ssa);
         let ranges = run_analysis(&mut ssa);
         assert_eq!(ranges.get(counter).unsigned(), &iv(0, 16));
@@ -3062,7 +3066,7 @@ mod tests {
         // there, and only there, it is at most 15. Getting this backwards in either direction is
         // the whole risk of the feature: `get` too tight is unsound, `get_at` too loose costs the
         // rows this was written to recover.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (header, body, counter, _, _) = counted_loop(&mut ssa);
         let ranges = run_analysis(&mut ssa);
 
@@ -3077,7 +3081,7 @@ mod tests {
         // same region, so the bound that held where it was computed holds wherever it is read.
         // `[0, 15]` rather than `[-1, 15]` is exactly the difference between discharging that
         // check and emitting it.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (_, _, _, down, next) = counted_loop(&mut ssa);
         let ranges = run_analysis(&mut ssa);
 
@@ -3162,7 +3166,7 @@ mod tests {
         // fixed point 2^63 rounds away, so only widening terminates. This asserts only that the
         // answer is sound (the counter is inside its width); which bound widening settles on is the
         // operator's business.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (_, _, counter, _, _) = counted_loop(&mut ssa);
         let ranges = run_analysis(&mut ssa);
         let range = ranges.get(counter);
@@ -3233,7 +3237,7 @@ mod tests {
         // stops being ⊤, so this is really a test that `ITER_LIMIT` is generous enough for the
         // shapes the standard library actually contains. Both counters bounded means the solver
         // still converged; a `[0, 255]` here would mean it ran out of rounds.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (outer_counter, inner_counter, down) = {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -3306,7 +3310,7 @@ mod tests {
     fn the_untaken_side_of_a_guard_bounds_from_below() {
         // `i >= 16` on the exit edge. Nothing in the loop lowering reads this, but a `if x < c`
         // in user code has two sides and the negative one is a bound just as much.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (value, then_block, else_block) = {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -3342,7 +3346,7 @@ mod tests {
         // Arriving at a block reachable from elsewhere does not say which edge was taken, so the
         // fact would be false on the other one. Here the entry's `else` and a third block both
         // jump to the same place.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (value, shared) = {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -3381,7 +3385,7 @@ mod tests {
         // `SLt` decides the two's-complement reading, so the bound belongs on that component. Read
         // as unsigned the surviving patterns are two runs, which is precisely what the reduced
         // product exists to express.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (value, then_block) = {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -3415,7 +3419,7 @@ mod tests {
         // `x < x` cannot hold, so the branch is unreachable and there is nothing to learn. The two
         // rules would otherwise each narrow `x` using `x`, which is the one shape where the
         // "read the far operand flat" discipline has no far operand to read.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (value, then_block) = {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -3452,7 +3456,7 @@ mod tests {
         // `constrain_to` reduced the whole branch to ⊥ — and `join` treats ⊥ as the identity, so
         // the merged range silently became the other branch's alone. That is an unsound narrowing,
         // not merely an imprecise one: `200` really can come out of this select.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let selected;
         {
@@ -3486,7 +3490,7 @@ mod tests {
         // that canonicity protects, and nothing else here reaches them. Merging 3 with 200 leaves
         // information in _both_ readings — neither interval alone denotes `{3, 200}` — which is the
         // reduced product doing the only thing a single interval could not.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let merged;
         {
@@ -3538,7 +3542,7 @@ mod tests {
     /// Build `guard(cond) { result = lhs <kind> rhs }` over two `u8` constants and return the
     /// analysed range of `result`.
     fn guarded_u8_op(kind: BinaryArithOpKind, lhs: u128, rhs: u128) -> ValueRange {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let guarded;
         {
@@ -3605,7 +3609,7 @@ mod tests {
     #[test]
     fn a_guarded_witness_shift_can_produce_its_operand() {
         for witnessed in [true, false] {
-            let mut ssa = HLSSA::with_main("main".to_string());
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
             let main_id = ssa.get_unique_entrypoint_id();
 
             let guarded;
@@ -3661,7 +3665,7 @@ mod tests {
         // The rounds are driven directly rather than through a program that takes enough of them
         // to widen: the solver reaches its fixed point in three rounds on anything writable here,
         // so a whole-program test could only assert this by accident.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (guard, result, lhs, rhs) = {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -3716,7 +3720,7 @@ mod tests {
                 bounds,
                 refinements,
                 &mut changed,
-                f(),
+                bn254(),
                 &[],
             );
             changed

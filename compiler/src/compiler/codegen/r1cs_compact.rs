@@ -761,18 +761,18 @@ fn eliminate_linear(
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{ConstraintsLayout, FieldConfig, R1C, WitnessLayout};
+    use mavros_artifacts::{Bn254, ConstraintsLayout, FieldConfig, R1C, WitnessLayout};
 
     use super::*;
 
-    fn field(v: i64) -> Field {
+    fn bn254_const(v: i64) -> Field {
         FieldConfig::bn254().constant(v)
     }
 
-    fn lc(terms: &[(usize, i64)]) -> LC {
+    fn lc(terms: &[(usize, i64)]) -> LC<Bn254> {
         terms
             .iter()
-            .map(|&(col, v)| (col, MavrosField::from_element(field(v))))
+            .map(|&(col, v)| (col, MavrosField::from_element(bn254_const(v))))
             .collect()
     }
 
@@ -797,7 +797,7 @@ mod tests {
         }
     }
 
-    fn r1c(a: &[(usize, i64)], b: &[(usize, i64)], c: &[(usize, i64)]) -> R1C {
+    fn r1c(a: &[(usize, i64)], b: &[(usize, i64)], c: &[(usize, i64)]) -> R1C<Bn254> {
         R1C {
             a: lc(a),
             b: lc(b),
