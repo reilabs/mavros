@@ -2,8 +2,10 @@
 //! group of limbs.
 //!
 //! A `WitnessOf(Int(N))` with `N > multi_cell_int_bits` becomes `k = ceil(N/h)` little-endian
-//! values, where `h` is configured to support the widest operation in the program, see [`limb_config.rs`].
-//! Limbs `0..k-1` are `WitnessOf(Int(h))` and the top one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared width is correct.
+//! values, where `h` is the widest limb at which every product and division in the program is
+//! sound, chosen once per program by [`limb_config::LimbConfig`]. Limbs `0..k-1` are
+//! `WitnessOf(Int(h))` and the top one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared
+//! width is correct.
 //!
 //! A **pure** `Int(N)` **scalar** is untouched: it lives in the hint domain, where both backends
 //! compute at any width.
@@ -40,9 +42,9 @@
 //!   the rewriter refuses one located anywhere but the return binding.
 //!
 //! Everything else either moves limbs or, like the bitwise operations, acts on each limb within its
-//! width, so the limbs stay constrained. The exceptions, below, are the carry chain, the schoolbook
-//! product, the division built from those two, the shift, the spread and unspread, and the sign
-//! and magnitude.
+//! width, so the limbs stay constrained. The exceptions, below, are the carry chain, the product's
+//! polynomial identity, the division built from those two, the shift, the spread and unspread, and
+//! the sign and magnitude.
 //!
 //! # The Carry Chain
 //!
@@ -69,11 +71,11 @@
 //! reaches past the product, passes the modulus, except for the double lane's two-limb product. A
 //! signed one runs here past [`single_cell_signed_product_fits`], with no such exception.
 //!
-//! The product is checked as one **polynomial identity** ([`rewriter::Rewriter::lower_identity`]), à la
-//! [this blogpost](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding).
-//! Limb `i` of an operand is the coefficient of `X^i`, so `a` is `A(β)` at the radix `β = 2^limb_width`.
-//! The answer `C(X)` and the carries `H(X)` are witnessed from a pure-side schoolbook,
-//! and `F(X) = A(X)·B(X) − C(X) == (β − X)·H(X)` is constrained at each point `0..=deg F`.
+//! The product is checked as one **polynomial identity** ([`Rewriter::lower_identity`]), à la
+//! [this blogpost](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding). Limb `i` of an
+//! operand is the coefficient of `X^i`, so `a` is `A(β)` at the radix `β = 2^h`. The answer `C(X)`
+//! and the carries `H(X)` are witnessed from a pure-side schoolbook, and
+//! `F(X) = A(X)·B(X) − C(X) == (β − X)·H(X)` is constrained at each point `0..=deg F`.
 //!
 //! The identity is checked modulo p and modulo β^t, so the identity holds over the integers.
 //! The columns are grouped into **blocks** of as many as fit together with a carry.

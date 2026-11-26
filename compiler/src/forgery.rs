@@ -45,6 +45,11 @@ pub fn accepts_the_forgery_with<F: MavrosField>(
     accepts_the_forgery_with_checked_at(ssa, inputs, configure, None, forge)
 }
 
+/// [`accepts_the_forgery`], where a trap located at the synthetic `checks` refuses the forgery too.
+///
+/// A range check narrow enough to stay in its function traps where it stands on a value with no
+/// table row. A test that forges the hints such checks read names their location, and must hold
+/// nothing else at that location that can trap.
 pub fn accepts_the_forgery_checked_at<F: MavrosField>(
     ssa: HLSSA,
     inputs: &[InputValueOrdered<F>],
@@ -54,11 +59,7 @@ pub fn accepts_the_forgery_checked_at<F: MavrosField>(
     accepts_the_forgery_with_checked_at(ssa, inputs, |_| {}, checks, forge)
 }
 
-/// [`accepts_the_forgery`], where a trap located at the synthetic `checks` refuses the forgery too.
-///
-/// A range check narrow enough to stay in its function traps where it stands on a value with no
-/// table row. A test that forges the hints such checks read names their location, and must hold
-/// nothing else at that location that can trap.
+/// [`accepts_the_forgery_checked_at`], with the driver set up by `configure` before it compiles.
 pub fn accepts_the_forgery_with_checked_at<F: MavrosField>(
     ssa: HLSSA,
     inputs: &[InputValueOrdered<F>],

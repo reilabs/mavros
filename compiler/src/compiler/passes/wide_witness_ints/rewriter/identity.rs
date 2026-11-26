@@ -203,7 +203,7 @@ pub(super) enum Target<'a> {
     Given(&'a Factor),
 }
 
-/// One operand of the schoolbook, limb by limb.
+/// One operand of an identity, limb by limb: the coefficients of its polynomial.
 pub(super) struct Factor {
     /// Each limb at its width.
     pub(super) limbs: Vec<Limb>,
@@ -296,7 +296,7 @@ pub(super) enum Limb {
     /// A value, witnessed or pure as the operand is.
     Value(ValueId),
 
-    /// A limb of a constant operand, interned only where the plan reads it.
+    /// A limb of a constant operand, interned only where the lowering reads it.
     Constant(IntBits),
 }
 

@@ -1,5 +1,5 @@
-//! Products too wide for one field element, lowered to a schoolbook multiplication over limbs and checked by a
-//! [`PolynomialIdentity`].
+//! Products too wide for one field element, lowered to limbs and checked by a
+//! [`PolynomialIdentity`](super::identity::PolynomialIdentity).
 
 use super::identity::{Factor, IdentityShape, IdentityTemplate, Polarity, Target, Term};
 use super::lower::exceeds_single_cell_product;
@@ -19,7 +19,7 @@ mod tests;
 impl Rewriter<'_> {
     /// Lowers a product the single cell cannot hold. Returns whether `op` was one and was lowered.
     ///
-    /// An unsigned product is a schoolbook at the witness limb, checked by the polynomial
+    /// An unsigned product is witnessed at the configured limb and checked by the polynomial
     /// identity. A signed one is handed to [`Self::lower_signed_product`].
     pub(super) fn lower_product(&mut self, op: &OpCode) -> bool {
         let Some(Operands { bits, lhs, rhs }) = multiplied(op, self.types, self.field()) else {
@@ -77,7 +77,7 @@ impl<'a> IdentityTemplate<'a> for UnsignedProduct {
     }
 }
 
-/// The product the schoolbook lowers, if `op` is one: a multiplication under either reading,
+/// The product the representation lowers, if `op` is one: a multiplication under either reading,
 /// guarded or not, with a witnessed operand, at a width the single cell does not take.
 pub(in super::super) fn multiplied(
     op: &OpCode,

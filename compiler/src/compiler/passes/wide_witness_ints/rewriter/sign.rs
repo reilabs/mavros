@@ -366,10 +366,6 @@ impl Rewriter<'_> {
     /// the modulus, so it is zero exactly when each term is: either `t` is zero, or every other bit
     /// is and `s` is one. The constraint is under `guard`; the cut is not, as every caller passes
     /// limbs in range on every path.
-    ///
-    /// A product's schoolbook still checks its top column: the cut reads it through a cast that
-    /// truncates on the pure side, so without that check an overflowing product would be refused
-    /// only by the cut's constraint, after witness generation has run on.
     fn check_fits(
         &mut self,
         limbs: &[(ValueId, bool)],
@@ -423,7 +419,7 @@ impl Rewriter<'_> {
     }
 
     /// A gadget's answer, one field element per limb of `widths`, as limbs the chain and the
-    /// schoolbook read: a known limb as its constant, and any other as witnessed, which an answer
+    /// shift read: a known limb as its constant, and any other as witnessed, which an answer
     /// with a witnessed operand is. A pure one would read back unchanged through `ValueOf`.
     pub(super) fn answer_limbs(
         &mut self,

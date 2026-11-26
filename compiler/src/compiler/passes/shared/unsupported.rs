@@ -11,8 +11,8 @@
 //! first (`DecompositionWidthValidation`), so such a program gets `Error::LoweringRefused` with a
 //! diagnostic, and these refusals back that check up. The other callers cannot fire on bn254 or
 //! Goldilocks and stay as backstops: an earlier lowering routes every operation past the
-//! single-cell ones, and both fields leave the schoolbook room for one partial product and the
-//! carry it is reduced into.
+//! single-cell ones, and `wide_witness_ints` narrows its limb until every product's and division's
+//! identity fits, which both fields allow at some limb.
 
 use std::fmt;
 

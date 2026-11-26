@@ -187,7 +187,7 @@ impl LowerWitnessIntegerArithOps {
     // The full product is one field element (`range_fits_field_injectively`), or for u128 the
     // packing below, `lo + cross·2^h` (~2^193 at the bn254 limb), which needs more than the limb
     // width certifies and so asks `two_limb_product_packing_fits`. A product one cell cannot hold
-    // takes the schoolbook in `WideWitnessInts` first (`single_cell_product_fits`, asserted at
+    // takes the limb-wise product in `WideWitnessInts` first (`single_cell_product_fits`, asserted at
     // entry). So the two refusals below are a backstop that cannot fire.
     fn lower_unsigned_mul(
         &self,
@@ -705,7 +705,7 @@ fn narrow_rangecheck_width(range: &Interval, default_bits: usize) -> usize {
 }
 
 // Reads the real modulus, so it answers correctly on a small field. At 128 bits its FALSE case is
-// the two-limb packing in `lower_unsigned_mul`; at any other width the schoolbook in
+// the two-limb packing in `lower_unsigned_mul`; at any other width the limb-wise product in
 // `passes::wide_witness_ints` takes every product `single_cell_product_fits` refuses first.
 fn range_fits_field_injectively(range: &Interval, field: FieldConfig) -> bool {
     // ⊥ would report `hi - lo = -1 < p` and so license the single-field product path on no evidence
@@ -805,7 +805,7 @@ struct DivModResult {
 // The limb width is the field's, but `lower_unsigned_mul` reads the split as exactly two limbs. It
 // is reached only where `single_cell_product_fits` holds, which at 128 bits asks
 // `two_limb_product_packing_fits`, covering the count as well as the packing; a narrower field
-// sends the product to the schoolbook in `passes::wide_witness_ints`.
+// sends the product to the limb-wise product in `passes::wide_witness_ints`.
 fn split_u128_value(b: &mut impl HLEmitter, value: ValueId) -> WitnessLimbs {
     // The operand's **type** width decides how many limbs it takes; the field decides only how wide
     // each one is.

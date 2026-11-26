@@ -81,8 +81,10 @@ understanding:
 
 - **Overflow:** This is handled using a range check. A sum's top limb takes no carry out, so an
   overflowing sum fails the range check on that limb. A subtraction that underflows leaves it
-  negative, which fails the same check. A product also holds every partial product past the top limb
-  to be zero in addition to the range-check on the top limb.
+  negative, which fails the same check. An unsigned product's polynomial identity also holds every
+  column past the top limb to zero, in addition to the range check on the top limb. A signed product
+  witnesses its wrapped answer and holds it equal to the two's complement product over the
+  integers, so an overflowing one has no answer to satisfy it.
 - **Power of Two:** A shift multiplies or divides a value by a value in a lookup table of
   `(n, 2^n)`. At a power-of-two width the tables keys are exactly the legal amounts, so the lookup
   also rejects an amount past the width.

@@ -273,8 +273,8 @@ fn additive_and_bitwise_operations_agree_up_to_63_bits() {
 
 /// Products, quotients, remainders and shifts agree with the model on both sides of the single
 /// cell's last width, 32 bits, where a `u32` division's `q·d + r` reaches `p - 1`. Past it, the
-/// schoolbook, the division and the limb-wise shift run on 16-bit witness limbs: three full ones
-/// at 48, and a narrow top limb at 33, 62 and 63.
+/// product's identity, the division and the limb-wise shift run on 16-bit witness limbs: three
+/// full ones at 48, and a narrow top limb at 33, 62 and 63.
 #[test]
 fn products_quotients_and_shifts_agree_from_32_to_63_bits() {
     use BinaryArithOpKind::{SDiv, SMul, SRem, SShl, SShr, UDiv, UMul, URem, UShl, UShr};

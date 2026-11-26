@@ -71,10 +71,10 @@ impl Rewriter<'_> {
         })
     }
 
-    /// An operand of the schoolbook as its limbs at `bits`, with their bounds.
+    /// An operand of an identity as its limbs at `bits`, with their bounds.
     ///
     /// A constant is cut at compile time, so limbs it does not reach are known zeros and drop out
-    /// of the plan. A witnessed operand can have known limbs too (above a widened value, emptied by
+    /// of the polynomial. A witnessed operand can have known limbs too (above a widened value, emptied by
     /// a constant shift, or known from an earlier gadget); each is taken as its constant, which is
     /// pinned by being one.
     pub(in super::super) fn factor(

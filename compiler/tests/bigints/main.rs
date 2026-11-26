@@ -758,8 +758,8 @@ fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
     }
 }
 
-/// The operations the representation computes on limbs: the carry chain's three, the schoolbook's
-/// product, the division built from it, and the shifts, each under either reading.
+/// The operations the representation computes on limbs: the carry chain's three, the product's
+/// identity, the division built from it, and the shifts, each under either reading.
 #[derive(Clone, Copy, Debug)]
 enum Limbed {
     Sum,
@@ -979,7 +979,7 @@ fn dedup(values: Vec<IntBits>) -> Vec<IntBits> {
 }
 
 /// A product agrees with the model where the operands have an element each and their product does
-/// not, which is where the schoolbook runs on a decomposition of each operand.
+/// not, which is where the product's identity runs on a decomposition of each operand.
 ///
 /// 127 is the one width below the double lane whose product the single cell cannot hold. 129 and
 /// 200 are past both narrow lanes, and 253 is the widest width an element carries.
@@ -1024,9 +1024,9 @@ fn a_quotient_or_remainder_agrees_with_the_model_at_the_limb_corners() {
 /// The product on limbs, over the corners its carries and its overflow check turn on, on both
 /// lanes, with both operands witnessed and with a constant multiplier.
 ///
-/// The limbs a constant does not reach drop out of the plan with their partial products and
-/// overflow terms. `2^top_limb` has only a top limb, so its overflow terms are all that stand
-/// between a large operand and a wrong answer.
+/// The limbs a constant does not reach are zero coefficients, which drop out of the identity and
+/// lower its degree. `2^top_limb` has only a top limb, so the columns past the answer's top, held
+/// to zero, are all that stand between a large operand and a wrong answer.
 #[test]
 fn limbed_products_agree_with_the_model() {
     let limb = witness_limb_bits(FieldConfig::bn254());
@@ -1049,7 +1049,7 @@ fn limbed_products_agree_with_the_model() {
     }
 }
 
-/// The quotient and the remainder on limbs, over the corners the schoolbook and the chain turn on,
+/// The quotient and the remainder on limbs, over the corners the identity and the chain turn on,
 /// on both lanes, with a witnessed divisor and with a constant one.
 ///
 /// A constant divisor bounds both answers, so limbs it puts out of their reach are never witnessed
@@ -1730,7 +1730,7 @@ fn every_witness_column_of_a_limbed_shift_is_pinned() {
 /// A division whose answer is known before it runs still refuses a zero divisor.
 ///
 /// Zero divided by anything leaves every limb of both answers a known zero, so neither is witnessed
-/// and the schoolbook holds only the dividend's limbs. A value divided by itself is one, with no
+/// and the identity holds only the dividend's limbs. A value divided by itself is one, with no
 /// quotient or remainder witnessed at all. In both cases the lowering's check of the divisor is
 /// the only thing refusing a zero divisor, as a division by a witness carries no other check. Each
 /// runs unguarded and in a taken branch, the two paths to that check.
@@ -2149,8 +2149,8 @@ fn a_guarded_difference_is_checked_only_where_its_guard_holds() {
 /// A product under a witnessed condition is checked only where the condition holds.
 ///
 /// The multiplier is `2^(N - 2)` or-ed onto a parameter, so a multiplicand of three fits and four
-/// overflows by exactly its top column; untaken, the schoolbook's checks are off with the guard.
-/// 253 is the schoolbook on one element's decomposition, 320 on limbs.
+/// overflows by exactly its top column; untaken, the identity's checks are off with the guard.
+/// 253 is the identity on one element's decomposition, 320 on limbs.
 #[test]
 fn a_guarded_product_is_checked_only_where_its_guard_holds() {
     for bits in [253usize, 320] {
@@ -2870,8 +2870,8 @@ fn every_witness_column_of_a_signed_product_quotient_or_right_shift_is_pinned() 
 /// where the condition holds.
 ///
 /// Where the branch is not taken the operands are whatever it left behind, and each run here leaves
-/// something the taken branch refuses: a product whose magnitudes overflow even unsigned, which
-/// leaves the schoolbook's top column past its width, a zero divisor, `INT_MIN / -1`, and an amount
+/// something the taken branch refuses: a product that overflows its width, which leaves no
+/// in-range answer to satisfy the identity, a zero divisor, `INT_MIN / -1`, and an amount
 /// at the width. 253 is the gadgets on a decomposition of each operand, and 320 on limbs.
 #[test]
 fn a_guarded_signed_operation_is_checked_only_where_its_guard_holds() {
@@ -3680,7 +3680,7 @@ fn a_pure_wide_element_read_out_of_a_sequence_is_computed_on() {
 ///
 /// `3^200` built by a loop is an `int320` no fold answers, so R1CS generation computes it, and it
 /// has no field element. It is carried there as its pattern, which is what lets the loop run at
-/// all, and the schoolbook cuts it into limbs on the pure side, each an element again. A limb that
+/// all, and the product cuts it into limbs on the pure side, each an element again. A limb that
 /// kept the bits above it would be a wrong coefficient in the product's constraints, which is what
 /// the multiplied run checks, and a multiplier of sixteen overflows the width.
 #[test]

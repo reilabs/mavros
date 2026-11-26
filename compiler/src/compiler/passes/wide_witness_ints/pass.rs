@@ -56,7 +56,7 @@ impl Pass for WideWitnessInts {
             );
             let value_map = plan_function(ssa, fid, &reachable, type_info, limb_config);
             // A function with no limbs can still hold an operation whose operands each fit an
-            // element but whose sum or product does not; the chain, schoolbook and division lower
+            // element but whose sum or product does not; the chain, product and division lower
             // those too, and every pure integer spelled by its limbs is recombined here.
             let fti = type_info.get_function(fid);
             let lowers_here = || {

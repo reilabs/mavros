@@ -297,7 +297,8 @@ impl Rewriter<'_> {
     ///
     /// **Each limb** `x_i` is split as `x_i·m = hi_i·2^h + lo_i` with both halves range-checked,
     /// where `m` is `f` for `<<` and `2^(h - r)` for `>>`, pinned by `m·f == 2^h`. As `x_i·m` is
-    /// below `2^2h`, which [`witness_limb_bits`] keeps injective, the split is unique. Answer
+    /// below `2^2h`, which any limb up to [`witness_limb_bits`] keeps injective, the split is
+    /// unique. Answer
     /// limb `j` before the whole limbs move is `lo_j + hi_(j-1)` for `<<` or `hi_j + lo_(j+1)` for
     /// `>>`; the two halves cover disjoint bits, so neither sum carries.
     ///

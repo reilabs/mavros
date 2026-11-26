@@ -82,13 +82,13 @@ impl Rewriter<'_> {
     /// if `op` was one and was lowered.
     ///
     /// The quotient `q` and remainder `r` are witnessed as limbs from a pure-side division and
-    /// pinned by `q·d + r == n` and `r < d`. The first is one schoolbook, with `r` added to its
-    /// columns and each column held to the dividend's limb; the second is the carry chain with its
-    /// top borrow forced out, which a zero divisor cannot pass. Together they admit exactly the
-    /// Euclidean pair.
+    /// pinned by `q·d + r == n` and `r < d`. The first is one [`EuclideanDivision`] identity, with
+    /// `r` as a linear term and the dividend given as its answer; the second is the carry chain
+    /// with its top borrow forced out, which a zero divisor cannot pass. Together they admit
+    /// exactly the Euclidean pair.
     ///
     /// Under a guard, the pure side divides zero by one where the guard is off, so `q`, `r` and
-    /// everything the schoolbook builds from them are zero there: its checks hold whatever the
+    /// everything the identity builds from them are zero there: its checks hold whatever the
     /// untaken branch left behind, and only `q·d + r == n` and `r < d` are guarded. The answer is
     /// those zeros, range-checked like any limb, so it needs no select. A value divided by itself,
     /// `d / d`, witnesses nothing: its answers are the constants one and zero, so where the guard
@@ -267,7 +267,7 @@ impl Rewriter<'_> {
 
     /// A pure `bits`-wide `hint` witnessed as limbs at `widths`, each range-checked no wider than
     /// `max` allows for it. A limb `max` does not reach is a constant zero, which drops out of the
-    /// schoolbook's plan. Only the caller's constraints tie the limbs to anything.
+    /// identity's polynomial. Only the caller's constraints tie the limbs to anything.
     pub(super) fn witness_hinted(
         &mut self,
         hint: ValueId,
