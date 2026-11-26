@@ -15,7 +15,7 @@ use crate::compiler::{
                 split_into_limbs, two_limb_product_packing_fits, widest_cell_sum_bits,
                 witness_limb_bits,
             },
-            unsupported::unsupported_on_this_field,
+            unreachable::unreachable_on_this_field,
         },
     },
     ssa::{
@@ -188,7 +188,7 @@ impl LowerWitnessIntegerArithOps {
     // packing below, `lo + cross·2^h` (~2^193 at the bn254 limb), which needs more than the limb
     // width certifies and so asks `two_limb_product_packing_fits`. A product one cell cannot hold
     // takes the schoolbook in `WideWitnessInts` first (`single_cell_product_fits`, asserted at
-    // entry). So the two refusals below are a backstop that cannot fire.
+    // entry). So neither backstop below can fire.
     fn lower_unsigned_mul(
         &self,
         b: &mut HLBlockEmitter<'_>,
@@ -210,7 +210,7 @@ impl LowerWitnessIntegerArithOps {
             // from a wrapped residue. The same question covers the limb _count_, because the code
             // below reads each split as a pair.
             if !two_limb_product_packing_fits(b.field(), bits) {
-                unsupported_on_this_field(
+                unreachable_on_this_field(
                     format_args!(
                         "a {bits}-bit unsigned multiplication falls back to a two-limb schoolbook product, which needs the operands to be two witness limbs and needs its `lo + cross * 2^h` packing — about 2^(3h+1) — not to wrap modulo the field"
                     ),
@@ -250,7 +250,7 @@ impl LowerWitnessIntegerArithOps {
         }
 
         if !range_fits_field_injectively(&product_range, b.field()) {
-            unsupported_on_this_field(
+            unreachable_on_this_field(
                 format_args!(
                     "a {bits}-bit unsigned multiplication whose product spans {product_range:?} needs a schoolbook multi-limb lowering: that span has representatives a single field product cannot tell apart"
                 ),

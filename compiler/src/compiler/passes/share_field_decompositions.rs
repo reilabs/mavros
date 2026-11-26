@@ -18,7 +18,7 @@ use crate::{
     collections::HashMap,
     compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::{field_windows::FieldWindow, limbs::multi_cell_int_bits},
         ssa::{
             Located, SourceLocation, ValueId,
@@ -43,7 +43,7 @@ impl Pass for ShareFieldDecompositions {
         "share_field_decompositions"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
 
@@ -80,6 +80,7 @@ impl Pass for ShareFieldDecompositions {
                 }
             }
         }
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -275,7 +276,9 @@ mod tests {
     }
 
     fn run(ssa: &mut HLSSA) {
-        ShareFieldDecompositions::new().run(ssa, &AnalysisStore::new());
+        ShareFieldDecompositions::new()
+            .run(ssa, &AnalysisStore::new())
+            .unwrap();
     }
 
     /// The windows of `ssa` as `(operand, offset, width)`.

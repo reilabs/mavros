@@ -326,16 +326,20 @@ fn a_narrow_field_reduces_more_often_or_refuses() {
     );
 }
 
-/// bn254 plans a schoolbook product, and the `q·d + r` of a division, at every width class it
-/// has, so neither ever reaches [`unsupported_on_this_field`].
+/// Each configured field plans a schoolbook product, and the `q·d + r` of a division, at every
+/// width class it has, so neither ever reaches [`unreachable_on_this_field`].
 #[test]
-fn bn254_holds_a_product_at_every_width() {
-    for bits in [1usize, 127, 128, 129, 253, 254, 1000, 16383, 16384] {
-        for with_addend in [false, true] {
-            assert!(
-                schoolbook_fits(bn254(), bits, with_addend),
-                "int{bits}, addend: {with_addend}"
-            );
+fn every_field_holds_a_product_at_every_width() {
+    for field in fields() {
+        for bits in [
+            1usize, 31, 32, 33, 63, 64, 65, 127, 128, 129, 253, 254, 1000, 16383, 16384,
+        ] {
+            for with_addend in [false, true] {
+                assert!(
+                    schoolbook_fits(field, bits, with_addend),
+                    "{field:?}, int{bits}, addend: {with_addend}"
+                );
+            }
         }
     }
 }

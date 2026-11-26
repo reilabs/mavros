@@ -10,7 +10,7 @@ use crate::compiler::{
                 single_cell_product_fits, single_cell_signed_product_fits,
                 widest_injective_int_bits,
             },
-            unsupported::unsupported_on_this_field,
+            unreachable::unreachable_on_this_field,
         },
         wide_witness_ints::types::limb_widths,
     },
@@ -122,6 +122,10 @@ impl Rewriter<'_> {
         let evaluate = lhs.witnessed
             && rhs.witnessed
             && witnessed_partial_products(lhs, rhs) > 2 * widths.len() - 1;
+        // Cannot fail on either configured field: the plan needs one partial product and the carry
+        // it is reduced into below the injective width `B`, and both leave `B - 2h` bits above a
+        // partial product for that carry (125 on bn254, 31 on Goldilocks). Checked by
+        // `every_field_holds_a_product_at_every_width`.
         let plan = plan_product(
             &lhs.bounds,
             &rhs.bounds,
@@ -131,7 +135,7 @@ impl Rewriter<'_> {
             evaluate,
         )
         .unwrap_or_else(|| {
-            unsupported_on_this_field(
+            unreachable_on_this_field(
                 format_args!(
                     "a {bits}-bit unsigned {operation} is a schoolbook product of witness limbs, which needs one partial product and the carry it is reduced into to fit a field element"
                 ),

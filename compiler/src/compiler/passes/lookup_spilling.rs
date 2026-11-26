@@ -9,7 +9,7 @@ use crate::{
             lookup_sizing::{Chunk, LookupSizing, TableKind},
             types::{FunctionTypeInfo, Types},
         },
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::{
             MIN_LOOPED_RUN,
             limbs::{narrow_int_bits, widest_injective_int_bits},
@@ -271,7 +271,7 @@ impl Pass for LookupSpilling {
         vec![LookupSizing::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let sizing = store.get::<LookupSizing>();
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
@@ -339,6 +339,7 @@ impl Pass for LookupSpilling {
                 }
             });
         }
+        Ok(())
     }
 }
 

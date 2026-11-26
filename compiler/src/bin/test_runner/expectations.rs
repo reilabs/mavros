@@ -58,9 +58,6 @@ pub(crate) const DATA_BUS_REFUSAL: &str = "the data bus is not supported";
 /// holds injectively.
 pub(crate) const WIDE_FIELD_CAST_REFUSAL: &str = "cannot be cast to Field";
 
-/// Mavros' refusal of a witnessed decomposition into more bytes than a field element has.
-pub(crate) const WIDE_DECOMPOSITION_REFUSAL: &str = "bytes a field element occupies";
-
 /// Every field-agnostic override: [`TEST_EXPECTATION_OVERRIDES`] and the data-bus fixtures.
 pub(crate) fn test_expectation_overrides() -> impl Iterator<Item = (&'static str, TestExpectation)>
 {
@@ -95,13 +92,13 @@ pub(crate) const FIELD_EXPECTATION_OVERRIDES: &[(&str, FieldId, TestExpectation)
         FieldId::Goldilocks,
         TestExpectation::CompileRejection(WIDE_FIELD_CAST_REFUSAL),
     ),
-    // These decompose a `Field` into 32 bytes, where a Goldilocks element has 8. A witnessed
-    // decomposition is refused at compile time; in unconstrained code the standard library's
-    // assertion traps in witness generation.
+    // These decompose a `Field` into 32 bytes, where a Goldilocks element has 8, so the standard
+    // library's `static_assert` on the byte count fails. R1CS generation proves the constrained one
+    // unsatisfiable, and the unconstrained one traps in witness generation.
     (
         "noir/test_programs/execution_success/regression_9208",
         FieldId::Goldilocks,
-        TestExpectation::CompileRejection(WIDE_DECOMPOSITION_REFUSAL),
+        TestExpectation::ExecutionFailure,
     ),
     (
         "noir/test_programs/execution_success/regression_9303",

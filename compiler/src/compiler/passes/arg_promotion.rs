@@ -90,7 +90,7 @@ use crate::{
             points_to::{PointerUse, PointsTo, object::AbstractObject},
             types::{FunctionTypeInfo, TypeInfo},
         },
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::value_replacements::{ReplaceScope, ValueReplacements},
         ssa::{
             BlockId, FunctionId, SourceLocation, Terminator, ValueId,
@@ -120,8 +120,9 @@ impl Pass for ArgPromotion {
         vec![TypeInfo::id(), PointsTo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<TypeInfo>(), store.get::<PointsTo>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

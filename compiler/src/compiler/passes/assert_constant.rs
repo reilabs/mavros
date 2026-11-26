@@ -10,15 +10,12 @@
 //! functions are therefore outside this validation; successful validation still removes their
 //! markers so later passes never need to interpret the compiler-only opcode.
 
-use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
+use std::{collections::BTreeSet, rc::Rc};
 
 use crate::compiler::{
     analysis::witness_taint_inference::WitnessTaintInference,
-    pass_manager::{AnalysisStore, Pass},
-    ssa::{
-        SourceLocation,
-        hlssa::{CallTarget, HLSSA, OpCode},
-    },
+    pass_manager::{AnalysisStore, Pass, PassFailure, PassResult},
+    ssa::hlssa::{CallTarget, HLSSA, OpCode},
 };
 
 /// Validate every `AssertConstant` against WTI and erase all markers when validation succeeds.
@@ -28,18 +25,11 @@ use crate::compiler::{
 /// none of its levels contains a witness.
 pub(crate) struct AssertConstantValidation {
     witness_inference: Rc<WitnessTaintInference>,
-    failures: Rc<RefCell<Option<Vec<SourceLocation>>>>,
 }
 
 impl AssertConstantValidation {
-    pub(crate) fn new(
-        witness_inference: Rc<WitnessTaintInference>,
-        failures: Rc<RefCell<Option<Vec<SourceLocation>>>>,
-    ) -> Self {
-        Self {
-            witness_inference,
-            failures,
-        }
+    pub(crate) fn new(witness_inference: Rc<WitnessTaintInference>) -> Self {
+        Self { witness_inference }
     }
 }
 
@@ -48,7 +38,7 @@ impl Pass for AssertConstantValidation {
         "assert_constant_validation"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         let mut failures = BTreeSet::new();
         let mut functions_with_markers = Vec::new();
 
@@ -94,36 +84,37 @@ impl Pass for AssertConstantValidation {
             }
         }
 
-        let failures: Vec<_> = failures.into_iter().collect();
-
-        if failures.is_empty() {
-            for fid in functions_with_markers {
-                let function = ssa.get_function_mut(fid);
-                for (_, block) in function.get_blocks_mut() {
-                    let instructions = block.take_instructions();
-                    block.put_instructions(
-                        instructions
-                            .into_iter()
-                            .filter(|op| !matches!(&**op, OpCode::AssertConstant { .. }))
-                            .collect(),
-                    );
-                }
-            }
+        if !failures.is_empty() {
+            return Err(PassFailure::AssertConstantFailed(
+                failures.into_iter().collect(),
+            ));
         }
 
-        *self.failures.borrow_mut() = Some(failures);
+        for fid in functions_with_markers {
+            let function = ssa.get_function_mut(fid);
+            for (_, block) in function.get_blocks_mut() {
+                let instructions = block.take_instructions();
+                block.put_instructions(
+                    instructions
+                        .into_iter()
+                        .filter(|op| !matches!(&**op, OpCode::AssertConstant { .. }))
+                        .collect(),
+                );
+            }
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use mavros_artifacts::FieldConfig;
-    use std::{cell::RefCell, rc::Rc};
+    use std::rc::Rc;
 
     use super::AssertConstantValidation;
     use crate::compiler::{
         analysis::{flow_analysis::FlowAnalysis, witness_taint_inference::WitnessTaintInference},
-        pass_manager::PassManager,
+        pass_manager::{PassFailure, PassManager},
         ssa::{
             FunctionId, SourceLocation, SourcePosition, Terminator, ValueId,
             hlssa::{CallTarget, CastTarget, Constant, HLSSA, OpCode, SequenceTargetType, Type},
@@ -146,23 +137,18 @@ mod tests {
         let flow = FlowAnalysis::run(ssa);
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(ssa, &flow);
-        let witness_inference = Rc::new(witness_inference);
-        let failures = Rc::new(RefCell::new(None));
         PassManager::new(
             "assert_constant_validation_test".to_string(),
             false,
-            vec![Box::new(AssertConstantValidation::new(
+            vec![Box::new(AssertConstantValidation::new(Rc::new(
                 witness_inference,
-                Rc::clone(&failures),
-            ))],
+            )))],
         )
-        .run(ssa);
-        let failures = failures.borrow_mut().take().unwrap();
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures)
-        }
+        .run(ssa)
+        .map_err(|failure| match failure {
+            PassFailure::AssertConstantFailed(failures) => failures,
+            failure => panic!("assert_constant validation failed with {failure:?}"),
+        })
     }
 
     fn add_asserting_helper(ssa: &mut HLSSA) -> FunctionId {
@@ -389,15 +375,14 @@ mod tests {
             .locate(SourceLocation::test()),
         );
 
-        let failures = Rc::new(RefCell::new(None));
         PassManager::new(
             "assert_constant_validation_test".to_string(),
             false,
-            vec![Box::new(AssertConstantValidation::new(
-                Rc::new(witness_inference),
-                failures,
-            ))],
+            vec![Box::new(AssertConstantValidation::new(Rc::new(
+                witness_inference,
+            )))],
         )
-        .run(&mut ssa);
+        .run(&mut ssa)
+        .unwrap();
     }
 }

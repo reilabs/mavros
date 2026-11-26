@@ -26,7 +26,7 @@
 use crate::{
     collections::{HashMap, HashSet},
     compiler::{
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::value_replacements::{ReplaceScope, ValueReplacements},
         ssa::{
             BlockId, Terminator, ValueId,
@@ -48,8 +48,9 @@ impl Pass for TrivialPhiElimination {
         vec![]
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         self.do_run(ssa);
+        Ok(())
     }
 }
 

@@ -25,7 +25,7 @@ use crate::{
             shared::call_string::Context,
             types::{FunctionTypeInfo, TypeInfo},
         },
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::value_replacements::ValueReplacements,
         ssa::{
             BlockId, FunctionId, Terminator, ValueId,
@@ -51,13 +51,14 @@ impl Pass for Mem2Reg {
         vec![FlowAnalysis::id(), TypeInfo::id(), PointsTo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(
             ssa,
             store.get::<FlowAnalysis>(),
             store.get::<TypeInfo>(),
             store.get::<PointsTo>(),
         );
+        Ok(())
     }
 }
 
