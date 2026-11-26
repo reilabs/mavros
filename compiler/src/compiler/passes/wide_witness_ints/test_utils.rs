@@ -38,6 +38,13 @@ pub(super) fn limbed_widths(field: FieldConfig) -> [usize; 2] {
     }
 }
 
+/// The limb widths the end-to-end tests cut at: the field's default, and a narrowed one at half of
+/// it.
+pub(super) fn default_and_narrowed_width(field: FieldConfig) -> [usize; 2] {
+    let default = witness_limb_bits(field);
+    [default, default / 2]
+}
+
 /// Every emitted opcode of one function, in order.
 pub(super) fn emitted(ssa: &HLSSA) -> Vec<OpCode> {
     let main = ssa.get_unique_entrypoint_id();
@@ -106,10 +113,12 @@ pub(super) fn guard_every_instruction(ssa: &mut HLSSA) -> ValueId {
     condition
 }
 
-/// Whether the circuit for `lhs kind rhs` at `bits` accepts, with `forge` applied to the
-/// witness-spilled program: witness generation finishes and every constraint holds.
+/// Whether the circuit for `lhs kind rhs` at `bits`, cut at limbs of at most `limb_bits`, accepts,
+/// with `forge` applied to the witness-spilled program: witness generation finishes and every
+/// constraint holds.
 pub(super) fn operation_accepts<F: MavrosField>(
     field: FieldConfig,
+    limb_bits: usize,
     kind: BinaryArithOpKind,
     num_bits: usize,
     (lhs, rhs): (&BigUint, &BigUint),
@@ -173,7 +182,12 @@ pub(super) fn operation_accepts<F: MavrosField>(
     let input = |value: u128| InputValueOrdered::Field(F::from_element(field.constant(value)));
     let mut inputs = vec![input(0), input(0)];
     inputs.extend(guard.map(|on| input(on as u128)));
-    forgery::accepts_the_forgery::<F>(ssa, &inputs, forge)
+    forgery::accepts_the_forgery_with::<F>(
+        ssa,
+        &inputs,
+        |driver| driver.set_max_limb_bits(limb_bits),
+        forge,
+    )
 }
 
 /// `v` in `num_bits`-wide two's complement representation.

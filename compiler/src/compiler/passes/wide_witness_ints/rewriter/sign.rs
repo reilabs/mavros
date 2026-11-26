@@ -494,14 +494,16 @@ impl Rewriter<'_> {
 #[cfg(test)]
 mod tests {
     use crate::compiler::passes::wide_witness_ints::test_utils::{
-        bn254, forge_hint, is_wrapped_product, limbed_widths, operation_accepts, twos_complement,
+        bn254, default_and_narrowed_width, forge_hint, is_wrapped_product, limbed_widths,
+        operation_accepts, twos_complement,
     };
     use crate::compiler::ssa::hlssa::{BinaryArithOpKind, HLSSA};
     use mavros_artifacts::{FieldConfig, MavrosField};
     use num_bigint::{BigInt, BigUint};
     use num_traits::{One, Zero};
 
-    /// A signed product accepts exactly the products that fit its width.
+    /// A signed product accepts exactly the products that fit its width, at the field's limb and a
+    /// narrowed one.
     #[test]
     fn a_signed_product_accepts_only_within_bounds_where_its_guard_holds() {
         check_signed_product_bounds::<mavros_artifacts::Field>(bn254());
@@ -510,20 +512,32 @@ mod tests {
 
     fn check_signed_product_bounds<F: MavrosField>(field: FieldConfig) {
         let id = field.id();
-        for bits in limbed_widths(field) {
-            for (a, b, fits) in signed_product_cases(bits) {
-                for (guard, expected) in [(None, fits), (Some(true), fits), (Some(false), true)] {
-                    assert_eq!(
-                        signed_product_accepts::<F>(field, bits, &a, &b, guard, |_| {}),
-                        expected,
-                        "{id:?} int{bits}: {a} · {b}, guard {guard:?}"
-                    );
+        for limb_bits in default_and_narrowed_width(field) {
+            for bits in limbed_widths(field) {
+                for (a, b, fits) in signed_product_cases(bits) {
+                    for (guard, expected) in [(None, fits), (Some(true), fits), (Some(false), true)]
+                    {
+                        assert_eq!(
+                            signed_product_accepts::<F>(
+                                field,
+                                limb_bits,
+                                bits,
+                                &a,
+                                &b,
+                                guard,
+                                |_| {}
+                            ),
+                            expected,
+                            "{id:?} int{bits} at a {limb_bits}-bit limb: {a} · {b}, guard {guard:?}"
+                        );
+                    }
                 }
             }
         }
     }
 
-    /// A signed product's answer is pinned by its evaluations, with honest carries.
+    /// A signed product's answer is pinned by its evaluations, with honest carries, at the field's
+    /// limb and a narrowed one.
     #[test]
     fn a_signed_product_refuses_a_forged_answer() {
         check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Field>(bn254());
@@ -534,30 +548,35 @@ mod tests {
 
     fn check_a_signed_product_refuses_a_forged_answer<F: MavrosField>(field: FieldConfig) {
         let id = field.id();
-        for bits in limbed_widths(field) {
-            let (a, b) = (BigInt::from(-3), BigInt::from(5));
-            let honest_product = twos_complement(bits, &(&a * &b));
-            let accepts = |answer: &BigUint| {
-                signed_product_accepts::<F>(field, bits, &a, &b, None, |ssa| {
-                    forge_hint(ssa, bits, answer, is_wrapped_product(bits))
-                })
-            };
-            assert!(
-                accepts(&honest_product),
-                "{id:?} int{bits}: the honest answer is refused"
-            );
-            let mask = (BigUint::one() << bits) - 1u8;
-            assert!(
-                !accepts(&((&honest_product + 1u8) & &mask)),
-                "{id:?} int{bits}: c + 1 is accepted"
-            );
+        for limb_bits in default_and_narrowed_width(field) {
+            for bits in limbed_widths(field) {
+                let (a, b) = (BigInt::from(-3), BigInt::from(5));
+                let honest_product = twos_complement(bits, &(&a * &b));
+                let accepts = |answer: &BigUint| {
+                    signed_product_accepts::<F>(field, limb_bits, bits, &a, &b, None, |ssa| {
+                        forge_hint(ssa, bits, answer, is_wrapped_product(bits))
+                    })
+                };
+                let what = format!("{id:?} int{bits} at a {limb_bits}-bit limb");
+                assert!(
+                    accepts(&honest_product),
+                    "{what}: the honest answer is refused"
+                );
+                let mask = (BigUint::one() << bits) - 1u8;
+                assert!(
+                    !accepts(&((&honest_product + 1u8) & &mask)),
+                    "{what}: c + 1 is accepted"
+                );
+            }
         }
     }
 
-    /// Whether the circuit for a signed `a · b` accepts, under a guard that is on or off where
-    /// `guard` is given, with `forge` applied to the witness-spilled program.
+    /// Whether the circuit for a signed `a · b`, cut at limbs of at most `limb_bits`, accepts,
+    /// under a guard that is on or off where `guard` is given, with `forge` applied to the
+    /// witness-spilled program.
     fn signed_product_accepts<F: MavrosField>(
         field: FieldConfig,
+        limb_bits: usize,
         bits: usize,
         a: &BigInt,
         b: &BigInt,
@@ -566,6 +585,7 @@ mod tests {
     ) -> bool {
         operation_accepts::<F>(
             field,
+            limb_bits,
             BinaryArithOpKind::SMul,
             bits,
             (&twos_complement(bits, a), &twos_complement(bits, b)),

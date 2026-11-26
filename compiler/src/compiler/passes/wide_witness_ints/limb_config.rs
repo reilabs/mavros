@@ -130,19 +130,6 @@ fn limb_candidates(modulus: &BigInt, max_limb_bits: usize) -> impl Iterator<Item
     .filter(move |bits| *bits <= max_limb_bits)
 }
 
-/// `max_limb_bits`, if it is one of the limb widths of `field`.
-pub fn checked_max_limb_bits(field: FieldConfig, max_limb_bits: usize) -> Result<usize, String> {
-    let allowed: Vec<usize> = limb_candidates(&field_modulus(field), usize::MAX).collect();
-    if allowed.contains(&max_limb_bits) {
-        Ok(max_limb_bits)
-    } else {
-        Err(format!(
-            "the maximum witness limb width {max_limb_bits} is not a limb this field can be cut \
-             at; the allowed widths are {allowed:?}"
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

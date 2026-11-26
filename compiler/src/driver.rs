@@ -73,7 +73,7 @@ use crate::{
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
-            wide_witness_ints::{WideWitnessInts, checked_max_limb_bits},
+            wide_witness_ints::WideWitnessInts,
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
@@ -160,10 +160,6 @@ pub enum Error {
     /// [`MAX_LOGUP_REPETITIONS`](crate::compiler::codegen::hlssa_to_r1cs::MAX_LOGUP_REPETITIONS).
     LogupSoundnessUnsupported(String),
 
-    /// The maximum limb width set with [`Driver::set_max_limb_bits`] is not one of the widths the
-    /// program's field can cut a wide integer at.
-    MaxLimbBitsUnsupported(String),
-
     /// One or more Noir `assert_constant` operands are dynamic in a reachable calling context.
     ///
     /// Carries every failing assertion so a single compile reports them all.
@@ -199,7 +195,6 @@ impl std::fmt::Display for Error {
                 write!(f, "{}", diagnostic::render_all(diagnostics))
             }
             Error::LogupSoundnessUnsupported(message) => write!(f, "{message}"),
-            Error::MaxLimbBitsUnsupported(message) => write!(f, "{message}"),
             Error::R1csFieldMismatch { requested, program } => write!(
                 f,
                 "an R1CS over {requested} was requested or handed in for a program over {program}"
@@ -701,13 +696,9 @@ impl Driver {
     #[tracing::instrument(skip_all)]
     pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
-        let field = ssa.field();
-        let max_limb_bits = match self.max_limb_bits {
-            Some(bits) => {
-                checked_max_limb_bits(field, bits).map_err(Error::MaxLimbBitsUnsupported)?
-            }
-            None => witness_limb_bits(field),
-        };
+        let max_limb_bits = self
+            .max_limb_bits
+            .unwrap_or_else(|| witness_limb_bits(ssa.field()));
 
         // Two phases, so that a witnessed decomposition the field cannot carry is reported as an
         // error between them rather than refused by its lowering at the start of the second.

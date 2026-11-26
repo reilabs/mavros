@@ -12,10 +12,10 @@ use crate::{
                     product::UnsignedProduct,
                 },
                 test_utils::{
-                    IdentityWitnesses, bn254, carries_over_the_field, coefficients, emitted,
-                    fields, forge_hint, forge_writes, guard_every_instruction, identity_witnesses,
-                    is_wrapped_product, limbed_widths, limbs, operation_accepts, operation_with_in,
-                    run_pass, twos_complement,
+                    IdentityWitnesses, bn254, carries_over_the_field, coefficients,
+                    default_and_narrowed_width, emitted, fields, forge_hint, forge_writes,
+                    guard_every_instruction, identity_witnesses, is_wrapped_product, limbed_widths,
+                    limbs, operation_accepts, operation_with_in, run_pass, twos_complement,
                 },
             },
         },
@@ -415,18 +415,23 @@ pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Opti
     planned_written_checks(&identity, widths, true)
 }
 
-/// Every identity's answer is pinned as an integer, not only in the field.
+/// Every identity's answer is pinned as an integer, not only in the field, at the field's limb and
+/// a narrowed one.
 #[test]
 fn every_identity_refuses_an_answer_off_by_the_modulus() {
-    check_off_by_the_modulus::<mavros_artifacts::Field>(bn254(), 320);
-    check_off_by_the_modulus::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks(), 100);
+    for limb_bits in default_and_narrowed_width(bn254()) {
+        check_off_by_the_modulus::<mavros_artifacts::Field>(bn254(), limb_bits, 320);
+    }
+    let goldilocks = FieldConfig::goldilocks();
+    for limb_bits in default_and_narrowed_width(goldilocks) {
+        check_off_by_the_modulus::<mavros_artifacts::Goldilocks>(goldilocks, limb_bits, 100);
+    }
 }
 
-fn check_off_by_the_modulus<F: MavrosField>(field: FieldConfig, bits: usize) {
+fn check_off_by_the_modulus<F: MavrosField>(field: FieldConfig, limb_bits: usize, bits: usize) {
     use BinaryArithOpKind::{SMul, UDiv, UMul};
     let id = field.id();
     let modulus = biguint_of_limbs(field.modulus_limbs());
-    let limb_bits = witness_limb_bits(field);
     let widths = limb_widths(bits, limb_bits);
     let num_limbs = widths.len();
 
@@ -482,7 +487,7 @@ fn check_off_by_the_modulus<F: MavrosField>(field: FieldConfig, bits: usize) {
         ),
     ];
     for (kind, [lhs, rhs], committed, forge_answer) in cases {
-        let what = format!("{id:?} int{bits} {kind:?}");
+        let what = format!("{id:?} int{bits} {kind:?} at a {limb_bits}-bit limb");
         let f = match kind {
             // `F = lhs·rhs − (15 + p)`.
             SMul | UMul => {
@@ -507,7 +512,7 @@ fn check_off_by_the_modulus<F: MavrosField>(field: FieldConfig, bits: usize) {
         let carries = carries_over_the_field(&f, limb_bits, &modulus, committed);
         let operands = (&twos_complement(bits, &lhs), &twos_complement(bits, &rhs));
         let accepts = |forge: bool| {
-            operation_accepts::<F>(field, kind, bits, operands, None, |ssa| {
+            operation_accepts::<F>(field, limb_bits, kind, bits, operands, None, |ssa| {
                 let writes = identity_witnesses(ssa, limb_bits);
                 assert_eq!(
                     writes.carries.len(),
