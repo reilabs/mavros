@@ -1645,11 +1645,72 @@ fn a_constant_divisor_narrows_the_quotient_and_the_remainder() {
     let k = limb_widths(bits, h).len();
     assert_eq!(
         audit.constraints(),
-        2 * k - 1,
-        "the identity's evaluations, and nothing for `r < d`"
+        k,
+        "the identity's evaluations at its lowered degree, and nothing for `r < d`"
     );
 }
 
+/// A widened operand's limbs above its source are known zeros, which lower the degree of the product's identity.
+#[test]
+fn a_widened_operand_lowers_the_degree_of_a_product() {
+    for field in fields() {
+        let id = field.id();
+        let h = witness_limb_bits(field);
+        for bits in limbed_widths(field) {
+            let k = limb_widths(bits, h).len();
+            let constraints = |multiply: bool| {
+                let mut ssa = program_multiplying_widened(field, h, bits, multiply);
+                run_pass(&mut ssa);
+                Audit::of(&ssa).constraints()
+            };
+            assert_eq!(
+                constraints(true) - constraints(false),
+                k,
+                "{id:?} int{bits}: the product of a one-limb operand evaluates at `k` points"
+            );
+        }
+    }
+}
+
+/// `main(a: WitnessOf<int(from)>, b: WitnessOf<int(bits)>) -> WitnessOf<int(bits)>`, returning
+/// `(a as int(bits)) * b` where `multiply`, and `a as int(bits)` otherwise.
+fn program_multiplying_widened(
+    field: FieldConfig,
+    from: usize,
+    bits: usize,
+    multiply: bool,
+) -> HLSSA {
+    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let main = ssa.get_unique_entrypoint_id();
+    let [a, b, wide_a, product] = std::array::from_fn(|_| ssa.fresh_value());
+    let mut builder = HLSSABuilder::new(&mut ssa);
+    builder.modify_function(main, |fb| {
+        let entry = fb.function.get_entry_id();
+        let block = fb.function.get_block_mut(entry);
+        block.push_parameter(a, Type::witness_of(Type::int(from)));
+        block.push_parameter(b, Type::witness_of(Type::int(bits)));
+        fb.function
+            .add_return_type(Type::witness_of(Type::int(bits)));
+        let mut block = fb.test_block(entry);
+        block.emit(OpCode::Cast {
+            result: wide_a,
+            value: a,
+            target: CastTarget::Int(bits),
+        });
+        if multiply {
+            block.emit(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::UMul,
+                result: product,
+                lhs: wide_a,
+                rhs: b,
+            });
+            block.terminate_return(vec![product]);
+        } else {
+            block.terminate_return(vec![wide_a]);
+        }
+    });
+    ssa
+}
 /// A guarded division guards only what reads its operands, and its answer is zero where the
 /// guard is off without being selected.
 ///

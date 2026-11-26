@@ -53,12 +53,38 @@ pub(super) trait IdentityTemplate<'a>: IdentityShape + Copy {
         if !self.has_negative_terms() && terms.iter().any(|t| t.polarity == Polarity::Negative) {
             ice!("{self:?} subtracts a term, but its carries are planned as non-negative");
         }
+        let degree = degree_of(&terms, target, layout.num_committed_carries);
         Some(PolynomialIdentity {
             terms,
             target,
             layout,
+            degree,
         })
     }
+}
+
+/// The degree of the identity polynomial: the largest of its summands.
+///
+/// A factor's known-zero limbs are zero coefficients, so they lower its degree, and with it the
+/// number of points `F` is evaluated at.
+fn degree_of(
+    terms: &[Term<'_>],
+    target: Option<Target<'_>>,
+    num_committed_carries: usize,
+) -> usize {
+    let target = match target {
+        Some(Target::Witnessed(widths)) => widths.len().checked_sub(1),
+        Some(Target::Given(given)) => given.degree(),
+        None => None,
+    };
+    let carries = (num_committed_carries > 0).then_some(num_committed_carries);
+    terms
+        .iter()
+        .filter_map(Term::degree)
+        .chain(target)
+        .chain(carries)
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -75,6 +101,9 @@ pub(super) struct PolynomialIdentity<'a> {
 
     /// How the carry chain is represented in R1CS.
     layout: ChainLayout,
+
+    /// The degree of `F` over these terms, at most the layout's.
+    degree: usize,
 }
 
 impl PolynomialIdentity<'_> {
@@ -90,7 +119,7 @@ impl PolynomialIdentity<'_> {
 
     /// The degree of the `F` polynomial.
     pub(super) fn degree(&self) -> usize {
-        self.layout.degree
+        self.degree
     }
 
     /// The blocks `0..t` in order.
@@ -98,8 +127,9 @@ impl PolynomialIdentity<'_> {
         &self.layout.blocks
     }
 
-    /// The number of carries that are actually witnessed. `k - 1` for a checked identity,
-    /// or [`PolynomialIdentity::degree`] otherwise.
+    /// The number of carries that are actually witnessed. `k - 1` for a checked identity, or the
+    /// degree its shape is laid out for otherwise. That is the full width's, as the blocks are
+    /// planned from the shape alone, so [`PolynomialIdentity::degree`] lowers only a checked one.
     pub(super) fn num_committed_carries(&self) -> usize {
         self.layout.num_committed_carries
     }
@@ -134,6 +164,16 @@ impl Term<'_> {
     /// Whether the term is a product of two witnessed factors.
     pub(super) fn is_witness_product(&self) -> bool {
         self.lhs.is_witnessed && self.rhs.is_some_and(|rhs| rhs.is_witnessed)
+    }
+
+    /// The degree of the term's polynomial, the sum of its factors' degrees; or [`None`] where a
+    /// factor is zero, and so is the term.
+    fn degree(&self) -> Option<usize> {
+        let lhs = self.lhs.degree()?;
+        match self.rhs {
+            Some(rhs) => Some(lhs + rhs.degree()?),
+            None => Some(lhs),
+        }
     }
 }
 
@@ -222,6 +262,13 @@ impl Factor {
         self.bounds[limb].is_zero() && self.top_offset(limb).is_none()
     }
 
+    /// The degree of the factor's polynomial
+    pub(super) fn degree(&self) -> Option<usize> {
+        (0..self.limbs.len())
+            .rev()
+            .find(|limb| !self.vanishes(*limb))
+    }
+
     /// The largest value the whole operand can take, from its limbs' bounds at `limb_bits` apart.
     pub(super) fn largest(&self, limb_bits: usize) -> BigUint {
         self.bounds
@@ -265,9 +312,6 @@ fn full_bounds(widths: &[usize]) -> Vec<BigUint> {
 /// How an identity is cut into blocks.
 #[derive(Clone)]
 struct ChainLayout {
-    /// The degree of the identity polynomial.
-    degree: usize,
-
     /// The carries the chain commits.
     num_committed_carries: usize,
 
@@ -333,7 +377,6 @@ fn chain_layout<S: IdentityShape + ?Sized>(
         })
         .collect();
     Some(ChainLayout {
-        degree,
         num_committed_carries,
         blocks,
         carry_offset_bits: params.carry_offset_bits,
@@ -431,21 +474,26 @@ fn degree(num_quadratic_terms: usize, k: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChainLayout, IdentityShape, chain_layout};
-    use crate::compiler::passes::{
-        shared::limbs::{widest_injective_int_bits, witness_limb_bits},
-        wide_witness_ints::{
-            rewriter::{
-                division::EuclideanDivision, product::UnsignedProduct, sign::SignedProduct,
+    use super::{Factor, IdentityShape, IdentityTemplate, Limb, PolynomialIdentity};
+    use crate::compiler::{
+        passes::{
+            shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+            wide_witness_ints::{
+                rewriter::{
+                    division::EuclideanDivision, product::UnsignedProduct, sign::SignedProduct,
+                },
+                test_utils::bn254,
+                types::limb_widths,
             },
-            test_utils::bn254,
-            types::limb_widths,
         },
+        ssa::ValueId,
     };
     use mavros_artifacts::FieldConfig;
+    use mavros_int_semantics::IntBits;
 
     /// Every block of every identity, at every width, groups no more columns
-    /// than one element can sum together with the carry.
+    /// than one element can sum together with the carry, and certifies no more than `F` has,
+    /// also where a one-limb factor lowers its degree.
     #[test]
     fn every_block_of_an_identity_fits_an_element_with_its_carry() {
         for field in [bn254(), FieldConfig::goldilocks()] {
@@ -454,33 +502,71 @@ mod tests {
             let h = witness_limb_bits(field);
             for bits in [h + 1, 2 * h, 3 * h - 1, 320, 1000, 16384] {
                 let widths = limb_widths(bits, h);
-                let shapes: [&dyn IdentityShape; 3] =
-                    [&UnsignedProduct, &SignedProduct, &EuclideanDivision];
-                for shape in shapes {
-                    check_blocks(
-                        chain_layout(shape, &widths, injective),
-                        shape.is_checked(),
-                        injective,
-                        &widths,
-                        &format!("{id:?} int{bits} {shape:?}"),
-                    );
+                let full = Factor::full(&widths);
+                for (first, factors) in [(&full, "full"), (&one_limb(&widths), "one-limb")] {
+                    let identities = [
+                        (
+                            UnsignedProduct.instantiate(
+                                &widths,
+                                injective,
+                                (first, &full, &widths),
+                            ),
+                            UnsignedProduct.is_checked(),
+                            "UnsignedProduct",
+                        ),
+                        (
+                            SignedProduct.instantiate(&widths, injective, (first, &full, &full)),
+                            SignedProduct.is_checked(),
+                            "SignedProduct",
+                        ),
+                        (
+                            EuclideanDivision.instantiate(
+                                &widths,
+                                injective,
+                                (first, &full, &full, &full),
+                            ),
+                            EuclideanDivision.is_checked(),
+                            "EuclideanDivision",
+                        ),
+                    ];
+                    for (identity, is_checked, shape) in identities {
+                        check_blocks(
+                            identity,
+                            is_checked,
+                            injective,
+                            &widths,
+                            &format!("{id:?} int{bits} {shape} over a {factors} first factor"),
+                        );
+                    }
                 }
             }
         }
     }
 
+    /// A witnessed factor at `widths` whose limbs above the lowest are known zeros.
+    fn one_limb(widths: &[usize]) -> Factor {
+        let limbs = std::iter::once(Limb::Value(ValueId(0)))
+            .chain(
+                widths[1..]
+                    .iter()
+                    .map(|width| Limb::Constant(IntBits::zero(*width))),
+            )
+            .collect();
+        Factor::new(limbs, widths, true, None)
+    }
+
     /// Check the block invariants.
     fn check_blocks(
-        layout: Option<ChainLayout>,
+        identity: Option<PolynomialIdentity>,
         is_checked: bool,
         injective: usize,
         widths: &[usize],
         what: &str,
     ) {
-        let layout = layout.unwrap_or_else(|| panic!("{what}: the field holds the identity"));
+        let identity = identity.unwrap_or_else(|| panic!("{what}: the field holds the identity"));
         let limb_bits = widths[0];
         let mut next = 0;
-        for block in &layout.blocks {
+        for block in identity.blocks() {
             assert_eq!(
                 block.first, next,
                 "{what}: blocks are contiguous from column 0"
@@ -489,7 +575,7 @@ mod tests {
             next = block.last + 1;
             assert_eq!(
                 block.carry_bits.is_some(),
-                block.last < layout.num_committed_carries,
+                block.last < identity.num_committed_carries(),
                 "{what}: block {block:?} checks its carry exactly where one is committed"
             );
             if let Some(carry_bits) = block.carry_bits {
@@ -509,7 +595,7 @@ mod tests {
             );
         }
         assert!(
-            next <= layout.degree + 1,
+            next <= identity.degree() + 1,
             "{what}: no more columns certified than F has"
         );
     }
