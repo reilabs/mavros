@@ -15,7 +15,7 @@ use crate::{
                     IdentityWitnesses, bn254, carries_over_the_field, coefficients,
                     default_and_narrowed_width, emitted, fields, forge_hint, forge_writes,
                     guard_every_instruction, identity_witnesses, is_wrapped_product, limbed_widths,
-                    limbs, operation_accepts, operation_with_in, run_pass, twos_complement,
+                    limbs, operation_accepts, operation_with, run_pass, twos_complement,
                 },
             },
         },
@@ -47,16 +47,11 @@ fn bn254_holds_a_product_at_every_width() {
 /// `main(lhs: WitnessOf<int(bits)>, rhs: rhs_type) -> WitnessOf<int(bits)> { lhs * rhs }` over
 /// `field`.
 fn product_with(field: FieldConfig, bits: usize, rhs_type: Type) -> HLSSA {
-    operation_with_in(field, BinaryArithOpKind::UMul, bits, rhs_type)
+    operation_with(field, BinaryArithOpKind::UMul, bits, rhs_type)
 }
 
-/// `main(lhs, rhs: WitnessOf<int(bits)>) -> WitnessOf<int(bits)> { lhs * rhs }`.
-fn product(bits: usize) -> HLSSA {
-    product_in(bn254(), bits)
-}
-
-/// [`product`] over `field`.
-fn product_in(field: FieldConfig, bits: usize) -> HLSSA {
+/// `main(lhs, rhs: WitnessOf<int(bits)>) -> WitnessOf<int(bits)> { lhs * rhs }` over `field`.
+fn product(field: FieldConfig, bits: usize) -> HLSSA {
     product_with(field, bits, Type::witness_of(Type::int(bits)))
 }
 
@@ -190,7 +185,7 @@ fn an_evaluated_product_is_pinned_at_distinct_points() {
         let id = field.id();
         let bits = limbed_widths(field)[1];
         let k = limb_widths(bits, witness_limb_bits(field)).len();
-        let mut ssa = product_in(field, bits);
+        let mut ssa = product(field, bits);
         run_pass(&mut ssa);
         let ops = emitted(&ssa);
 
@@ -290,7 +285,7 @@ fn a_guarded_product_is_checked_only_under_its_guard() {
     for field in fields() {
         let id = field.id();
         let bits = limbed_widths(field)[1];
-        let mut ssa = product_in(field, bits);
+        let mut ssa = product(field, bits);
         let condition = guard_every_instruction(&mut ssa);
         run_pass(&mut ssa);
         let ops = emitted(&ssa);
@@ -370,7 +365,7 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
     let widest = widest_injective_int_bits(field) / 2;
     assert!(!single_cell_product_fits(field, widest + 1));
 
-    let mut ssa = product(widest + 1);
+    let mut ssa = product(bn254(), widest + 1);
     let main = ssa.get_unique_entrypoint_id();
     let operands: Vec<ValueId> = ssa
         .get_function(main)
@@ -395,7 +390,7 @@ fn a_product_the_single_cell_cannot_hold_takes_the_schoolbook() {
     assert_eq!(tied, 2 + 3, "two decompositions and three evaluations");
 
     for bits in [widest, 2 * HOST_LIMB_BITS] {
-        let mut ssa = product(bits);
+        let mut ssa = product(bn254(), bits);
         let before = format!("{:?}", emitted(&ssa));
         run_pass(&mut ssa);
         assert_eq!(format!("{:?}", emitted(&ssa)), before, "int{bits}");
@@ -420,7 +415,7 @@ pub(crate) fn division_carries(field: FieldConfig, widths: &[usize]) -> Vec<Opti
 #[test]
 fn every_identity_refuses_an_answer_off_by_the_modulus() {
     for limb_bits in default_and_narrowed_width(bn254()) {
-        check_off_by_the_modulus::<mavros_artifacts::Field>(bn254(), limb_bits, 320);
+        check_off_by_the_modulus::<mavros_artifacts::Bn254>(bn254(), limb_bits, 320);
     }
     let goldilocks = FieldConfig::goldilocks();
     for limb_bits in default_and_narrowed_width(goldilocks) {

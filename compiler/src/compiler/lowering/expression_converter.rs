@@ -108,6 +108,14 @@ struct Scrutinee {
     tag: Option<ValueId>,
 }
 
+/// The parts of a function's `Function` type.
+pub(super) struct FunctionSignature<'a> {
+    pub params: &'a [AstType],
+    pub ret: &'a AstType,
+    /// `Unit` for a function or a closure without captures.
+    pub env: &'a AstType,
+}
+
 impl<'a> ExpressionConverter<'a> {
     pub fn new_with_globals(
         function_mapper: &'a HashMap<AstFuncId, FunctionId>,
@@ -164,24 +172,30 @@ impl<'a> ExpressionConverter<'a> {
         emit(&mut e)
     }
 
-    /// The SSA type of an ident that names a function.
-    fn function_ident_type(&self, ident: &noirc_frontend::monomorphization::ast::Ident) -> Type {
-        use noirc_frontend::monomorphization::ast::Type as AstType;
-
-        // Noir types such an ident as the constrained/unconstrained pair while `convert_ident`
-        // emits one `FnPtr`.
+    /// The `Function` type of an ident that names a function.
+    ///
+    /// Noir types a function value as the constrained/unconstrained pair of its variants, while
+    /// `convert_ident` emits one `FnPtr`.
+    pub(super) fn function_signature(
+        ident: &noirc_frontend::monomorphization::ast::Ident,
+    ) -> FunctionSignature<'_> {
         let declared: &AstType = &ident.typ;
         let signature = match declared {
             AstType::Tuple(pair) => pair.first().unwrap_or(declared),
             other => other,
         };
-
-        let AstType::Function(_, ret, _, _) = signature else {
+        let AstType::Function(params, ret, env, _) = signature else {
             ice!(
                 "the ident `{}` names a function but is typed {declared:?}",
                 ident.name
             )
         };
+        FunctionSignature { params, ret, env }
+    }
+
+    /// The SSA type of an ident that names a function.
+    fn function_ident_type(&self, ident: &noirc_frontend::monomorphization::ast::Ident) -> Type {
+        let ret = Self::function_signature(ident).ret;
         Type::function_returning(vec![self.type_converter.convert_type(ret)])
     }
 
@@ -2307,7 +2321,7 @@ mod tests {
     use super::*;
     use crate::compiler::analysis::value_range_analysis::field_modulus;
 
-    fn field_literal(value: noir_bigint::BigInt) -> Result<Constant, String> {
+    fn bn254_literal(value: noir_bigint::BigInt) -> Result<Constant, String> {
         ExpressionConverter::integer_constant(&value, &AstType::Field, FieldConfig::bn254())
     }
 
@@ -2320,11 +2334,11 @@ mod tests {
         );
 
         assert!(
-            field_literal(&modulus - 1).is_ok(),
+            bn254_literal(&modulus - 1).is_ok(),
             "the top element is a field element"
         );
         assert!(
-            field_literal(-(&modulus - 1u8)).is_ok(),
+            bn254_literal(-(&modulus - 1u8)).is_ok(),
             "its negation is one too"
         );
         for value in [
@@ -2334,7 +2348,7 @@ mod tests {
             noir_bigint::BigInt::from(1u8) << 254u32,
             noir_bigint::BigInt::from(1u8) << 300u32,
         ] {
-            let message = field_literal(value.clone()).expect_err("at or above the modulus");
+            let message = bn254_literal(value.clone()).expect_err("at or above the modulus");
             assert!(
                 message.contains("does not fit the field"),
                 "{value}: {message}"
@@ -2358,7 +2372,7 @@ mod tests {
                 field.two_pow(200) + field.constant(7u64),
             ),
         ] {
-            assert_eq!(field_literal(value).unwrap(), Constant::Field(expected));
+            assert_eq!(bn254_literal(value).unwrap(), Constant::Field(expected));
         }
     }
 

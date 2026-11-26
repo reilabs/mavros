@@ -1,0 +1,6 @@
+[package]
+name = "wide_entry_params"
+type = "bin"
+authors = [""]
+
+[dependencies]

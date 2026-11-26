@@ -1,12 +1,20 @@
 fn main(
-    x: Field,
-    expected_sum: pub Field,
-    expected_second: pub Field,
-    expected_deep_inner: pub Field,
-    expected_deep_total: pub Field,
-    expected_mixed_tail: pub Field,
-    expected_mixed_total: pub Field,
+    x: u8,
+    expected_sum: pub u8,
+    expected_second: pub u8,
+    expected_deep_inner: pub u8,
+    expected_deep_total: pub u8,
+    expected_mixed_tail: pub u8,
+    expected_mixed_total: pub u8,
 ) {
+    let x = x as Field;
+    let expected_sum = expected_sum as Field;
+    let expected_second = expected_second as Field;
+    let expected_deep_inner = expected_deep_inner as Field;
+    let expected_deep_total = expected_deep_total as Field;
+    let expected_mixed_tail = expected_mixed_tail as Field;
+    let expected_mixed_total = expected_mixed_total as Field;
+
     let mut pair = (x, 0);
 
     let first_ref = &mut pair.0;

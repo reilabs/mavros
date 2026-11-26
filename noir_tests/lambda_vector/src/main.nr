@@ -23,7 +23,9 @@ fn check(index: u32, x: Field) {
     units[index - 1](());
 }
 
-fn main(index: u32, x: Field) {
+fn main(index: u32, x: u8) {
+    let x = x as Field;
+
     check(index, x);
     // Safety: the same checks are enforced by the constrained call above.
     unsafe { check(index, x) };

@@ -374,6 +374,7 @@ mod tests {
         FunctionId, Instruction, Located, SourceLocation, SourcePosition, ValueId,
         hlssa::{CallTarget, Constant, HLSSA, OpCode, Type, builder::HLSSABuilder},
     };
+    use mavros_artifacts::FieldConfig;
 
     /// All static call targets in `fid`'s body, in block-id-sorted stream order.
     fn call_targets(ssa: &HLSSA, fid: FunctionId) -> Vec<FunctionId> {
@@ -460,7 +461,7 @@ mod tests {
 
     #[test]
     fn identical_leaves_merge_to_min_id_survivor() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = add_leaf(&mut sb, "f");
         let g = add_leaf(&mut sb, "g");
@@ -477,7 +478,7 @@ mod tests {
     fn wrappers_of_different_leaves_split_by_refinement() {
         // `c1` and `c2` are byte-identical up to the abstracted call target, so round-0 grouping
         // puts them together; only the callee-group refinement can (and must) tell them apart.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = add_leaf(&mut sb, "f");
         // A leaf with a different body: returns its argument unchanged.
@@ -506,7 +507,7 @@ mod tests {
 
     #[test]
     fn caller_chain_merges_via_refinement() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f1 = add_leaf(&mut sb, "f1");
         let f2 = add_leaf(&mut sb, "f2");
@@ -524,7 +525,7 @@ mod tests {
 
     #[test]
     fn differing_constant_prevents_merge() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let mut leaf_with_const = |name: &str, value: u128| {
             let fid = sb.ssa().add_function(name.to_string());
@@ -552,7 +553,7 @@ mod tests {
 
     #[test]
     fn differing_source_location_prevents_merge() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let mut leaf_at_line = |name: &str, line: u64| {
             let fid = sb.ssa().add_function(name.to_string());
@@ -591,7 +592,7 @@ mod tests {
 
     #[test]
     fn entry_point_is_never_a_redirect_target() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = add_leaf(&mut sb, "f");
         let g = add_leaf(&mut sb, "g");
@@ -610,7 +611,7 @@ mod tests {
 
     #[test]
     fn two_identical_entry_points_both_survive() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = add_leaf(&mut sb, "f");
         let g = add_leaf(&mut sb, "g");
@@ -629,7 +630,7 @@ mod tests {
         // Three byte-identical leaves in one group: two non-entry (`a`, `b`) and one entry (`e`).
         // `b` folds onto the smaller-id non-entry `a` — never onto the entry `e`, which survives on
         // its own. `main` calls both non-entries, so both call sites end up at `a`.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let a = add_leaf(&mut sb, "a");
         let b = add_leaf(&mut sb, "b");
@@ -646,7 +647,7 @@ mod tests {
 
     #[test]
     fn identical_self_recursive_pair_merges() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = sb.ssa().add_function("f".to_string());
         let g = sb.ssa().add_function("g".to_string());
@@ -681,7 +682,7 @@ mod tests {
         // Two mutually recursive pairs with identical wrapper bodies. The surviving co-grouping is
         // a bisimulation, so all four collapse onto one self-recursive survivor: every body has the
         // same shape and every callee stays within the group.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let a1 = sb.ssa().add_function("a1".to_string());
         let a2 = sb.ssa().add_function("a2".to_string());
@@ -705,7 +706,7 @@ mod tests {
         // `a1 ↔ a2` mutually recurse, but `a2`'s body differs (extra `Not`); `b1 → b2 → b2` share
         // `a1`'s wrapper shape. Round 0 groups {a1, b1, b2}; refinement must split `a1` away (its
         // callee sits in the odd group) while still folding `b2` into `b1`.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let a1 = sb.ssa().add_function("a1".to_string());
         let a2 = sb.ssa().add_function("a2".to_string());
@@ -751,7 +752,7 @@ mod tests {
     fn differing_jmp_args_prevent_merge() {
         // Identical instructions, blocks, and terminator structure; the only difference is which
         // value the entry passes to the continuation block.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let mut two_block_leaf = |name: &str, pass_result: bool| {
             let fid = sb.ssa().add_function(name.to_string());
@@ -792,7 +793,7 @@ mod tests {
         // `g`'s value ids are skewed relative to `f`'s, and the skewed ids appear only inside the
         // guard's inner op — the canonicalizer must rename through the guard to see the bodies as
         // equal.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let mut guarded_leaf = |name: &str, skew: bool| {
             let fid = sb.ssa().add_function(name.to_string());
@@ -829,7 +830,7 @@ mod tests {
     fn globals_init_registrations_follow_redirect() {
         // The SSA-level globals init/deinit registrations must be remapped when the function they
         // name folds into a smaller-id duplicate.
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = add_leaf(&mut sb, "f");
         let g = add_leaf(&mut sb, "globals_init");
@@ -847,7 +848,7 @@ mod tests {
 
     #[test]
     fn call_inside_guard_is_retargeted() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         let f = add_leaf(&mut sb, "f");
         let g = add_leaf(&mut sb, "g");

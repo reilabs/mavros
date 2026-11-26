@@ -39,12 +39,27 @@ read. The magic, format version and compiler version are not hashed.
 
 Pass `--field` to choose the prime field that the whole pipeline uses: `bn254` (the default) or
 `goldilocks`. The standard library's BN254-specific items (elliptic curves, ECDSA, Poseidon2 and the
-bignum library) are unavailable on Goldilocks, so a program that uses them fails to compile.
+bignum library) are unavailable on Goldilocks, so a program that uses them fails to compile. See
+[Fields in Mavros](./docs/field-agnosticism.md) for how the fields differ.
 
 Pass `--include-debug-info` to additionally write `target/program.debug.json`. This standalone,
 versioned source map records VM bytecode word offsets, function names, and Noir source locations;
 the artifact itself remains byte-for-byte unchanged. Source paths are relative to the Noir package
 root by default; pass `--absolute-paths` to retain absolute paths.
+
+### Inputs
+
+`main` takes and returns integers (see [Wide Integers](#wide-integers)), `bool`, `str<N>`, and
+arrays, tuples and structs of these types. `Field` and the data bus are refused anywhere in `main`'s
+signature, so a program that works with field elements must convert to them inside `main`.
+
+Running `mavros` without a subcommand compiles the project, reads its `Prover.toml`, generates the
+witness and checks it. `Prover.toml` holds one value per parameter, keyed by name. An integer is a
+TOML integer or a quoted one: an optional `-`, an optional `0x`, an optional `+`, then digits, which
+may hold `_` after the first. A value past `i64::MAX` must be quoted, and every value must fit into
+the bounds of its declared type. A boolean is `true`, `false`, `0` or `1`, and a string is a TOML
+string of exactly its length in bytes. An optional `return` entry states the expected return value,
+which is compared with the computed one.
 
 ### Verifier Mode
 
@@ -170,9 +185,11 @@ The frontend is based on the `provekit-v2` [Noir fork](https://github.com/worldf
 that Mavros supports integer widths 2 through 16384 for both signed and unsigned integers for use
 within programs.
 
-The fork restricts integer parameters and returns at `main` to `u8`, `u16`, `u32`, `u64`, `u128`,
-`i8`, `i16`, `i32`, and `i64`, including integers inside arrays and structs. Wider arithmetic can
-use arrays of these types at the boundary, with casts and limb assembly inside the function.
+Integers of every width cross `main` as parameters and returns ([Inputs](#inputs)). An integer wider
+than the widest a field element holds injectively (253 bits on bn254, 63 on Goldilocks) crosses as
+its limbs, little-endian: 64-bit limbs on bn254 and 16-bit limbs on Goldilocks, one witness column
+each, each bounded to its width. `Prover.toml` states such a value, and an expected `return`, as one
+integer, quoted past `i64::MAX`, which the host splits into the same limbs.
 
 A `Field` can be cast to a wider integer, including in constrained code; the compiler decomposes the
 canonical field value into limbs.

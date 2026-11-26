@@ -20,7 +20,10 @@ use crate::{
                 OpCode, Radix,
             },
         },
-        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+        util::{
+            ice_int_from_limbs_after_wide_witness_ints, ice_non_elided_tuple,
+            ice_unvalidated_assert_constant,
+        },
     },
 };
 
@@ -693,6 +696,7 @@ impl CSE {
                     OpCode::TupleProj { .. }
                     | OpCode::TupleRefProj { .. }
                     | OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                    OpCode::IntFromLimbs { .. } => ice_int_from_limbs_after_wide_witness_ints(),
                     OpCode::Guard { .. } => {
                         // Guards are opaque to CSE
                     }
@@ -1019,6 +1023,7 @@ impl ExprInterner {
 mod tests {
     use super::*;
     use crate::compiler::ssa::{Terminator, hlssa::Type};
+    use mavros_artifacts::FieldConfig;
 
     #[test]
     fn an_interned_constant_is_keyed_by_its_width_as_well_as_its_value() {
@@ -1038,7 +1043,7 @@ mod tests {
     /// Returns the two values the terminator carries afterwards. If the pass merged the second
     /// expression into the first they are equal, because the redirect rewrites the `Return`.
     fn cse_two_ops(op1: BinaryArithOpKind, op2: BinaryArithOpKind) -> (ValueId, ValueId) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
         let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -1112,7 +1117,7 @@ mod tests {
         // come out as the same expression as `(x s+ y) s+ z`.
         use BinaryArithOpKind::*;
         let build = |inner: BinaryArithOpKind| {
-            let mut ssa = HLSSA::with_main("main".to_string());
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
             let (x, y, z) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
             let (inner_r, outer_r) = (ssa.fresh_value(), ssa.fresh_value());
             let (signed_inner, other_r) = (ssa.fresh_value(), ssa.fresh_value());
@@ -1163,7 +1168,7 @@ mod tests {
 
     #[test]
     fn the_two_signed_forms_of_a_comparison_are_not_one_expression() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
         let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 

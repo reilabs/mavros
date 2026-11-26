@@ -84,6 +84,7 @@ mod tests {
             hlssa::{Constant, Endianness, HLSSA, Radix, Type},
         },
     };
+    use mavros_artifacts::FieldConfig;
 
     #[test]
     fn checks_pure_bits_early_and_defers_radix_validation() {
@@ -95,7 +96,7 @@ mod tests {
             // None is ToBits; 0 is a dynamic radix; 1 is the canonical Bytes variant.
             for radix in [None, Some(0), Some(1), Some(2), Some(256)] {
                 for guarded in [false, true] {
-                    let mut ssa = HLSSA::new();
+                    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
                     let value = ssa.fresh_value();
                     let dynamic_radix = ssa.fresh_value();
                     let condition = ssa.fresh_value();

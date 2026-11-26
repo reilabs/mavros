@@ -593,8 +593,9 @@ mod tests {
     use crate::compiler::{
         analysis::types::Types,
         ssa::hlssa::{Type, builder::HLEmitter},
-        util::test::{falloc, fr},
+        util::test::{bn254_const, falloc},
     };
+    use mavros_artifacts::FieldConfig;
 
     /// Build the analyses on the pre-pass IR and run mem2reg, mirroring the pass-manager wiring.
     fn run_pass(ssa: &mut HLSSA) {
@@ -625,7 +626,7 @@ mod tests {
     /// sibling local stays clean — so the local is promoted while the returned one is retained.
     #[test]
     fn escaping_ref_does_not_block_sibling_local() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -635,7 +636,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let kept = falloc(&mut e);
                 let returned = falloc(&mut e);
-                let c = e.field_const(fr(1));
+                let c = e.field_const(bn254_const(1));
                 e.store(kept, c);
                 e.store(returned, c);
                 e.terminate_return(vec![returned]);
@@ -650,7 +651,7 @@ mod tests {
     /// promoted — but its presence no longer vetoes a clean sibling local, which is promoted.
     #[test]
     fn call_with_ref_arg_does_not_block_sibling_local() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -670,7 +671,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let other = falloc(&mut e);
-                let c = e.field_const(fr(2));
+                let c = e.field_const(bn254_const(2));
                 e.store(other, c);
                 e.call(reader, vec![other], 0);
                 let kept = falloc(&mut e);
@@ -688,7 +689,7 @@ mod tests {
     /// the load through the parameter is retained.
     #[test]
     fn ref_param_function_promotes_clean_local() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let with_ref_param;
         {
@@ -702,7 +703,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 let _ = e.load(p);
                 let v = e.load(a);
@@ -723,7 +724,7 @@ mod tests {
     /// promotable (a strong update is unsound), so both allocations and the load are retained.
     #[test]
     fn multi_object_deref_blocks_promotion() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -734,7 +735,7 @@ mod tests {
                 let cond = e.add_parameter(Type::bool());
                 let ra = falloc(&mut e);
                 let rb = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(ra, c);
                 e.store(rb, c);
                 let merged = e.build_if_else(
@@ -756,7 +757,7 @@ mod tests {
     /// placed, `remove_ptrs` would panic on an uninitialized pointer value).
     #[test]
     fn control_flow_value_merge_promotes_with_phi() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -766,8 +767,8 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
                 let a = falloc(&mut e);
-                let c0 = e.field_const(fr(7));
-                let c1 = e.field_const(fr(9));
+                let c0 = e.field_const(bn254_const(7));
+                let c1 = e.field_const(bn254_const(9));
                 e.store(a, c0);
                 e.build_if_else(
                     cond,
@@ -790,7 +791,7 @@ mod tests {
     /// function), so it is not promotable — but a clean sibling local still is.
     #[test]
     fn ref_stored_as_value_does_not_block_sibling_local() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -802,7 +803,7 @@ mod tests {
                 let pp = e.alloc(a); // Ref<Ref<Field>>, ref pointee, seeded with `a`
                 e.store(pp, a); // *pp = a — `a`'s ref is consumed as a value
                 let kept = falloc(&mut e);
-                let c = e.field_const(fr(3));
+                let c = e.field_const(bn254_const(3));
                 e.store(kept, c);
                 let v = e.load(kept);
                 e.terminate_return(vec![v]);
@@ -819,7 +820,7 @@ mod tests {
     /// store. (`uninitialized_allocs` therefore never fires here; the guard remains defensive.)
     #[test]
     fn alloc_init_value_promotes_without_store() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -843,7 +844,7 @@ mod tests {
     /// Exercises the aggregate-typed phi/threading path the scalar tests never reach.
     #[test]
     fn array_pointee_promotes_with_aggregate_phi() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let arr_ty = Type::field().array_of(3);
         {

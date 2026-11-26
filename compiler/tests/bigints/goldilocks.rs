@@ -4,7 +4,7 @@
 //! Every program here also passes the harness' AD check, on each lane it has.
 
 use mavros_artifacts::{
-    Field, FieldConfig, Goldilocks, InputValueOrdered, field::goldilocks::MODULUS,
+    Bn254, FieldConfig, Goldilocks, InputValueOrdered, field::goldilocks::MODULUS,
 };
 use mavros_compiler::{
     compiler::{
@@ -24,9 +24,9 @@ use num_bigint::BigUint;
 
 use crate::{
     Limbed, Rhs, assert_every_column_is_pinned, assert_no_two_columns_trade_a_limb,
-    check_limbed_grid_in, check_limbed_pairs_on, corner_pairs, dedup, few_shift_amounts,
+    check_limbed_grid, check_limbed_pairs_on, corner_pairs, dedup, few_shift_amounts,
     half_width_corners,
-    harness::{BinaryOpOracle, Compiled, Verdict, input_block_in, main_program_in},
+    harness::{BinaryOpOracle, Compiled, Verdict, input_block, main_program},
     limb_reaching_values, limb_shift_amounts, signed_limb_corners_at,
 };
 
@@ -67,7 +67,7 @@ fn compile(
     returns: &[Type],
     body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> Vec<ValueId>,
 ) -> Compiled<Goldilocks> {
-    let ssa = main_program_in(FieldConfig::goldilocks(), params, returns, body);
+    let ssa = main_program(FieldConfig::goldilocks(), params, returns, body);
     Compiled::compile(ssa).unwrap_or_else(|error| panic!("a Goldilocks program failed: {error}"))
 }
 
@@ -119,7 +119,7 @@ fn pure_field_casts_agree_with_the_model_on_goldilocks() {
         &widths,
     ))
     .unwrap_or_else(|error| panic!("a pure field cast does not compile: {error}"));
-    for verdict in on_both_lanes(&compiled, &crate::unconstrained_inputs_in::<Goldilocks>(0)) {
+    for verdict in on_both_lanes(&compiled, &crate::unconstrained_inputs::<Goldilocks>(0)) {
         assert!(verdict.is_accepted(), "{verdict:?}");
     }
 }
@@ -132,7 +132,7 @@ fn pure_field_bit_windows_read_the_canonical_integer_on_goldilocks() {
         let compiled =
             Compiled::<Goldilocks>::compile(crate::pure_field_window_program(field, window))
                 .unwrap_or_else(|error| panic!("the window {window:?} does not compile: {error}"));
-        let inputs = crate::unconstrained_inputs_in::<Goldilocks>(0);
+        let inputs = crate::unconstrained_inputs::<Goldilocks>(0);
         for verdict in on_both_lanes(&compiled, &inputs) {
             assert!(verdict.is_accepted(), "{window:?}: {verdict:?}");
         }
@@ -260,7 +260,7 @@ fn every_operation_agrees_with_the_model_on_goldilocks() {
 
 /// The additive and bitwise operations agree up to 63 bits, the widest integer one Goldilocks
 /// element holds injectively. 62 bits is the widest sum one element holds, and 63 the first width
-/// whose sum takes the carry chain. Wider integer _parameters_ do not fit one entry-blob element.
+/// whose sum takes the carry chain.
 #[test]
 fn additive_and_bitwise_operations_agree_up_to_63_bits() {
     use BinaryArithOpKind::{And, Or, SAdd, SSub, UAdd, USub, Xor};
@@ -337,7 +337,7 @@ fn check_limbed_matrix(bits: usize) {
     }
 }
 
-/// `limbed` over every left value against every right one, by [`check_limbed_grid_in`].
+/// `limbed` over every left value against every right one, by [`check_limbed_grid`].
 ///
 /// A constant right operand the model rejects against both idle left operands (zero and all ones),
 /// as a zero divisor or an amount past the width is, is left out: [`Rhs::Constant`] keeps the left
@@ -360,15 +360,14 @@ fn check_limbed_matrix_pairs(
         })
         .cloned()
         .collect();
-    check_limbed_grid_in::<Goldilocks>(limbed, bits, lefts, &rights, rhs);
+    check_limbed_grid::<Goldilocks>(limbed, bits, lefts, &rights, rhs);
 }
 
 /// A field without the lane would skip it with no failure.
 #[test]
 fn every_field_has_a_wasm_lane() {
-    let program =
-        |field| main_program_in(field, &[Type::int(8)], &[Type::int(8)], |_, p| vec![p[0]]);
-    let bn254 = Compiled::<Field>::compile(program(FieldConfig::bn254())).unwrap();
+    let program = |field| main_program(field, &[Type::int(8)], &[Type::int(8)], |_, p| vec![p[0]]);
+    let bn254 = Compiled::<Bn254>::compile(program(FieldConfig::bn254())).unwrap();
     assert!(bn254.wasm_is_available());
     let goldilocks = Compiled::<Goldilocks>::compile(program(FieldConfig::goldilocks())).unwrap();
     assert!(goldilocks.wasm_is_available());
@@ -406,7 +405,7 @@ fn integer_comparisons_agree_with_the_model_on_goldilocks() {
                     assert_returns(
                         &format!("{kind:?}({lhs:?}, {rhs:?}) at {bits} bits"),
                         &compiled,
-                        &input_block_in::<Goldilocks>(&[lhs, rhs]),
+                        &input_block::<Goldilocks>(&[lhs, rhs]),
                         input(Goldilocks::from(holds)),
                         input(Goldilocks::from(!holds)),
                     );
@@ -560,13 +559,13 @@ fn an_integer_decomposes_into_its_pattern_past_one_element() {
 /// bytes is refused, as an error that names it and what the field offers.
 #[test]
 fn a_decomposition_wider_than_the_element_is_refused_on_goldilocks() {
-    let bits = main_program_in(
+    let bits = main_program(
         FieldConfig::goldilocks(),
         &[Type::field()],
         &[Type::int(1).array_of(65)],
         |e, p| vec![e.to_bits(p[0], Endianness::Little, 65)],
     );
-    let bytes = main_program_in(
+    let bytes = main_program(
         FieldConfig::goldilocks(),
         &[Type::field()],
         &[Type::int(8).array_of(9)],
@@ -776,7 +775,7 @@ fn every_witness_column_of_a_wide_goldilocks_operation_is_pinned() {
                 .expect("an accepted pair");
 
             let (left, right, expected) = (lhs.clone(), rhs.clone(), answer);
-            let ssa = main_program_in(
+            let ssa = main_program(
                 FieldConfig::goldilocks(),
                 &[Type::int(1), Type::int(1)],
                 &[Type::int(1)],

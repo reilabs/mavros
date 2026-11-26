@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, FieldConfig};
+use mavros_artifacts::{Bn254, FieldConfig};
 use mavros_compiler::{
     Project,
     driver::{Driver, Error},
@@ -9,9 +9,27 @@ use mavros_compiler::{
 // The fork rejects unsupported features with source diagnostics before Mavros lowering.
 use common::assert_frontend_refused as assert_refused;
 
+/// `main` takes and returns no field element, wherever its type holds one, on every field: a
+/// `Field`'s values depend on the field the program is compiled for.
+#[test]
+fn main_takes_and_returns_no_field_element() {
+    for source in [
+        "fn main(x: Field) { assert(x == x); }",
+        "fn main(x: pub [Field; 2]) { assert(x[0] == x[1]); }",
+        "fn main() -> pub (u8, Field) { (0, 0) }",
+        "struct Pair { a: u8, b: Field }
+         fn main(x: Pair) { assert(x.a == x.a); }",
+    ] {
+        for field in [FieldConfig::bn254(), FieldConfig::goldilocks()] {
+            common::assert_frontend_refused(field, source, "Field is not a valid");
+        }
+    }
+}
+
 #[test]
 fn folded_recursion_is_refused_before_cost_analysis() {
     assert_refused(
+        FieldConfig::bn254(),
         r#"fn main(x: u32) {
     assert(fibonacci(x) == 55);
 }
@@ -28,7 +46,8 @@ fn fibonacci(x: u32) -> u32 {
 #[test]
 fn nonrecursive_fold_is_also_refused() {
     assert_refused(
-        r#"fn main(x: Field) { assert(folded(x) == x); }
+        FieldConfig::bn254(),
+        r#"fn main(x: u8) { assert(folded(x as Field) == x as Field); }
 #[fold]
 fn folded(x: Field) -> Field { x }
 "#,
@@ -41,9 +60,10 @@ fn oracle_calls_and_function_values_are_refused() {
     for attribute in ["", "#[pure]"] {
         for body in ["oracle(x)", "let f = oracle; f(x)"] {
             assert_refused(
+                FieldConfig::bn254(),
                 &format!(
-                    "#[oracle(barnacle)]\n{attribute}\nunconstrained fn oracle(x: Field) -> Field {{}}\n\
-                     unconstrained fn main(x: Field) -> pub Field {{ {body} }}\n"
+                    "#[oracle(barnacle)]\n{attribute}\nunconstrained fn oracle(x: u8) -> u8 {{}}\n\
+                     unconstrained fn main(x: u8) -> pub u8 {{ {body} }}\n"
                 ),
                 "Oracle `barnacle` is not supported",
             );
@@ -53,17 +73,17 @@ fn oracle_calls_and_function_values_are_refused() {
 
 #[test]
 fn print_oracles_remain_ignored() {
-    let dir = common::noir_project("fn main(x: Field) { print(x); println(x); assert(x == 1); }");
+    let dir = common::noir_project("fn main(x: u8) { print(x); println(x); assert(x == 1); }");
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
     driver.run_noir_compiler(FieldConfig::bn254()).unwrap();
     driver.make_struct_access_static().unwrap();
 }
 
-/// Mavros lowering refuses `source` with [`Error::LoweringRefused`]
-fn assert_lowering_refused(source: &str, messages: &[&str]) -> String {
+/// Mavros lowering refuses `source` over `field` with [`Error::LoweringRefused`]
+fn assert_lowering_refused(field: FieldConfig, source: &str, messages: &[&str]) -> String {
     let dir = common::noir_project(source);
     let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
-    let error = match driver.run_noir_compiler(FieldConfig::bn254()) {
+    let error = match driver.run_noir_compiler(field) {
         Err(error @ Error::LoweringRefused(_)) => error,
         Err(error) => panic!("expected a lowering refusal, got: {error}"),
         Ok(()) => panic!("expected a lowering refusal"),
@@ -101,6 +121,7 @@ fn spread_widths_past_their_containers_are_refused() {
         ),
     ] {
         assert_lowering_refused(
+            FieldConfig::bn254(),
             &format!(
                 "use std::mavros::{{spread, unspread}};\n\
                  fn main(x: u64) {{ let _ = {call}; }}\n"
@@ -114,6 +135,7 @@ fn spread_widths_past_their_containers_are_refused() {
 #[test]
 fn every_refusal_in_a_program_is_reported_together() {
     let rendered = assert_lowering_refused(
+        FieldConfig::bn254(),
         "use std::mavros::spread;\n\
          fn main(x: u32) { let _ = spread::<0>(x); let _ = spread::<33>(x); }\n",
         &[
@@ -131,7 +153,7 @@ fn witness_holds_for_each(source: &str, values: &[u32]) -> Vec<bool> {
 
     let dir = common::noir_project(source);
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {

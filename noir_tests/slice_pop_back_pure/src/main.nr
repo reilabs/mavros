@@ -1,7 +1,10 @@
 // pop_back on a *pure-length* slice: no witness control flow touches the length, so purify
 // leaves the SlicePop untouched and `LowerSlicePop` rewrites it late into an assert + get +
 // copy loop with a pure bound. The popped element is a witness value.
-fn main(x: Field, expected: pub Field) {
+fn main(x: u8, expected: pub u8) {
+    let x = x as Field;
+    let expected = expected as Field;
+
     let mut s: [Field] = [10, 20];
     s = s.push_back(x);
     let (s2, e) = s.pop_back();

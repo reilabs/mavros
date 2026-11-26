@@ -5,7 +5,11 @@ fn add_to(p: &mut Field, delta: Field) {
     *p = *p + delta;
 }
 
-fn main(x: Field, delta: Field, expected: pub Field) {
+fn main(x: u8, delta: u8, expected: pub u8) {
+    let x = x as Field;
+    let delta = delta as Field;
+    let expected = expected as Field;
+
     let mut v = x;
     add_to(&mut v, delta);
     assert_eq(v, expected);

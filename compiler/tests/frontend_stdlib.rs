@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, FieldConfig, FieldId, Goldilocks, MavrosField};
+use mavros_artifacts::{Bn254, FieldConfig, FieldId, Goldilocks, MavrosField};
 use mavros_compiler::{
     Project, abi_helpers, api,
     compiler::codegen::CodeGenOptions,
@@ -17,7 +17,7 @@ fn frontend(source: &str, field: FieldConfig) -> Result<(), Error> {
 fn portable_stdlib_replacements_compile_on_both_fields() {
     for field in [FieldConfig::bn254(), FieldConfig::goldilocks()] {
         for source in [
-            "fn main(x: Field) -> pub Field { x + 1 }",
+            "fn main(x: u8) -> pub u8 { x + 1 }",
             "fn main(x: [u8; 3]) -> pub [u8; 32] { std::hash::blake2s(x) }",
             "fn main(x: [u8; 3]) -> pub [u8; 32] { std::hash::blake3(x) }",
             "fn main(x: [u8; 16], iv: [u8; 16], key: [u8; 16]) -> pub [u8; 32] {
@@ -45,8 +45,8 @@ fn bn254_crypto_stays_available_and_is_unresolved_on_goldilocks() {
             "ecdsa_secp256r1",
         ),
         (
-            "fn main(x: [Field; 4]) -> pub [Field; 4] {
-                std::hash::poseidon2_permutation(x)
+            "fn main(x: [u8; 4]) -> pub bool {
+                std::hash::poseidon2_permutation(x.map(|v| v as Field))[0] != 0
             }",
             "poseidon2_permutation",
         ),
@@ -173,7 +173,7 @@ fn sha256_goldilocks_unconstrained_matches_known_digests() {
 
 #[test]
 fn sha256_bn254_witnesses_match_known_digests() {
-    check_sha256::<Field>(false);
+    check_sha256::<Bn254>(false);
 }
 
 #[test]
@@ -201,7 +201,8 @@ fn blake_goldilocks_witnesses_match_reference_digests() {
 #[test]
 fn unsafe_cast_is_internal_to_the_standard_library() {
     common::assert_frontend_refused(
-        "use std::mavros::unsafe_cast;\n\nfn main(x: Field) -> pub u8 {\n    unsafe_cast(x)\n}",
+        FieldConfig::bn254(),
+        "use std::mavros::unsafe_cast;\n\nfn main(x: u8) -> pub u8 {\n    unsafe_cast(x as Field)\n}",
         "unsafe_cast is private and not visible from the current module",
     );
 }
@@ -213,13 +214,15 @@ fn unsafe_cast_is_internal_to_the_standard_library() {
 #[test]
 fn field_narrowing_casts_truncate_on_both_fields() {
     // 2^40 + 456, which both fields carry: the low byte is 200, or -56 as an `i8`.
-    let inputs = ["x = 1099511628232\nreturn = [200, 456, 4294967240]\n".to_owned()];
+    let x = common::le_bytes(&1099511628232u64.into(), 8);
+    let inputs = [format!("x = {x}\nreturn = [200, 456, 4294967240]\n")];
     for mode in ["", "unconstrained "] {
         let source = format!(
-            "{mode}fn main(x: Field) -> pub [u32; 3] {{ \
+            "{mode}fn main(x: [u8; 8]) -> pub [u32; 3] {{ \
+             let x = Field::from_le_bytes_checked(x); \
              [(x as u8) as u32, x as u32, (x as i8) as u32] }}"
         );
-        check_program::<Field>(&source, &inputs, !mode.is_empty());
+        check_program::<Bn254>(&source, &inputs, !mode.is_empty());
         check_program::<Goldilocks>(&source, &inputs, !mode.is_empty());
     }
 }
@@ -229,13 +232,87 @@ fn field_narrowing_casts_truncate_on_both_fields() {
 #[test]
 fn field_to_u128_truncates_above_the_host_word() {
     // 2^130 + 2^127 + 2^32 + 200.
-    let inputs =
-        ["x = \"1531270651144223085585185733447251919048\"\nreturn = [1, 200]\n".to_owned()];
+    let x: num_bigint::BigUint = "1531270651144223085585185733447251919048".parse().unwrap();
+    let inputs = [format!(
+        "x = {}\nreturn = [1, 200]\n",
+        common::le_bytes(&x, 32)
+    )];
     for mode in ["", "unconstrained "] {
         let source = format!(
-            "{mode}fn main(x: Field) -> pub [u32; 2] {{ \
-             let w = x as u128; [(w >> 127) as u32, w as u32] }}"
+            "{mode}fn main(x: [u8; 32]) -> pub [u32; 2] {{ \
+             let w = Field::from_le_bytes_checked(x) as u128; [(w >> 127) as u32, w as u32] }}"
         );
-        check_program::<Field>(&source, &inputs, !mode.is_empty());
+        check_program::<Bn254>(&source, &inputs, !mode.is_empty());
     }
+}
+
+/// A witnessed element's bytes, little- and big-endian, as a counted loop decomposes them, on
+/// both fields.
+#[test]
+fn a_witnessed_element_decomposes_into_its_bytes_in_either_order() {
+    let main = "fn main(x: u32, y: u32) -> pub ([u8; 8], [u8; 8]) {
+            let f = (x as Field) + (y as Field) * 16777216;
+            (f.to_le_bytes(), f.to_be_bytes())
+        }";
+    for (x, y) in [
+        (0u64, 0u64),
+        (0x0102_0304, 0x0506_0708),
+        (u32::MAX.into(), u32::MAX.into()),
+    ] {
+        let value = x + (y << 24);
+        let le: Vec<String> = value.to_le_bytes().iter().map(u8::to_string).collect();
+        let be: Vec<String> = value.to_be_bytes().iter().map(u8::to_string).collect();
+        common::check_both_fields(
+            main,
+            &format!(
+                "x = {x}\ny = {y}\nreturn = [[{}], [{}]]",
+                le.join(", "),
+                be.join(", ")
+            ),
+        );
+    }
+}
+
+/// An unconstrained byte decomposition into more bytes than a field element holds compiles on
+/// every field, and fails at the standard library's `static_assert` on the byte count.
+#[test]
+fn to_le_bytes_past_the_element_compiles_and_fails_at_its_bound() {
+    fn check<F: MavrosField>() {
+        let source = "unconstrained fn decompose(x: Field) -> [u8; 40] { x.to_le_bytes() }
+            fn main(x: u8) -> pub u8 {
+                // Safety: the decomposition fails before its bytes are used.
+                let bytes = unsafe { decompose(x as Field) };
+                bytes[0]
+            }";
+        let dir = common::noir_project(source);
+        std::fs::write(dir.path().join("Prover.toml"), "x = 7\n").unwrap();
+        let (mut driver, r1cs) =
+            api::compile_to_r1cs::<F>(dir.path().to_path_buf(), false).unwrap();
+        let artifact = driver
+            .compile_bytecode_artifact(CodeGenOptions {
+                include_debug_info: true,
+                ..CodeGenOptions::default()
+            })
+            .unwrap();
+        let mut binary = artifact.binary;
+        let (params, _) = api::read_prover_inputs::<F>(dir.path(), driver.abi()).unwrap();
+        let Err(error) =
+            api::run_witgen_from_binary(&mut binary, &r1cs, &params, artifact.debug_info)
+        else {
+            panic!("{:?}: 40 bytes are past every field's element", F::ID);
+        };
+        // The trap carries no message, so its innermost frame tells the byte-count assertion from
+        // any other failure: the `static_assert` opening `to_le_bytes`, at line 96 of the pinned
+        // standard library's `field/mod.nr`.
+        let frame = error.stack_trace().first();
+        assert!(
+            frame.is_some_and(|frame| frame.function.starts_with("to_le_bytes")
+                && frame.location.file.ends_with("field/mod.nr")
+                && frame.location.line == 96),
+            "{:?}: {error:?}",
+            F::ID
+        );
+    }
+    check::<Bn254>();
+    check::<Goldilocks>();
 }

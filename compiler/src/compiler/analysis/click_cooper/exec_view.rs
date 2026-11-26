@@ -177,10 +177,11 @@ mod tests {
         analysis::click_cooper::stability::{static_edge_count, terminator_edges},
         ssa::hlssa::HLSSA,
     };
+    use mavros_artifacts::FieldConfig;
 
     /// entry —JmpIf→ {then_b, else_b} —Jmp→ merge —Return; returns the ids.
     fn diamond() -> (HLSSA, BlockId, BlockId, BlockId, BlockId) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let cond = ssa.fresh_value();
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_id();
@@ -237,7 +238,7 @@ mod tests {
     /// still see the live cycle.
     #[test]
     fn no_exec_exit_path_is_conservative() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let cond = ssa.fresh_value();
         let f = ssa.get_unique_entrypoint_mut();
         let entry = f.get_entry_id();

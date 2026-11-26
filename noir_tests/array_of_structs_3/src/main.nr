@@ -1,17 +1,17 @@
 pub struct A {
-    pub a: Field,
-    pub b: [Field; 2],
+    pub a: u8,
+    pub b: [u8; 2],
     pub c: B,
 }
 
 pub struct B {
     pub d: C,
-    pub e: [Field; 2],
-    pub f: Field,
+    pub e: [u8; 2],
+    pub f: u8,
 }
 
 pub struct C {
-    pub g: Field,
+    pub g: u8,
 }
 
 

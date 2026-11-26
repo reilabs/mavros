@@ -506,7 +506,7 @@ mod tests {
     /// narrowed one.
     #[test]
     fn a_signed_product_accepts_only_within_bounds_where_its_guard_holds() {
-        check_signed_product_bounds::<mavros_artifacts::Field>(bn254());
+        check_signed_product_bounds::<mavros_artifacts::Bn254>(bn254());
         check_signed_product_bounds::<mavros_artifacts::Goldilocks>(FieldConfig::goldilocks());
     }
 
@@ -540,7 +540,7 @@ mod tests {
     /// limb and a narrowed one.
     #[test]
     fn a_signed_product_refuses_a_forged_answer() {
-        check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Field>(bn254());
+        check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Bn254>(bn254());
         check_a_signed_product_refuses_a_forged_answer::<mavros_artifacts::Goldilocks>(
             FieldConfig::goldilocks(),
         );

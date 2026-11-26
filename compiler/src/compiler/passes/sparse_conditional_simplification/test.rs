@@ -4,6 +4,7 @@ use crate::compiler::{
     ssa::SourcePosition,
     ssa::hlssa::{BinaryArithOpKind, CastTarget, CmpKind, Constant, SequenceTargetType, Type},
 };
+use mavros_artifacts::FieldConfig;
 
 // TESTING UTILITIES
 // ================================================================================================
@@ -31,7 +32,7 @@ fn fold_and_dce(ssa: &mut HLSSA) {
 /// `Jmp` to the then-block, and the else-block is deleted.
 #[test]
 fn folds_constants_and_prunes_dead_branch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c2 = ssa.add_const(Constant::int(32, 2));
     let c3 = ssa.add_const(Constant::int(32, 3));
     let c5 = ssa.add_const(Constant::int(32, 5));
@@ -82,7 +83,7 @@ fn folds_constants_and_prunes_dead_branch() {
 /// that constant.
 #[test]
 fn folds_phi_of_agreeing_constants() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c7 = ssa.add_const(Constant::Field(ssa.field().constant(7u64)));
     let (cond, m_param) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -118,7 +119,7 @@ fn folds_phi_of_agreeing_constants() {
 /// one is.
 #[test]
 fn loop_variant_value_is_not_folded() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -164,7 +165,7 @@ fn loop_variant_value_is_not_folded() {
 /// modeled, so the instruction stays.
 #[test]
 fn does_not_fold_overflow() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c200 = ssa.add_const(Constant::int(8, 200));
     let c100 = ssa.add_const(Constant::int(8, 100));
     let sum = ssa.fresh_value();
@@ -193,7 +194,7 @@ fn does_not_fold_overflow() {
 /// intact.
 #[test]
 fn does_not_fold_witness_casts() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
     let (wit, doubled) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -225,7 +226,7 @@ fn does_not_fold_witness_casts() {
 #[test]
 #[should_panic(expected = "stuck at ⊤")]
 fn degenerate_loop_ices_on_stuck_condition() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let cond = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -250,7 +251,7 @@ fn degenerate_loop_ices_on_stuck_condition() {
 /// constants.
 #[test]
 fn select_with_constant_condition_aliases_to_arm() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (arm_t, arm_f, sel) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -280,7 +281,7 @@ fn select_with_constant_condition_aliases_to_arm() {
 /// edge, even when it is an unknown function argument globally.
 #[test]
 fn branch_fact_folds_dominated_uses() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_false = ssa.add_const(Constant::int(1, 0));
     let (cond, arm_t, arm_f, selected, not_cond) = (
         ssa.fresh_value(),
@@ -331,7 +332,7 @@ fn branch_fact_folds_dominated_uses() {
 /// Conflicting incoming predicate facts disappear at a join.
 #[test]
 fn branch_fact_does_not_cross_conflicting_merge() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (cond, not_cond) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -365,7 +366,7 @@ fn branch_fact_does_not_cross_conflicting_merge() {
 /// A nested branch on a condition already known in the block is decided immediately.
 #[test]
 fn branch_fact_prunes_nested_same_condition_branch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let cond = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -400,7 +401,7 @@ fn branch_fact_prunes_nested_same_condition_branch() {
 /// If both edges go to the same block, the edge itself carries no useful predicate fact.
 #[test]
 fn branch_with_same_successor_does_not_infer_condition() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (cond, not_cond) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -428,7 +429,7 @@ fn branch_with_same_successor_does_not_infer_condition() {
 /// Jump arguments are evaluated under the branch facts of the edge carrying them.
 #[test]
 fn branch_fact_folds_phi_from_one_edge() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (cond, phi) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -466,7 +467,7 @@ fn branch_fact_folds_phi_from_one_edge() {
 /// (non-constant) adds survive, and the purity assert does not trip on the folded `Cmp`.
 #[test]
 fn folds_congruence_decided_branch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b, eq) = (
         ssa.fresh_value(),
@@ -521,7 +522,7 @@ fn folds_congruence_decided_branch() {
 /// wasted `Constrain` row).
 #[test]
 fn redundant_self_equality_assert_is_dropped() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let a = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -549,7 +550,7 @@ fn redundant_self_equality_assert_is_dropped() {
 /// computations) is redundant and dropped — but the computations themselves survive.
 #[test]
 fn redundant_congruent_equality_assert_is_dropped() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -599,7 +600,7 @@ fn redundant_congruent_equality_assert_is_dropped() {
 /// load-bearing and must be kept — dropping it would weaken the constraint system.
 #[test]
 fn non_congruent_equality_assert_is_kept() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -630,7 +631,7 @@ fn non_congruent_equality_assert_is_kept() {
 /// constant, so the witnessed return slot stays correctly typed.
 #[test]
 fn witnessed_constant_is_cast_to_witness_of() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (w, ww) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -673,7 +674,7 @@ fn witnessed_constant_is_cast_to_witness_of() {
 /// `integrated_dce_sweeps_dead_aggregate`).
 #[test]
 fn folds_constant_aggregate_projections() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c10 = ssa.add_const(Constant::int(32, 10));
     let c20 = ssa.add_const(Constant::int(32, 20));
     let c30 = ssa.add_const(Constant::int(32, 30));
@@ -724,7 +725,7 @@ fn folds_constant_aggregate_projections() {
 /// the return), while the establishing assert is kept.
 #[test]
 fn asserted_const_substituted_after_assert() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let b = ssa.fresh_value();
 
@@ -753,7 +754,7 @@ fn asserted_const_substituted_after_assert() {
 /// `AssertCmp{Eq, x, c}` pins `x` to the constant `c`; later uses of `x` fold to `c`.
 #[test]
 fn asserted_const_substituted_after_assert_cmp_eq() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::Field(ssa.field().constant(5u64)));
     let x = ssa.fresh_value();
 
@@ -784,7 +785,7 @@ fn asserted_const_substituted_after_assert_cmp_eq() {
 /// anticipated channel from assert inputs entirely.
 #[test]
 fn same_block_assert_is_index_granular() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (b, before, after) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -830,7 +831,7 @@ fn same_block_assert_is_index_granular() {
 /// known disequality.
 #[test]
 fn known_unequal_folds_cmp_eq_to_false() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_false = ssa.add_const(Constant::int(1, 0));
     let (a, b, eq, eq2) = (
         ssa.fresh_value(),
@@ -884,7 +885,7 @@ fn known_unequal_folds_cmp_eq_to_false() {
 /// (the dead edge is pruned; the now-orphaned target is reclaimed before the run returns).
 #[test]
 fn known_unequal_folds_and_prunes_nested_jmpif() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c2 = ssa.add_const(Constant::int(32, 2));
     let (a, b, eq, eq2) = (
@@ -945,7 +946,7 @@ fn known_unequal_folds_and_prunes_nested_jmpif() {
 /// constant pin.
 #[test]
 fn asserted_equal_folds_cmp_eq_to_true() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (a, b, eq) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -999,7 +1000,7 @@ fn asserted_equal_folds_cmp_eq_to_true() {
 /// distinct witnesses, so the comparison is not congruence-decidable and only folds conditionally.
 #[test]
 fn witnessed_cmp_eq_folded_conditionally_is_cast_to_witness_of() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, ww) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1048,7 +1049,7 @@ fn witnessed_cmp_eq_folded_conditionally_is_cast_to_witness_of() {
 /// `select_with_constant_condition_aliases_to_arm`, which covers the true arm.
 #[test]
 fn select_with_constant_false_condition_aliases_to_else_arm() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_false = ssa.add_const(Constant::int(1, 0));
     let (arm_t, arm_f, sel) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -1079,7 +1080,7 @@ fn select_with_constant_false_condition_aliases_to_else_arm() {
 /// argument.
 #[test]
 fn asserted_const_substituted_in_jmp_args() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (b, p) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -1109,7 +1110,7 @@ fn asserted_const_substituted_in_jmp_args() {
 /// keeping the IR well-typed. The establishing assert is retained.
 #[test]
 fn asserted_const_substituted_for_witness_operand_via_cast() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let w = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1158,7 +1159,7 @@ fn asserted_const_substituted_for_witness_operand_via_cast() {
 /// witness cast is materialized.
 #[test]
 fn asserted_const_not_substituted_for_excluded_witness_consumer() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let w = ssa.fresh_value();
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1202,7 +1203,7 @@ fn asserted_const_not_substituted_for_excluded_witness_consumer() {
 /// whose definition dominates `b = a + a`. The establishing assert is kept.
 #[test]
 fn asserted_equal_copy_propagates_to_dominating_leader() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1250,7 +1251,7 @@ fn asserted_equal_copy_propagates_to_dominating_leader() {
 /// self-protection at the establishing index.
 #[test]
 fn asserted_equal_copy_prop_redirects_both_directions() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let (a, b, before, after) = (
         ssa.fresh_value(),
@@ -1323,7 +1324,7 @@ fn asserted_equal_copy_prop_redirects_both_directions() {
 /// definition onward).
 #[test]
 fn anticipated_copy_prop_to_block_defined_leader() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c2 = ssa.add_const(Constant::int(32, 2));
     let (a, b, x, y, m) = (
@@ -1401,7 +1402,7 @@ fn anticipated_copy_prop_to_block_defined_leader() {
 /// redirected to `x: u32`, keeping the IR well-typed.
 #[test]
 fn asserted_equal_copy_prop_skips_type_mismatch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (x, y) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1428,7 +1429,7 @@ fn asserted_equal_copy_prop_skips_type_mismatch() {
 /// though no single `AssertCmp` names both `c` and `a`.
 #[test]
 fn asserted_equal_copy_prop_is_transitive() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, c) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1461,7 +1462,7 @@ fn asserted_equal_copy_prop_is_transitive() {
 /// terminator call sites.
 #[test]
 fn asserted_equal_copy_prop_reaches_jmp_args() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, p) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1496,7 +1497,7 @@ fn asserted_equal_copy_prop_reaches_jmp_args() {
 /// when _both_ sides are non-constant, so it would already yield no leader.
 #[test]
 fn asserted_equal_copy_prop_yields_to_function_wide_fold() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (x, y, w, v) = (
         ssa.fresh_value(),
@@ -1545,7 +1546,7 @@ fn asserted_equal_copy_prop_yields_to_function_wide_fold() {
 /// are the same `WitnessOf` type).
 #[test]
 fn asserted_equal_copy_prop_redirects_equal_witnesses() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (wa, wb) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1578,7 +1579,7 @@ fn asserted_equal_copy_prop_redirects_equal_witnesses() {
 /// consumer — see `asserted_const_not_substituted_for_excluded_witness_consumer`).
 #[test]
 fn asserted_equal_copy_prop_redirects_witness_machinery_consumer() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     // `wa` first ⇒ `wa.0 < wb.0`; both are entry params (same def site), so the dominance-root-
     // most leader is the smaller-id `wa`.
     let (wa, wb) = (ssa.fresh_value(), ssa.fresh_value());
@@ -1634,7 +1635,7 @@ fn asserted_equal_copy_prop_redirects_witness_machinery_consumer() {
 /// is what keeps `b`'s def alive; this guards against a regression that stopped doing so.
 #[test]
 fn asserted_equal_copy_prop_keeps_establisher_under_dce() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b) = (ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -1685,7 +1686,7 @@ fn asserted_equal_copy_prop_keeps_establisher_under_dce() {
 /// slot and sweep everything — sound, but it would hide the redirect.)
 #[test]
 fn congruence_dropped_assert_still_copy_propagates_soundly() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, a, b) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
@@ -1745,7 +1746,7 @@ fn congruence_dropped_assert_still_copy_propagates_soundly() {
 /// [`integrated_dce_keeps_a_dead_add_itself`]).
 #[test]
 fn integrated_dce_removes_dead_code() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, unused) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -1779,7 +1780,7 @@ fn integrated_dce_removes_dead_code() {
 /// discharge the check; if it could, deleting the add outright would be the right answer.
 #[test]
 fn integrated_dce_keeps_a_dead_add_itself() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let (x, unused) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -1818,7 +1819,7 @@ fn integrated_dce_keeps_a_dead_add_itself() {
 /// more than the witnessed multiply whose check it would be.
 #[test]
 fn integrated_dce_keeps_a_dead_mul_itself() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 3));
     let (x, unused) = (ssa.fresh_value(), ssa.fresh_value());
 
@@ -1855,7 +1856,7 @@ fn integrated_dce_keeps_a_dead_mul_itself() {
 /// contrast `folds_constant_aggregate_projections`, where fold-only leaves it.
 #[test]
 fn integrated_dce_sweeps_dead_aggregate() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c10 = ssa.add_const(Constant::int(32, 10));
     let c20 = ssa.add_const(Constant::int(32, 20));
     let c30 = ssa.add_const(Constant::int(32, 30));
@@ -1902,7 +1903,7 @@ fn integrated_dce_sweeps_dead_aggregate() {
 /// reclamation of the block and its constraint.
 #[test]
 fn conditional_jmpif_fold_orphan_is_reclaimed_same_run() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, p, q, eq2) = (
         ssa.fresh_value(),
         ssa.fresh_value(),
@@ -1987,7 +1988,7 @@ fn conditional_jmpif_fold_orphan_is_reclaimed_same_run() {
 /// assert, while the assert itself keeps its genuine operand (Gate 3).
 #[test]
 fn anticipated_const_folds_earlier_use() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c5 = ssa.add_const(Constant::int(32, 5));
     let (x, r) = (ssa.fresh_value(), ssa.fresh_value());
@@ -2033,7 +2034,7 @@ fn anticipated_const_folds_earlier_use() {
 /// the justifying assert keeps its genuine operands.
 #[test]
 fn anticipated_cmp_fold_decides_branch() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, w) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2094,7 +2095,7 @@ fn anticipated_cmp_fold_decides_branch() {
 /// Exactly one genuine check must remain, no matter how many passes run.
 #[test]
 fn mutual_erasure_keeps_one_assert() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c5 = ssa.add_const(Constant::int(32, 5));
     let v = ssa.fresh_value();
 
@@ -2138,7 +2139,7 @@ fn mutual_erasure_keeps_one_assert() {
 /// turn accepting runs rejecting.
 #[test]
 fn loop_variant_value_not_rewritten_by_later_assert() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -2208,7 +2209,7 @@ fn loop_variant_value_not_rewritten_by_later_assert() {
 /// keeps its genuine operand.
 #[test]
 fn anticipated_const_folds_post_loop_use() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c0 = ssa.add_const(Constant::int(32, 0));
     let c1 = ssa.add_const(Constant::int(32, 1));
     let c10 = ssa.add_const(Constant::int(32, 10));
@@ -2293,7 +2294,7 @@ fn anticipated_const_folds_post_loop_use() {
 /// acceptance set is unchanged.
 #[test]
 fn bare_assert_over_cmp_chain_protected() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, w) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2355,7 +2356,7 @@ fn bare_assert_over_cmp_chain_protected() {
 /// keeps its genuine operands.
 #[test]
 fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (a, b, ww) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let cmp_location = SourceLocation::new(
@@ -2435,7 +2436,7 @@ fn anticipated_witnessed_cmp_fold_redirects_use_via_hoisted_cast() {
 /// result and the `Cmp` stays alive for it.
 #[test]
 fn anticipated_witnessed_cmp_fold_keeps_excluded_assert_use() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, ww) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();
@@ -2489,7 +2490,7 @@ fn anticipated_witnessed_cmp_fold_keeps_excluded_assert_use() {
 /// condition), not a terminator.
 #[test]
 fn anticipated_witnessed_cmp_fold_from_post_dominating_assert() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (a, b, ww, s) = (
         ssa.fresh_value(),
@@ -2562,7 +2563,7 @@ fn anticipated_witnessed_cmp_fold_from_post_dominating_assert() {
 /// serves both redirected uses.
 #[test]
 fn anticipated_witness_cast_shared_with_asserted_const_channel() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let c_true = ssa.add_const(Constant::int(1, 1));
     let (a, b, w, ww) = (
         ssa.fresh_value(),
@@ -2628,7 +2629,7 @@ fn anticipated_witness_cast_shared_with_asserted_const_channel() {
 /// asserts.
 #[test]
 fn anticipated_witness_cast_unused_is_swept_by_dce() {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let (a, b, ww) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
 
     let f = ssa.get_unique_entrypoint_mut();

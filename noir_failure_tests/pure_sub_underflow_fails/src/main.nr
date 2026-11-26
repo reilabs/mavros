@@ -11,7 +11,9 @@ fn sub_u8(a: u8, b: u8) -> u8 {
     a - b
 }
 
-fn main(w: Field) {
+fn main(w: u8) {
+    let w = w as Field;
+
     // Keeps `main` from folding away entirely; the subtraction below is what is under test.
     assert(w != 0);
     // 1 - 2 borrows. `255` is the wrapped answer, which is what ran clean before the check.

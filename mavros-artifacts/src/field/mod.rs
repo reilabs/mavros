@@ -6,6 +6,9 @@ mod element;
 pub mod goldilocks;
 mod mavros_field;
 
+/// The BN254 scalar field, implemented by arkworks' `Fr`.
+pub type Bn254 = ark_bn254::Fr;
+
 pub use config::{FieldConfig, IntoFieldElement};
 pub use element::FieldElement;
 pub use goldilocks::Goldilocks;

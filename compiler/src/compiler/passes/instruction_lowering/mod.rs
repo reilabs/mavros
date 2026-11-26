@@ -454,7 +454,7 @@ mod tests {
     /// `main(lhs, rhs: WitnessOf<int(bits)>) { shape }` through the integer lowerings alone,
     /// without the carry chain. Returns the lowered program and the original instruction.
     fn lower_alone(shape: SingleCell, bits: usize) -> (HLSSA, OpCode) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let (lhs, rhs, result) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
         let function = ssa.get_unique_entrypoint_mut();
         let entry = function.get_entry_mut();
@@ -505,7 +505,7 @@ mod tests {
         (ssa, op)
     }
 
-    fn past_the_cell() -> usize {
+    fn past_the_bn254_cell() -> usize {
         widest_cell_sum_bits(FieldConfig::bn254()) + 1
     }
 
@@ -551,18 +551,18 @@ mod tests {
     #[test]
     #[should_panic(expected = "sum reached the single-cell lowering")]
     fn a_sum_past_the_cell_is_refused_by_its_single_cell_lowering() {
-        lower_alone(SingleCell::Sum, past_the_cell());
+        lower_alone(SingleCell::Sum, past_the_bn254_cell());
     }
 
     #[test]
     #[should_panic(expected = "ordering reached the single-cell lowering")]
     fn an_ordering_past_the_cell_is_refused_by_its_single_cell_lowering() {
-        lower_alone(SingleCell::Ordering, past_the_cell());
+        lower_alone(SingleCell::Ordering, past_the_bn254_cell());
     }
 
     #[test]
     #[should_panic(expected = "ordering assertion reached the single-cell lowering")]
     fn an_asserted_ordering_past_the_cell_is_refused_by_its_single_cell_lowering() {
-        lower_alone(SingleCell::Assertion, past_the_cell());
+        lower_alone(SingleCell::Assertion, past_the_bn254_cell());
     }
 }

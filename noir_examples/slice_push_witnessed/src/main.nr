@@ -1,5 +1,5 @@
-fn main(a: Field, flag: bool) -> pub Field {
-    let mut s: [Field] = [];
+fn main(a: u8, flag: bool) -> pub u8 {
+    let mut s: [u8] = [];
     if flag {
         s = s.push_back(a);
     }

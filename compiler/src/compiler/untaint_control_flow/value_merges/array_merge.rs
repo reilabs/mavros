@@ -752,6 +752,7 @@ mod tests {
             hlssa::{HLSSA, builder::HLFunctionBuilder},
         },
     };
+    use mavros_artifacts::FieldConfig;
     use mavros_int_semantics::IntBits;
 
     struct Fixture {
@@ -785,7 +786,7 @@ mod tests {
     }
 
     fn fixture(len: usize, count: usize, nested: bool) -> Fixture {
-        let mut ssa = HLSSA::with_main("merge".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "merge".to_string());
         let fid = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(fid);
         let entry = function.get_entry_id();

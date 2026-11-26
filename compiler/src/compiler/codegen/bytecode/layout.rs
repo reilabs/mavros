@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn local_and_global_witness_blobs_have_the_same_layout() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let witness = Type::witness_of(Type::field());
         ssa.set_global_types(vec![
             witness.clone(),

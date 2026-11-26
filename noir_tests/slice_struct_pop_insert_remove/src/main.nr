@@ -6,7 +6,9 @@ struct P {
     b: Field,
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     let s: [P] = [P { a: 1, b: 2 }, P { a: x, b: 4 }];
     let (rest, last) = s.pop_back();
     assert_eq(last.a, x);

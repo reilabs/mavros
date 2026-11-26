@@ -105,11 +105,12 @@ mod tests {
         Type,
         builder::{HLEmitter, HLSSABuilder},
     };
+    use mavros_artifacts::FieldConfig;
 
     #[test]
     fn recursive_cycles_need_a_returning_path() {
         for base_case in [false, true] {
-            let mut ssa = HLSSA::new();
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
             let main = ssa.get_unique_entrypoint_id();
             let callee = ssa.add_function("callee".into());
             let mut builder = HLSSABuilder::new(&mut ssa);
@@ -143,7 +144,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_recursive_function_does_not_reject_main() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let dead = ssa.add_function("dead".into());
         let mut builder = HLSSABuilder::new(&mut ssa);

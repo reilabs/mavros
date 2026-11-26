@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::Field;
+use mavros_artifacts::Bn254;
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions};
 
 fn check(body: &str, expected: &[u64]) {
@@ -12,10 +12,14 @@ fn check(body: &str, expected: &[u64]) {
             type Callback = fn(Field) -> Field;
             fn replace(refs: [&mut Callback; 1]) {{ *refs[0] = dbl; }}
             fn get_ref(refs: [&mut Callback; 1]) -> &mut Callback {{ refs[0] }}
-            {mode}fn main(i: u32, x: Field) -> pub Field {{ {body} }}"
+            {mode}fn main(i: u32, x: u8) -> pub u32 {{
+                let x = x as Field;
+                let result: Field = {{ {body} }};
+                result as u32
+            }}"
         );
         let dir = common::noir_project(&source);
-        let (mut driver, r1cs) = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false)
+        let (mut driver, r1cs) = api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false)
             .unwrap_or_else(|error| panic!("{source}: {error}"));
         let mut binary = api::compile_bytecode(
             &mut driver,

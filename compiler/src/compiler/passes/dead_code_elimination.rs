@@ -454,6 +454,7 @@ impl DCE {
             | OpCode::MkSeq { .. }
             | OpCode::MkSeqOfBlob { .. }
             | OpCode::MkRepeated { .. }
+            | OpCode::IntFromLimbs { .. }
             | OpCode::Cast { .. }
             | OpCode::SExt { .. }
             | OpCode::BitRange { .. }
@@ -1548,7 +1549,7 @@ mod bounds_tests {
                 (3, true, true),
                 (2, true, false),
             ] {
-                let mut ssa = HLSSA::new();
+                let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
                 let main = ssa.get_unique_entrypoint_id();
                 HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
                     // Allocate the consumer block first to make block-map order unsuitable for
@@ -1604,7 +1605,7 @@ mod bounds_tests {
     #[test]
     fn entry_params_survive_unless_r1cs_gen_drops_them() {
         for (config, kept) in [(Config::post_r1c(), 2), (Config::r1cs_gen(), 0)] {
-            let mut ssa = HLSSA::new();
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
             let main = ssa.get_unique_entrypoint_id();
             HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
                 let mut e = b.test_block(b.function.get_entry_id());
@@ -1628,7 +1629,7 @@ mod bounds_tests {
 
     #[test]
     fn unreachable_sequence_definitions_do_not_require_types() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
             b.test_block(b.function.get_entry_id())
@@ -1649,7 +1650,7 @@ mod bounds_tests {
         expected = "cannot rewrite source sequence accesses after witness-slice purification"
     )]
     fn rejects_sequence_rewriting_after_purification_even_after_rebuild() {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.get_unique_entrypoint_mut()
             .get_entry_mut()
             .set_terminator(Terminator::Return(vec![]));
@@ -1665,7 +1666,7 @@ mod bounds_tests {
     #[test]
     fn discard_proven_safe_read_but_keep_possible_boundary_failure() {
         for (len, vector) in [(3, false), (4, false), (3, true), (4, true)] {
-            let mut ssa = HLSSA::new();
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
             let main = ssa.get_unique_entrypoint_id();
             HLSSABuilder::new(&mut ssa).modify_function(main, |b| {
                 let mut e = b.test_block(b.function.get_entry_id());
@@ -1714,7 +1715,7 @@ mod witness_overflow_tests {
 
     /// What a non-rewriting run leaves of a dead operation of each kind, by result.
     fn survivors_of_a_run_after_taint_inference() -> (Vec<ValueId>, Vec<(&'static str, ValueId)>) {
-        let mut ssa = HLSSA::new();
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main = ssa.get_unique_entrypoint_id();
         let mut dead = Vec::new();
         HLSSABuilder::new(&mut ssa).modify_function(main, |b| {

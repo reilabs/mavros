@@ -5,7 +5,12 @@ fn inc(p: &mut Field) {
     *p = *p + 1;
 }
 
-fn main(x: Field, y: Field, ex: pub Field, ey: pub Field) {
+fn main(x: u8, y: u8, ex: pub u8, ey: pub u8) {
+    let x = x as Field;
+    let y = y as Field;
+    let ex = ex as Field;
+    let ey = ey as Field;
+
     let mut a = x;
     inc(&mut a);
     let mut b = y;

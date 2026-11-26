@@ -723,8 +723,9 @@ mod tests {
             SequenceTargetType,
             builder::{HLEmitter, HLSSABuilder},
         },
-        util::test::{falloc, fr},
+        util::test::{bn254_const, falloc},
     };
+    use mavros_artifacts::FieldConfig;
     use mavros_int_semantics::IntBits;
 
     /// Build the analyses on the current IR and run only ArgPromotion (mirrors the pass-manager).
@@ -782,7 +783,7 @@ mod tests {
     /// follow-up Mem2Reg scalarizes both the callee alloc and the caller local.
     #[test]
     fn scalar_param_promotes_in_and_out() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
         {
@@ -794,7 +795,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
                 let v = e.load(p);
-                let one = e.field_const(fr(1));
+                let one = e.field_const(bn254_const(1));
                 let w = e.uadd(v, one);
                 e.store(p, w);
                 e.terminate_return(vec![]);
@@ -805,7 +806,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
                 let r = e.load(a);
@@ -836,7 +837,7 @@ mod tests {
     /// boundary cannot be re-peeled, so the `Ref<Array<Field, N>>` parameter is retained.
     #[test]
     fn array_pointee_is_deferred() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let arr_ty = Type::field().array_of(3);
         let g;
@@ -852,7 +853,7 @@ mod tests {
                     let p = e.add_parameter(arr_ty.ref_of());
                     let arr = e.load(p);
                     let i0 = e.int_const(IntBits::zero(32));
-                    let x = e.field_const(fr(7));
+                    let x = e.field_const(bn254_const(7));
                     let updated = e.array_set(arr, i0, x);
                     e.store(p, updated);
                     e.terminate_return(vec![]);
@@ -862,9 +863,9 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c1 = e.field_const(fr(1));
-                let c2 = e.field_const(fr(2));
-                let c3 = e.field_const(fr(3));
+                let c1 = e.field_const(bn254_const(1));
+                let c2 = e.field_const(bn254_const(2));
+                let c3 = e.field_const(bn254_const(3));
                 let arr = e.mk_seq(
                     vec![c1, c2, c3],
                     SequenceTargetType::Array(3),
@@ -888,7 +889,7 @@ mod tests {
     /// no caller store-back.
     #[test]
     fn read_only_param_promotes_in_only() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
         {
@@ -909,7 +910,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 let r = e.call(g, vec![a], 1)[0];
                 e.terminate_return(vec![r]);
@@ -930,7 +931,7 @@ mod tests {
     /// order.
     #[test]
     fn multi_param_promotes() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
         {
@@ -946,7 +947,7 @@ mod tests {
                 let v1 = e.load(p1);
                 let s = e.uadd(v0, v1);
                 e.store(p0, s);
-                let zero = e.field_const(fr(0));
+                let zero = e.field_const(bn254_const(0));
                 e.store(p1, zero);
                 e.terminate_return(vec![]);
             });
@@ -957,8 +958,8 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
                 let bb = falloc(&mut e);
-                let c1 = e.field_const(fr(1));
-                let c2 = e.field_const(fr(2));
+                let c1 = e.field_const(bn254_const(1));
+                let c2 = e.field_const(bn254_const(2));
                 e.store(a, c1);
                 e.store(bb, c2);
                 e.call(g, vec![a, bb], 0);
@@ -987,7 +988,7 @@ mod tests {
     /// locals, so the parameter promotes and both call sites are rewritten.
     #[test]
     fn two_call_sites_promote() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let (g, h);
         {
@@ -1000,7 +1001,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
                 let v = e.load(p);
-                let one = e.field_const(fr(1));
+                let one = e.field_const(bn254_const(1));
                 let w = e.uadd(v, one);
                 e.store(p, w);
                 e.terminate_return(vec![]);
@@ -1010,7 +1011,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let c = falloc(&mut e);
-                let nine = e.field_const(fr(9));
+                let nine = e.field_const(bn254_const(9));
                 e.store(c, nine);
                 e.call(g, vec![c], 0);
                 e.terminate_return(vec![]);
@@ -1020,7 +1021,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let five = e.field_const(fr(5));
+                let five = e.field_const(bn254_const(5));
                 e.store(a, five);
                 e.call(g, vec![a], 0);
                 e.call(h, vec![], 0);
@@ -1041,7 +1042,7 @@ mod tests {
     /// one-shot pass.
     #[test]
     fn recursion_through_local_promotes() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
         {
@@ -1065,7 +1066,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let z = e.field_const(fr(0));
+                let z = e.field_const(bn254_const(0));
                 e.store(a, z);
                 e.call(g, vec![a], 0);
                 e.terminate_return(vec![]);
@@ -1089,7 +1090,7 @@ mod tests {
     /// is used as a non-pointer operand (C3).
     #[test]
     fn leaking_param_is_retained() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
@@ -1109,7 +1110,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
                 e.terminate_return(vec![]);
@@ -1126,7 +1127,7 @@ mod tests {
     /// (by-value in/out would lose the shared-cell semantics).
     #[test]
     fn aliasing_args_are_retained() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
         {
@@ -1142,7 +1143,7 @@ mod tests {
                 let v1 = e.load(p1);
                 let s = e.uadd(v0, v1);
                 e.store(p0, s);
-                let zero = e.field_const(fr(0));
+                let zero = e.field_const(bn254_const(0));
                 e.store(p1, zero);
                 e.terminate_return(vec![]);
             });
@@ -1151,7 +1152,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 e.call(g, vec![a, a], 0);
                 e.terminate_return(vec![]);
@@ -1168,7 +1169,7 @@ mod tests {
     /// pointee makes the type-directed C4 check conservatively retain the parameter.
     #[test]
     fn refref_coarg_blocks_promotion() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
         {
@@ -1181,7 +1182,7 @@ mod tests {
                 let p0 = e.add_parameter(Type::field().ref_of());
                 let _pp = e.add_parameter(Type::field().ref_of().ref_of());
                 let v = e.load(p0);
-                let one = e.field_const(fr(1));
+                let one = e.field_const(bn254_const(1));
                 let w = e.uadd(v, one);
                 e.store(p0, w);
                 e.terminate_return(vec![]);
@@ -1191,7 +1192,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 let rr = e.alloc(a); // Ref<Ref<Field>>, seeded with `a`
                 e.store(rr, a);
@@ -1210,7 +1211,7 @@ mod tests {
     /// Load/Store pointer) is retained (C3 / onward-passing deferral).
     #[test]
     fn onward_passed_param_is_retained() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().ref_of()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let (g, sink);
@@ -1239,7 +1240,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
                 e.terminate_return(vec![]);
@@ -1261,7 +1262,7 @@ mod tests {
     /// call sites can be enumerated.
     #[test]
     fn address_taken_callee_is_retained() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let g;
         {
@@ -1273,7 +1274,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let p = e.add_parameter(Type::field().ref_of());
                 let v = e.load(p);
-                let one = e.field_const(fr(1));
+                let one = e.field_const(bn254_const(1));
                 let w = e.uadd(v, one);
                 e.store(p, w);
                 e.terminate_return(vec![]);
@@ -1284,7 +1285,7 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let _fp = e.emit_constant(Constant::FnPtr(g));
                 let a = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(a, c);
                 e.call(g, vec![a], 0);
                 e.terminate_return(vec![]);

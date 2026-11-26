@@ -9,7 +9,10 @@ fn add_into(dst: &mut Field, src: &mut Field) {
     *dst = *dst + *src;
 }
 
-fn main(x: Field, expected: pub Field) {
+fn main(x: u8, expected: pub u8) {
+    let x = x as Field;
+    let expected = expected as Field;
+
     let mut v = x;
     add_into(&mut v, &mut v);
     assert_eq(v, expected);

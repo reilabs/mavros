@@ -66,11 +66,19 @@ both reports and combines them with
 `test-runner --merge-status STATUS-bn254.md STATUS-goldilocks.md --output STATUS.md`, then uses the
 usual baseline comparisons and result posting. Merging requires both fields and matching test lists.
 
+A package under `noir_failure_tests/` is expected to fail. One the compiler should refuse holds an
+`expected_error.txt` naming the error's text, which the refusal must say on every field; a program
+that compiles, or a refusal for another reason, then fails the test. A fixture the runner cannot
+mark with a file, such as one of Noir's programs, takes its expectation from the override tables in
+`compiler/src/bin/test_runner/expectations.rs`, which the runner checks against the discovered
+tests. To run a few tests into a partial report, pass `--only <test>` (repeatable) with
+`--output <path>`.
+
 To investigate one package and field, run
-`cargo run --bin test-runner -- --run-single <package-path>` inside the devshell. `--run-single` and
-`--check-determinism` default take `--field` to select a field, defaulting to `bn254` if not
-specified. Library callers name the field as the `FieldConfig` they pass to
-`Driver::run_noir_compiler`, or as the type parameter of `mavros_compiler::api`'s functions.
+`cargo run --bin test-runner -- --run-single <package-path> --field <field>` inside the devshell.
+`--check-determinism` takes `--field` too, and checks every field without it. Library callers name
+the field as the `FieldConfig` they pass to `Driver::run_noir_compiler`, or as the type parameter of
+`mavros_compiler::api`'s functions.
 
 `make unit-test` uses [cargo-nextest](https://nexte.st/), pinned by the Nix flake, to schedule tests
 across all workspace test binaries in parallel. It first builds the WASM runtime once and shares its

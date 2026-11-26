@@ -47,19 +47,26 @@ fn function(id: u32, body: Expression, return_type: AstType) -> AstFunction {
     }
 }
 
-fn try_lower(functions: Vec<AstFunction>) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
-    HLSSA::from_program(&Program {
-        functions,
-        ..Default::default()
-    })
+fn try_lower(
+    field: FieldConfig,
+    functions: Vec<AstFunction>,
+) -> Result<(HLSSA, bool), Vec<Diagnostic>> {
+    HLSSA::from_program_with_file_manager(
+        &Program {
+            functions,
+            ..Default::default()
+        },
+        None,
+        field,
+    )
 }
 
-fn lower(functions: Vec<AstFunction>) -> HLSSA {
-    try_lower(functions).unwrap().0
+fn lower(field: FieldConfig, functions: Vec<AstFunction>) -> HLSSA {
+    try_lower(field, functions).unwrap().0
 }
 
-fn assert_refused(functions: Vec<AstFunction>, message: &str) {
-    let Err(diagnostics) = try_lower(functions) else {
+fn assert_refused(field: FieldConfig, functions: Vec<AstFunction>, message: &str) {
+    let Err(diagnostics) = try_lower(field, functions) else {
         panic!("expected lowering to refuse the program");
     };
     let rendered = render_all(&diagnostics);
@@ -72,6 +79,7 @@ fn assert_refused(functions: Vec<AstFunction>, message: &str) {
 #[test]
 fn oracle_identifiers_are_refused_without_a_call() {
     assert_refused(
+        FieldConfig::bn254(),
         vec![function(
             0,
             ident(
@@ -116,6 +124,7 @@ fn oracle_function_values_are_refused() {
             )),
         });
         assert_refused(
+            FieldConfig::bn254(),
             vec![function(
                 0,
                 Expression::Block(vec![binding, unit()]),
@@ -131,6 +140,7 @@ fn empty_folded_functions_are_refused_without_source_locations() {
     let mut folded = function(0, unit(), AstType::Unit);
     folded.inline_type = InlineType::Fold;
     assert_refused(
+        FieldConfig::bn254(),
         vec![folded],
         "error: #[fold] functions are not supported by Mavros",
     );
@@ -208,7 +218,7 @@ fn unit_bodies_and_empty_structs_have_one_typed_result_until_tuple_elision() {
     ];
     for (name, body, return_type, after) in cases {
         let expected = TypeConverter::new().convert_type(&return_type);
-        let mut ssa = lower(vec![function(0, body, return_type)]);
+        let mut ssa = lower(FieldConfig::bn254(), vec![function(0, body, return_type)]);
         assert_return_shape(&ssa, &[expected.clone()]);
         PassManager::new(name.into(), false, vec![Box::new(ElideTuples::new())]).run(&mut ssa);
         assert_return_shape(&ssa, &after);
@@ -283,7 +293,7 @@ fn nested_statement_aggregate_types_match_their_values() {
     for (value, typ) in cases {
         let body = Expression::Tuple(vec![value, Expression::Literal(Literal::Bool(true))]);
         let typ = AstType::Tuple(vec![typ, AstType::Bool]);
-        let ssa = lower(vec![function(0, body, typ.clone())]);
+        let ssa = lower(FieldConfig::bn254(), vec![function(0, body, typ.clone())]);
         assert_return_shape(&ssa, &[TypeConverter::new().convert_type(&typ)]);
         let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
         for (fid, f) in ssa.iter_functions() {
@@ -309,10 +319,10 @@ fn nested_statement_aggregate_types_match_their_values() {
 #[test]
 fn direct_and_indirect_unit_calls_match_their_signatures() {
     for indirect in [false, true] {
-        let mut ssa = lower(vec![
-            function(0, unit_call(indirect), AstType::Unit),
-            identity(),
-        ]);
+        let mut ssa = lower(
+            FieldConfig::bn254(),
+            vec![function(0, unit_call(indirect), AstType::Unit), identity()],
+        );
         let unit_type = Type::tuple_of(vec![]);
         assert_return_shape(&ssa, &[unit_type.clone()]);
         let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
@@ -394,10 +404,13 @@ fn unit_sequence_elements_are_typed_values_and_calls_are_not_duplicated() {
             typ: repeated.clone(),
         }),
     ]);
-    let ssa = lower(vec![
-        function(0, body, AstType::Tuple(vec![array, vector, repeated])),
-        identity(),
-    ]);
+    let ssa = lower(
+        FieldConfig::bn254(),
+        vec![
+            function(0, body, AstType::Tuple(vec![array, vector, repeated])),
+            identity(),
+        ],
+    );
     let main = ssa.get_unique_entrypoint_id();
     let types = Types::new().run(&ssa, &FlowAnalysis::run(&ssa));
     let unit_type = Type::tuple_of(vec![]);

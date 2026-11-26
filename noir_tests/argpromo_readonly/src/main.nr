@@ -5,7 +5,10 @@ fn get(p: &mut Field) -> Field {
     *p
 }
 
-fn main(x: Field, expected: pub Field) {
+fn main(x: u8, expected: pub u8) {
+    let x = x as Field;
+    let expected = expected as Field;
+
     let mut v = x + 1;
     let r = get(&mut v);
     assert_eq(r, expected);

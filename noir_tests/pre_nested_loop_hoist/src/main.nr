@@ -9,7 +9,10 @@ fn combine(x: Field, y: Field) -> Field {
     x * y + 1
 }
 
-fn main(x: Field, y: Field) {
+fn main(x: u8, y: u8) {
+    let x = x as Field;
+    let y = y as Field;
+
     let mut acc: Field = 0;
     for _j in 0..10 {
         let t = combine(x, y);

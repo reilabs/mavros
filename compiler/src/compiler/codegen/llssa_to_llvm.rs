@@ -2623,7 +2623,7 @@ mod tests {
     /// `FieldEq` compares every storage limb, so elements equal in all but the last are unequal.
     #[test]
     fn a_field_equality_compares_every_limb() {
-        let mut ssa = LLSSA::with_main("field_eq".to_string());
+        let mut ssa = LLSSA::with_main(FieldConfig::bn254(), "field_eq".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let field_eq = ssa.add_function("field_eq".to_string());
         ssa.get_function_mut(field_eq).add_return_type(Type::i1());
@@ -3674,7 +3674,7 @@ mod tests {
 
     #[test]
     fn emits_instruction_source_locations_as_llvm_debug_info() {
-        let mut ssa = LLSSA::with_main("located_main".to_string());
+        let mut ssa = LLSSA::with_main(FieldConfig::bn254(), "located_main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let location = SourceLocation::new(
             "/tmp/mavros-project/src/main.nr",

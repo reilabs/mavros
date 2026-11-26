@@ -8,7 +8,9 @@ unconstrained fn sqrt(x: Field) -> Field {
     i as Field
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     let root = unsafe { sqrt(x) };
     assert(root * root == x);
 }

@@ -81,6 +81,14 @@ impl Diagnostic {
         &self.message
     }
 
+    /// Whether the diagnostic's message, label or one of its notes contains `text`.
+    pub fn says(&self, text: &str) -> bool {
+        std::iter::once(self.message.as_str())
+            .chain(self.label.as_deref())
+            .chain(self.notes.iter().map(String::as_str))
+            .any(|said| said.contains(text))
+    }
+
     /// Render against [`Self::source`] where the producer supplied it and against `sources`
     /// otherwise, falling back to [`Self::header`] wherever the snippet cannot be drawn.
     fn render(&self, sources: &mut SourceCache) -> String {

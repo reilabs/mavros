@@ -1386,7 +1386,7 @@ mod tests {
         },
     };
 
-    fn fr(n: u64) -> Field {
+    fn bn254_const(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
     }
 
@@ -1454,18 +1454,18 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field().slice_of()],
                 |e| {
-                    let c = e.field_const(fr(7));
+                    let c = e.field_const(bn254_const(7));
                     vec![e.mk_seq(vec![c], SequenceTargetType::Slice, Type::field())]
                 },
                 |e| {
-                    let c1 = e.field_const(fr(1));
-                    let c2 = e.field_const(fr(2));
+                    let c1 = e.field_const(bn254_const(1));
+                    let c2 = e.field_const(bn254_const(2));
                     vec![e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field())]
                 },
             );
@@ -1498,7 +1498,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let s = e.add_parameter(Type::field().slice_of());
-            let c7 = e.field_const(fr(7));
+            let c7 = e.field_const(bn254_const(7));
             let pushed = e.slice_push(s, vec![c7], SliceOpDir::Back);
             e.terminate_return(vec![pushed]);
         });
@@ -1509,9 +1509,9 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
-            let c1 = e.field_const(fr(1));
+            let c1 = e.field_const(bn254_const(1));
             let s = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
 
             let merge = e.build_if_else(
@@ -1552,7 +1552,7 @@ mod tests {
             let entry = b.function.get_entry_id();
             let mut e = b.test_block(entry);
             let s = e.add_parameter(Type::field().slice_of());
-            let c7 = e.field_const(fr(7));
+            let c7 = e.field_const(bn254_const(7));
             let pushed = e.slice_push(s, vec![c7], SliceOpDir::Back);
             e.terminate_return(vec![pushed]);
         });
@@ -1582,9 +1582,9 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
-            let c1 = e.field_const(fr(1));
+            let c1 = e.field_const(bn254_const(1));
             let s = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
 
             // The pure-length site.
@@ -1620,7 +1620,7 @@ mod tests {
     /// window reached `Return` and hit "wl slice tuple flows into a pure".
     #[test]
     fn window_out_of_a_pure_return_slot_lifts_the_slot() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_boundary_skew(&mut ssa, false);
         run_pass(&mut ssa);
 
@@ -1646,7 +1646,7 @@ mod tests {
     /// crashed `Types` with a bare "Error running opcode Call { .. }".
     #[test]
     fn window_through_a_pure_ref_cell_widens_the_caller() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_boundary_skew(&mut ssa, true);
         run_pass(&mut ssa);
 
@@ -1663,7 +1663,7 @@ mod tests {
 
     #[test]
     fn window_into_an_unconstrained_only_callee_lifts_its_param() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let sink_id = ssa.add_function("sink".to_string());
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(sink_id, |b| {
@@ -1706,10 +1706,10 @@ mod tests {
     /// as the result's own shape calls it pure here (see [`build_joined_lift_skew`]).
     #[test]
     fn window_through_nop_cast_stays_a_window() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_joined_lift_skew(&mut ssa, |e, t| {
             let aliased = e.cast_to(CastTarget::Nop, t);
-            let c2 = e.field_const(fr(2));
+            let c2 = e.field_const(bn254_const(2));
             e.slice_push(aliased, vec![c2], SliceOpDir::Back)
         });
         run_pass(&mut ssa);
@@ -1732,7 +1732,7 @@ mod tests {
     /// `run_pass` re-runs `Types` over the result, so type-checking is the assertion.
     #[test]
     fn window_into_a_pure_alloc_slot_widens_the_cell() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_joined_lift_skew(&mut ssa, |e, t| {
             let p = e.alloc(t);
             e.load(p)
@@ -1756,9 +1756,9 @@ mod tests {
     /// `run_pass` re-runs `Types` over the result, so type-checking is half the assertion.
     #[test]
     fn window_select_arm_widens_the_pure_result() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_joined_lift_skew(&mut ssa, |e, t| {
-            let c1 = e.field_const(fr(1));
+            let c1 = e.field_const(bn254_const(1));
             let s = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
             let pure_cond = e.eq(c1, c1);
             e.select(pure_cond, t, s)
@@ -1814,7 +1814,7 @@ mod tests {
     /// their pure jump arguments, and `SliceLen` reads `log_len` via projection.
     #[test]
     fn differing_length_merge_without_pushes_purifies_the_merge() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_differing_length_merge(&mut ssa, |e, merged| e.slice_len(merged));
         run_pass(&mut ssa);
 
@@ -1843,7 +1843,7 @@ mod tests {
     /// the push op itself survives untouched; wl-ness materializes at the merge.
     #[test]
     fn guarded_push_survives_pure_and_len_projects() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -1852,15 +1852,15 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
-            let c1 = e.field_const(fr(1));
+            let c1 = e.field_const(bn254_const(1));
             let s = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
             let merge = e.build_if_else(
                 cond,
                 vec![Type::field().slice_of()],
                 |e| {
-                    let c2 = e.field_const(fr(2));
+                    let c2 = e.field_const(bn254_const(2));
                     vec![e.slice_push(s, vec![c2], SliceOpDir::Back)]
                 },
                 |_e| vec![s],
@@ -1889,9 +1889,9 @@ mod tests {
     /// writes the value at the witness cursor `start + log_len` via `ArraySet`.
     #[test]
     fn push_onto_wl_slice_writes_at_witness_cursor() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_differing_length_merge(&mut ssa, |e, merged| {
-            let c9 = e.field_const(fr(9));
+            let c9 = e.field_const(bn254_const(9));
             let pushed = e.slice_push(merged, vec![c9], SliceOpDir::Back);
             e.slice_len(pushed)
         });
@@ -1915,10 +1915,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "Guard encountered before witness typing")]
     fn guard_before_witness_typing_is_an_ice() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         build_differing_length_merge(&mut ssa, |e, merged| {
-            let c9 = e.field_const(fr(9));
-            let zero = e.field_const(fr(0));
+            let c9 = e.field_const(bn254_const(9));
+            let zero = e.field_const(bn254_const(0));
             let gcond = e.eq(c9, zero);
             let pushed = e.fresh_value();
             e.emit(OpCode::Guard {
@@ -1944,7 +1944,7 @@ mod tests {
     /// reachable only from a hand-built program and this test is its only coverage.
     #[test]
     fn wl_select_materializes_tuples_for_both_arms() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut sb = HLSSABuilder::new(&mut ssa);
         sb.modify_function(main_id, |b| {
@@ -1953,10 +1953,10 @@ mod tests {
             let mut e = b.test_block(entry);
             let x = e.add_parameter(Type::field());
             let w = e.write_witness(x);
-            let zero = e.field_const(fr(0));
+            let zero = e.field_const(bn254_const(0));
             let cond = e.eq(w, zero);
-            let c1 = e.field_const(fr(1));
-            let c2 = e.field_const(fr(2));
+            let c1 = e.field_const(bn254_const(1));
+            let c2 = e.field_const(bn254_const(2));
             let s1 = e.mk_seq(vec![c1], SequenceTargetType::Slice, Type::field());
             let s2 = e.mk_seq(vec![c1, c2], SequenceTargetType::Slice, Type::field());
             let m = e.select(cond, s1, s2);

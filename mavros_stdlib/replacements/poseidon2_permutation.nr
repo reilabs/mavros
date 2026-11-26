@@ -54,6 +54,11 @@ pub fn mds_4(mut state: [Field; 4]) -> [Field; 4] {
 // Poseidon2 BN254 Core
 // ====================
 
+// FIELD-ASSUMPTION: the round constants, the internal diagonals (`internal_diag*`) and the round
+// counts are BN254's Poseidon2 parameters, chosen for its prime and the S-box `x^5`. `x^5` is a
+// permutation only where 5 does not divide `p - 1`, which fails on Goldilocks, so another field
+// needs a parameter set generated for it.
+
 pub struct Poseidon2Bn254Config<let T: u32, let R: u32> {
     first_full_rc: [[Field; T]; 4],
     partial_rc: [Field; R],

@@ -1,13 +1,13 @@
 mod common;
 
-use mavros_artifacts::Field;
+use mavros_artifacts::Bn254;
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions};
 
 /// Check actual execution and the declared return, not just successful SSA construction.
 fn check(source: &str, inputs: &[&str]) {
     let dir = common::noir_project(source);
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {
@@ -37,7 +37,7 @@ fn break_in_while_condition_preserves_the_enclosing_loops_live_values() {
     // mutating a copy of it. The break belongs to the outer while.
     check(
         r#"
-unconstrained fn main(cond: bool) -> pub [Field; 2] {
+unconstrained fn main(cond: bool) -> pub [u8; 2] {
     let mut x = [1, 2];
     let mut z = [0, 0];
     let mut i = 0;

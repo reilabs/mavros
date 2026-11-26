@@ -5,7 +5,10 @@ use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
     passes::wide_witness_ints::rewriter::lowers_a_gadget,
-    ssa::{BlockId, FunctionId, hlssa::HLSSA},
+    ssa::{
+        BlockId, FunctionId,
+        hlssa::{HLSSA, OpCode},
+    },
 };
 pub struct WideWitnessInts {
     /// The widest limb a value may be cut at.
@@ -54,14 +57,17 @@ impl Pass for WideWitnessInts {
             let value_map = plan_function(ssa, fid, &reachable, type_info, limb_config);
             // A function with no limbs can still hold an operation whose operands each fit an
             // element but whose sum or product does not; the chain, schoolbook and division lower
-            // those too.
+            // those too, and every pure integer spelled by its limbs is recombined here.
             let fti = type_info.get_function(fid);
             let lowers_here = || {
                 reachable.iter().any(|bid| {
                     ssa.get_function(fid)
                         .get_block(*bid)
                         .get_instructions()
-                        .any(|op| lowers_a_gadget(op, fti, field))
+                        .any(|op| {
+                            matches!(op, OpCode::IntFromLimbs { .. })
+                                || lowers_a_gadget(op, fti, field)
+                        })
                 })
             };
             let reads_a_moved_global = || {

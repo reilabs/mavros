@@ -1,6 +1,6 @@
 mod common;
 
-use mavros_artifacts::{Field, FieldConfig};
+use mavros_artifacts::{Bn254, FieldConfig};
 use mavros_compiler::{abi_helpers, api, compiler::codegen::CodeGenOptions, driver::Error};
 
 /// Exercise source parsing, monomorphization, input decoding, witness generation and R1CS.
@@ -16,7 +16,7 @@ fn check(source: &str, inputs: &str) {
         )
         .unwrap();
     }
-    let (mut driver, r1cs) = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false)
+    let (mut driver, r1cs) = api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false)
         .unwrap_or_else(|error| panic!("{source}: {error:?}"));
     let mut binary = api::compile_bytecode(
         &mut driver,
@@ -115,9 +115,17 @@ return = ["16", "4503603922337792"]"#,
 
 #[test]
 fn field_identity_casts_preserve_the_top_field_bit() {
+    let top: num_bigint::BigUint =
+        "21888242871839275222246405745257275088548364400416034343698204186575808495616"
+            .parse()
+            .unwrap();
+    let bytes = common::le_bytes(&top, 32);
     check_both_modes(
-        "fn main(x: Field) -> pub Field { x as Field }",
-        "x = '21888242871839275222246405745257275088548364400416034343698204186575808495616'\nreturn = '21888242871839275222246405745257275088548364400416034343698204186575808495616'",
+        "fn main(x: [u8; 32]) -> pub [u8; 32] {
+            let x = Field::from_le_bytes_checked(x);
+            (x as Field).to_le_bytes()
+        }",
+        &format!("x = {bytes}\nreturn = {bytes}"),
     );
 }
 
@@ -151,12 +159,15 @@ fn field_casts_to_wide_integers_preserve_the_canonical_value() {
             let high = &value >> 128;
             check_both_modes(
                 &format!(
-                    "fn main(x: Field) -> pub [u128; 2] {{
-                        let wide = x as {target};
+                    "fn main(x: [u8; 32]) -> pub [u128; 2] {{
+                        let wide = Field::from_le_bytes_checked(x) as {target};
                         [wide as u128, (wide >> 128) as u128]
                     }}"
                 ),
-                &format!("x = '{decimal}'\nreturn = ['{low}', '{high}']"),
+                &format!(
+                    "x = {}\nreturn = ['{low}', '{high}']",
+                    common::le_bytes(&value, 32)
+                ),
             );
         }
     }
@@ -214,7 +225,8 @@ fn field_cast_differential(
     let source = format!(
         "comptime fn interpreted(x: Field) -> {ty} {{ ({offset} + x) as {ty} }}
         unconstrained fn unconstrained_cast(x: Field) -> {ty} {{ x as {ty} }}
-        fn main(xs: [Field; {count}]) -> pub Field {{
+        fn main(xs: [[u8; 32]; {count}]) -> pub u8 {{
+            let xs = xs.map(|x| Field::from_le_bytes_checked(x));
             let wants: [{ty}; {count}] = comptime {{ [{interpreted}] }};
             {body}
             1
@@ -222,7 +234,7 @@ fn field_cast_differential(
     );
     let inputs = values
         .iter()
-        .map(|value| format!("'{value}'"))
+        .map(|value| common::le_bytes(value, 32))
         .collect::<Vec<_>>()
         .join(", ");
     (source, format!("xs = [{inputs}]\nreturn = '1'"))
@@ -232,7 +244,7 @@ fn field_cast_differential(
 /// generation or the constraints otherwise.
 fn assert_cast_refused(lane: CastLane, source: &str, inputs: &str) {
     let dir = common::noir_project(source);
-    let compiled = api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false);
+    let compiled = api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false);
     if let CastLane::Constant = lane {
         let error = compiled.err().unwrap_or_else(|| panic!("{source}"));
         assert!(
@@ -308,7 +320,8 @@ fn field_casts_agree_with_noirs_comptime_interpreter() {
 #[test]
 fn wide_match_literals_and_signed_literals_keep_their_value() {
     check(
-        r#"fn main(x: Field, n: i64) -> pub [u64; 2] {
+        r#"fn main(x: [u8; 32], n: i64) -> pub [u64; 2] {
+            let x = Field::from_le_bytes_checked(x);
             let tag = match x as u200 {
                 0x1000000000000000000000000000000000000000000000 => 7,
                 _ => 9,
@@ -317,7 +330,10 @@ fn wide_match_literals_and_signed_literals_keep_their_value() {
             assert((-7 as Field) + 7 == 0);
             [tag, (n as u64)]
         }"#,
-        "x = '0x1000000000000000000000000000000000000000000000'\nn = '-42'\nreturn = [7, '18446744073709551574']",
+        &format!(
+            "x = {}\nn = '-42'\nreturn = [7, '18446744073709551574']",
+            common::le_bytes(&(num_bigint::BigUint::from(1u8) << 180u32), 32)
+        ),
     );
 }
 
@@ -359,7 +375,7 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
             }}"
         ));
         let (mut driver, r1cs) =
-            api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+            api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
         let binary = api::compile_bytecode(
             &mut driver,
             CodeGenOptions {
@@ -405,7 +421,7 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
 fn wide_abi_checks_input_ranges_and_declared_returns() {
     let dir = common::noir_project(include_str!("../../noir_tests/bigint_abi/src/main.nr"));
     let (mut driver, r1cs) =
-        api::compile_to_r1cs::<Field>(dir.path().to_path_buf(), false).unwrap();
+        api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
     let mut binary = api::compile_bytecode(
         &mut driver,
         CodeGenOptions {
@@ -446,7 +462,7 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         result.out_wit_post_comm.as_slice(),
     ]
     .concat();
-    forged[high_column] = mavros_artifacts::Field::from(wrong_high);
+    forged[high_column] = Bn254::from(wrong_high);
     assert!(
         r1cs.unsatisfied_constraint(&forged).is_some(),
         "wrong high return limb must violate R1CS"
@@ -458,50 +474,84 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         format!("a = ['{out_of_range}', 0]\nb = [0, 0]\nreturn = [0, 0]"),
     )
     .unwrap();
-    assert!(api::read_prover_inputs::<Field>(dir.path(), driver.abi()).is_err());
+    assert!(api::read_prover_inputs::<Bn254>(dir.path(), driver.abi()).is_err());
 }
 
 /// Each refusal is matched by the diagnostic the rule under test emits, so that a program that
 /// fails for some other reason, a typo say, does not pass for the rule.
 #[test]
-fn frontend_rejects_widths_and_entry_points_outside_the_supported_domain() {
-    const NOT_LOWERABLE: &str =
-        "Integers the circuit backend does not lower are not valid entry point types. Found: ";
+fn frontend_rejects_widths_outside_the_language() {
     for (source, expected) in [
-        ("fn main(x: u24) {}", format!("{NOT_LOWERABLE}u24")),
-        ("fn main(x: u200) {}", format!("{NOT_LOWERABLE}u200")),
-        ("fn main(x: u253) {}", format!("{NOT_LOWERABLE}u253")),
-        ("fn main(x: i33) {}", format!("{NOT_LOWERABLE}i33")),
-        ("fn main(x: i65) {}", format!("{NOT_LOWERABLE}i65")),
-        ("fn main(x: [u200; 2]) {}", format!("{NOT_LOWERABLE}u200")),
-        (
-            "fn main() -> pub u200 { 0 }",
-            format!("{NOT_LOWERABLE}u200"),
-        ),
-        ("fn main(x: u256) {}", format!("{NOT_LOWERABLE}u256")),
-        (
-            "fn main() -> pub u256 { 0 }",
-            format!("{NOT_LOWERABLE}u256"),
-        ),
         (
             "fn main(x: u64) { let _: u16385 = x as u16385; }",
-            "`u16385` is not a supported integer type".to_string(),
+            "`u16385` is not a supported integer type",
         ),
         (
             "fn main(x: u64) { let _: u1 = x as u1; }",
-            "`u1` has been removed, use `bool` instead".to_string(),
+            "`u1` has been removed, use `bool` instead",
         ),
         // These errors arise only after the generic width is bound in monomorphization.
         (
             "fn bad<let N: u32>() -> u<N> { 0 } fn main() { assert(bad::<16385>() == 0); }",
-            "`u16385` is not a supported integer type".to_string(),
+            "`u16385` is not a supported integer type",
         ),
         (
             "fn bad<let N: u32>() -> u<N> { 256 } fn main() { assert(bad::<8>() == 0); }",
-            "Integer literal does not fit its type".to_string(),
+            "Integer literal does not fit its type",
         ),
     ] {
-        common::assert_frontend_refused(source, &expected);
+        common::assert_frontend_refused(FieldConfig::bn254(), source, expected);
+    }
+}
+
+/// An entry-point integer of any width up to `widest_injective_int_bits` crosses in one element on
+/// bn254, whether or not the circuit backend lowers that width.
+#[test]
+fn entry_integers_of_any_width_up_to_the_field_cross() {
+    let source = "fn main(x: u24, y: i33, z: [u200; 2], w: pub u253) -> pub u200 {
+            assert(x + 1 == 16777215);
+            assert(y - 1 == -4294967296);
+            assert(w != 0);
+            z[0] + z[1]
+        }";
+    check_both_modes(
+        source,
+        "x = 16777214\ny = -4294967295\nw = 3\n\
+         z = ['0x80000000000000000000000000000000000000000000000000', 1]\n\
+         return = '0x80000000000000000000000000000000000000000000000001'",
+    );
+    let compiled = common::compile::<Bn254>(source);
+    let manifest = compiled.driver.witness_manifest(&compiled.r1cs).unwrap();
+    let widths: Vec<_> = manifest
+        .parameters
+        .iter()
+        .map(|param| param.width)
+        .collect();
+    assert_eq!(widths, [1, 1, 2, 1], "one element per integer");
+    assert_eq!(manifest.returns.unwrap().len, 1);
+}
+
+/// An entry-point return wider than one element carries is published as its limbs, computed from a
+/// parameter or built from constants, and is checked against the `return` the inputs declare.
+#[test]
+fn entry_returns_wider_than_an_element_cross_as_limbs() {
+    // Past the modulus, with limbs that differ, so a limb out of place shows.
+    let past_the_modulus = "0x8000000000000000000000000000000400000000000000000000000000000005";
+    for (source, inputs) in [
+        (
+            "fn main(x: u256) -> pub u256 { x }".to_string(),
+            format!("x = '{past_the_modulus}'\nreturn = '{past_the_modulus}'"),
+        ),
+        (
+            format!("fn main() -> pub u256 {{ {past_the_modulus} }}"),
+            format!("return = '{past_the_modulus}'"),
+        ),
+        (
+            "fn main(x: i300) -> pub (u8, [i300; 2]) { (7, [x, -x]) }".to_string(),
+            "x = -5\nreturn = [7, [-5, 5]]".to_string(),
+        ),
+    ] {
+        check_both_modes(&source, &inputs);
     }
 }
 
@@ -532,7 +582,7 @@ fn frontend_refuses_a_cast_into_field_past_the_modulus() {
             SIGNED.to_string(),
         ),
     ] {
-        common::assert_frontend_refused(source, &expected);
+        common::assert_frontend_refused(FieldConfig::bn254(), source, &expected);
     }
 
     let dir = common::noir_project("fn main() { let x: u253 = 5; let _ = x as Field; }");

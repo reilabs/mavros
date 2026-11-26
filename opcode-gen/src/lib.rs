@@ -487,7 +487,10 @@ struct OpCodeDef {
     is_raw: bool,
     inputs: Vec<Input>,
 
-    /// The type a `Field` operand has: `Field` for a plain opcode, the field's type for a copy.
+    /// The type a field operand has: the field's type for one field's copy of a field opcode. A
+    /// plain opcode has no field operand (no operand type parses as one), and the declared template
+    /// of a field opcode is asserted to have none on the host side, so both leave `field_ty` empty
+    /// and never emit it.
     field_ty: proc_macro2::TokenStream,
 
     /// Whether `fn_name` is generic over the field, so the handler names `field_ty` explicitly.
@@ -687,20 +690,20 @@ fn expect_ident(pat: &syn::Pat) -> Ident {
 fn parse_signature(is_raw: bool, is_field: bool, sig: &syn::Signature) -> OpCodeDef {
     let name = sig.ident.to_string();
     let type_params = sig.generics.type_params().collect::<Vec<_>>();
-    // The name a field operand's type is spelled with: the plain `Field`, or a field opcode's
-    // type parameter.
+    // The name a field operand's type is spelled with: a field opcode's type parameter. A plain
+    // opcode has no field, so no operand type names one.
     let field_name = if is_field {
         assert!(
             type_params.len() == 1,
             "field opcode `{name}` must be generic over exactly one type parameter, its field"
         );
-        type_params[0].ident.to_string()
+        Some(type_params[0].ident.to_string())
     } else {
         assert!(
             type_params.is_empty(),
             "opcode `{name}` is generic, so it must be a #[field_opcode]"
         );
-        "Field".to_string()
+        None
     };
 
     let mut inputs = vec![];
@@ -711,7 +714,7 @@ fn parse_signature(is_raw: bool, is_field: bool, sig: &syn::Signature) -> OpCode
                 panic!("receiver arguments are not allowed in the interpreter definition")
             }
             FnArg::Typed(pat) => {
-                let input = parse_pat_type(pat, &field_name);
+                let input = parse_pat_type(pat, field_name.as_deref());
                 inputs.push(input);
             }
         }
@@ -721,7 +724,7 @@ fn parse_signature(is_raw: bool, is_field: bool, sig: &syn::Signature) -> OpCode
         name,
         is_raw,
         inputs,
-        field_ty: quote! { Field },
+        field_ty: proc_macro2::TokenStream::new(),
         generic: false,
         field: is_field.then_some(0),
         cfg: None,
@@ -753,7 +756,7 @@ fn check_slice_widths(def: &OpCodeDef) {
     }
 }
 
-fn parse_pat_type(pat: &syn::PatType, field_name: &str) -> Input {
+fn parse_pat_type(pat: &syn::PatType, field_name: Option<&str>) -> Input {
     if pat.attrs.len() > 1 {
         panic!("only one attribute is allowed in the interpreter definition");
     }
@@ -773,7 +776,7 @@ fn parse_pat_type(pat: &syn::PatType, field_name: &str) -> Input {
     }
 }
 
-fn parse_unannotated(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
+fn parse_unannotated(ident: Ident, ty: &syn::Type, field_name: Option<&str>) -> Input {
     match ty {
         syn::Type::Path(typath) => {
             let ty_ident = typath.path.require_ident().unwrap();
@@ -809,7 +812,7 @@ fn parse_unannotated(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
     }
 }
 
-fn parse_out(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
+fn parse_out(ident: Ident, ty: &syn::Type, field_name: Option<&str>) -> Input {
     match &ty {
         syn::Type::Ptr(ty) => {
             if ty.mutability.is_none() {
@@ -826,7 +829,7 @@ fn parse_out(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
     }
 }
 
-fn parse_frame(ident: Ident, ty: &syn::Type, field_name: &str) -> Input {
+fn parse_frame(ident: Ident, ty: &syn::Type, field_name: Option<&str>) -> Input {
     Input::Struct(StructInput {
         name: ident.to_string(),
         val: StructInputType::Frame(parse_guest_type(ty, field_name)),
@@ -863,12 +866,12 @@ fn parse_frame_slice(ident: Ident, ty: &syn::Type, attr: &syn::Attribute) -> Inp
     })
 }
 
-fn parse_guest_type(ty: &syn::Type, field_name: &str) -> GuestType {
+fn parse_guest_type(ty: &syn::Type, field_name: Option<&str>) -> GuestType {
     match ty {
         syn::Type::Path(ty) => {
             let ident = ty.path.require_ident().unwrap();
             match ident.to_string().as_str() {
-                name if name == field_name => GuestType::Field,
+                name if Some(name) == field_name => GuestType::Field,
                 "u64" => GuestType::U64,
                 "Int128" => GuestType::Int128,
                 "BoxedValue" => GuestType::BoxedValue,
@@ -887,12 +890,12 @@ fn parse_guest_type(ty: &syn::Type, field_name: &str) -> GuestType {
     }
 }
 
-fn parse_host_type(ty: &syn::Type, field_name: &str) -> HostType {
+fn parse_host_type(ty: &syn::Type, field_name: Option<&str>) -> HostType {
     match ty {
         syn::Type::Path(ty) => {
             let ident = ty.path.require_ident().unwrap();
             match ident.to_string().as_str() {
-                name if name == field_name => HostType::Field,
+                name if Some(name) == field_name => HostType::Field,
                 "u64" => HostType::U64,
                 "usize" => HostType::USize,
                 "isize" => HostType::ISize,

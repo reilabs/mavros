@@ -21,7 +21,10 @@ use crate::{
             Instruction, Located, SourceLocation, Terminator, ValueId,
             hlssa::{CastTarget, HLFunction, HLSSA, OpCode, RefCountOp, Type, TypeExpr},
         },
-        util::{ice_non_elided_tuple, ice_unvalidated_assert_constant},
+        util::{
+            ice_int_from_limbs_after_wide_witness_ints, ice_non_elided_tuple,
+            ice_unvalidated_assert_constant,
+        },
     },
 };
 
@@ -821,6 +824,7 @@ impl RCInsertion {
                         ice!("Guard should be lowered before RC insertion");
                     }
                     OpCode::MkTuple { .. } => ice_non_elided_tuple(),
+                    OpCode::IntFromLimbs { .. } => ice_int_from_limbs_after_wide_witness_ints(),
                 }
             }
             for param in block.get_parameter_values() {

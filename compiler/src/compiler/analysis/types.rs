@@ -9,6 +9,7 @@ use crate::{
     compiler::{
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
+        passes::shared::limbs::{int_limb_widths, multi_cell_int_bits},
         ssa::{
             FunctionId, SSAConstantsSnapshot, ValueId,
             hlssa::{
@@ -913,6 +914,43 @@ impl Types {
                     .insert(*result, Type::tuple_of(element_types.clone()));
                 Ok(())
             }
+            OpCode::IntFromLimbs {
+                result,
+                limbs,
+                bits,
+            } => {
+                if *bits <= multi_cell_int_bits(field) {
+                    return Err(format!("an int{bits} is not held as limbs"));
+                }
+                let widths = int_limb_widths(*bits, field);
+                if widths.len() != limbs.len() {
+                    return Err(format!(
+                        "an int{bits} is {} limbs, not {}",
+                        widths.len(),
+                        limbs.len()
+                    ));
+                }
+                let mut witnessed = false;
+                for (limb, width) in limbs.iter().zip(widths) {
+                    let limb_type = function_info
+                        .values
+                        .get(limb)
+                        .ok_or_else(|| format!("Value {limb:?} not found in type assignments"))?;
+                    if limb_type.strip_witness().expr != TypeExpr::Int(width) {
+                        return Err(format!(
+                            "a limb of width {width} of an int{bits} has type {limb_type}"
+                        ));
+                    }
+                    witnessed |= limb_type.is_witness_of();
+                }
+                let result_type = if witnessed {
+                    Type::witness_of(Type::int(*bits))
+                } else {
+                    Type::int(*bits)
+                };
+                function_info.values.insert(*result, result_type);
+                Ok(())
+            }
             OpCode::Todo {
                 results,
                 result_types,
@@ -995,7 +1033,7 @@ mod tests {
 
     /// Type an `SExt` whose operand is an eight-bit constant but which declares `from_bits`.
     fn sext_declaring(from_bits: usize) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1029,7 +1067,7 @@ mod tests {
         bits: usize,
         op: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId) -> Vec<ValueId>,
     ) -> Vec<Type> {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let results = HLSSABuilder::new(&mut ssa).modify_function(main_id, |b| {
             let entry = b.function.get_entry_id();
@@ -1124,7 +1162,7 @@ mod tests {
 
     /// `main(x: int8) { fn_ptr(x) }` calling `callee(value: int8) -> returns` indirectly.
     fn program_calling_indirectly(returns: Vec<Type>) -> (HLSSA, Vec<ValueId>) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut builder = HLSSABuilder::new(&mut ssa);
 
@@ -1179,7 +1217,7 @@ mod tests {
     /// declared type is the answer.
     #[test]
     fn a_callable_parameters_declared_type_types_the_call_through_it() {
-        let mut ssa = HLSSA::with_main("apply".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "apply".to_string());
         let apply = ssa.get_unique_entrypoint_id();
         let mut builder = HLSSABuilder::new(&mut ssa);
 

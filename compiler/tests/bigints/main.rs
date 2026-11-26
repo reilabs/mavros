@@ -4,18 +4,20 @@ mod goldilocks;
 mod harness;
 
 use harness::{
-    BinaryOpOracle, Compiled, HarnessField, Verdict, bytecode_listing, input_block, input_block_in,
-    main_program, main_program_in,
+    BinaryOpOracle, Compiled, HarnessField, Verdict, bytecode_listing, input_block, main_program,
 };
-use mavros_artifacts::{Field, FieldConfig, FieldElement, FieldId, InputValueOrdered};
+use mavros_artifacts::{Bn254, FieldConfig, FieldElement, FieldId, InputValueOrdered};
 use mavros_compiler::{
     compiler::{
-        passes::shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+        passes::{
+            shared::limbs::{widest_injective_int_bits, witness_limb_bits},
+            wide_witness_ints::{int_limb_widths, multi_cell_int_bits},
+        },
         ssa::{
             SourceLocation, Terminator, ValueId,
             hlssa::{
                 BinaryArithOpKind, Blob, CastTarget, CmpKind, Constant, Endianness, HLSSA, OpCode,
-                Radix, SequenceTargetType, SliceOpDir, Type,
+                Radix, SequenceTargetType, SliceOpDir, Type, TypeExpr,
                 builder::{HLBlockEmitter, HLEmitter as _, HLSSABuilder},
             },
         },
@@ -62,7 +64,7 @@ fn sweep(kind: BinaryArithOpKind, bits: usize) {
 /// [`sweep`] over the given operand pairs.
 fn sweep_over(kind: BinaryArithOpKind, bits: usize, pairs: Vec<(IntBits, IntBits)>) {
     let op = IntOp::from(kind);
-    let oracle = BinaryOpOracle::new(kind, bits)
+    let oracle = BinaryOpOracle::<Bn254>::compile(kind, bits)
         .unwrap_or_else(|e| panic!("{kind:?} at {bits} bits failed to compile: {e}"));
     for (lhs, rhs) in &pairs {
         if let Err(disagreement) = oracle.check(lhs, rhs) {
@@ -95,7 +97,7 @@ fn assert_every_column_is_pinned<F: HarnessField>(
     compiled: &Compiled<F>,
     inputs: &[&IntBits],
 ) {
-    let verdict = compiled.run(&harness::input_block_in(inputs));
+    let verdict = compiled.run(&harness::input_block(inputs));
     let witness = verdict
         .witness()
         .unwrap_or_else(|| panic!("{what}: {verdict:?}"))
@@ -128,14 +130,14 @@ fn assert_every_column_is_pinned<F: HarnessField>(
 ///
 /// `replacement` must change the answer. Unlike [`assert_every_column_is_pinned`], only the operand
 /// moves, so this catches constraints that never read it.
-fn assert_changing_an_input_breaks_the_witness(
+fn assert_changing_an_input_breaks_the_witness<F: HarnessField>(
     what: &str,
-    compiled: &Compiled,
+    compiled: &Compiled<F>,
     inputs: &[&IntBits],
     index: usize,
     replacement: &IntBits,
 ) {
-    let verdict = compiled.run(&input_block(inputs));
+    let verdict = compiled.run(&input_block::<F>(inputs));
     let mut witness = verdict
         .witness()
         .unwrap_or_else(|| panic!("{what}: {verdict:?}"))
@@ -143,10 +145,10 @@ fn assert_changing_an_input_breaks_the_witness(
     let column = compiled.input_column(index);
     assert_eq!(
         witness[column],
-        harness::input_field(inputs[index]),
+        harness::input_element::<F>(inputs[index]),
         "{what}: input {index} is written to column {column}"
     );
-    witness[column] = harness::input_field(replacement);
+    witness[column] = harness::input_element::<F>(replacement);
     assert!(
         compiled.first_unsatisfied_constraint(&witness).is_some(),
         "{what}: replacing input {index} with {replacement:?} left every constraint satisfied"
@@ -167,7 +169,7 @@ fn assert_no_two_columns_trade_a_limb<F: HarnessField>(
     compiled: &Compiled<F>,
     inputs: &[&IntBits],
 ) {
-    let verdict = compiled.run(&harness::input_block_in(inputs));
+    let verdict = compiled.run(&harness::input_block(inputs));
     let witness = verdict
         .witness()
         .unwrap_or_else(|| panic!("{what}: {verdict:?}"))
@@ -272,11 +274,11 @@ fn a_division_agrees_between_the_host_word_and_the_widest_single_cell_product() 
 #[test]
 fn the_oracle_distinguishes_a_wrong_answer_from_a_refusal() {
     let byte = |v| IntBits::from_u128(8, v);
-    let oracle = BinaryOpOracle::new(BinaryArithOpKind::UAdd, 8).unwrap();
+    let oracle = BinaryOpOracle::<Bn254>::compile(BinaryArithOpKind::UAdd, 8).unwrap();
 
     let honest = oracle
         .compiled()
-        .run(&input_block(&[&byte(1), &byte(2), &byte(3)]));
+        .run(&input_block::<Bn254>(&[&byte(1), &byte(2), &byte(3)]));
     assert!(
         honest.is_accepted(),
         "1 + 2 == 3 should be accepted: {honest:?}"
@@ -284,7 +286,7 @@ fn the_oracle_distinguishes_a_wrong_answer_from_a_refusal() {
 
     let wrong = oracle
         .compiled()
-        .run(&input_block(&[&byte(1), &byte(2), &byte(4)]));
+        .run(&input_block::<Bn254>(&[&byte(1), &byte(2), &byte(4)]));
     assert!(
         matches!(wrong, Verdict::ReturnMismatch { .. }),
         "1 + 2 == 4 should fail the return check: {wrong:?}"
@@ -292,9 +294,10 @@ fn the_oracle_distinguishes_a_wrong_answer_from_a_refusal() {
 
     // 200 + 100 overflows a byte, which Noir rejects. The residue is declared as the return, so an
     // acceptance here would mean the overflow guard never fired.
-    let overflow = oracle
-        .compiled()
-        .run(&input_block(&[&byte(200), &byte(100), &byte(44)]));
+    let overflow =
+        oracle
+            .compiled()
+            .run(&input_block::<Bn254>(&[&byte(200), &byte(100), &byte(44)]));
     assert!(
         overflow.is_refusal(),
         "200 + 100 should be refused by a guard, not by the return check: {overflow:?}"
@@ -330,7 +333,7 @@ fn every_witness_column_is_pinned_by_a_constraint() {
         (BinaryArithOpKind::URem, 253),
         (BinaryArithOpKind::SShr, 8),
     ] {
-        let oracle = BinaryOpOracle::new(kind, bits)
+        let oracle = BinaryOpOracle::<Bn254>::compile(kind, bits)
             .unwrap_or_else(|error| panic!("{kind:?} at {bits} bits does not compile: {error}"));
         let (lhs, rhs) = (IntBits::from_u128(bits, 7), IntBits::from_u128(bits, 3));
         let expected = mavros_int_semantics::eval(IntOp::from(kind), &lhs, &rhs)
@@ -354,11 +357,12 @@ fn every_witness_column_is_pinned_by_a_constraint() {
 fn every_witness_column_of_an_unsigned_ordering_is_pinned() {
     for bits in [8usize, 200, 253] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(bits), Type::int(bits)],
             &[Type::int(1)],
             |e, params| vec![e.cmp(params[0], params[1], CmpKind::ULt)],
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("ULt at {bits} bits does not compile: {error}"));
 
         // 7 < 3 is false, declared as the return so that the entry point's check tests it.
@@ -374,9 +378,9 @@ fn every_witness_column_of_an_unsigned_ordering_is_pinned() {
 
 /// The mutation test past the width one field element carries, where the operands are **limbs**.
 ///
-/// No parameter or declared return can be wider than one element, so a limbed operand is built
-/// inside the program: a widened narrow parameter beside a constant reaching the top limb. The sum
-/// and the difference leave through their low limb, the ordering as one bit.
+/// A limbed operand is built inside the program here: a widened narrow parameter beside a constant
+/// reaching the top limb. The sum and the difference leave through their low limb, the ordering as
+/// one bit.
 ///
 /// Nothing is read back with an equality: its inverse hint is free when the sides are equal, so it
 /// always leaves a column unpinned.
@@ -391,27 +395,42 @@ fn every_witness_column_of_a_limbed_sum_difference_or_ordering_is_pinned() {
     let low_limbs_full = (BigUint::from(1u8) << (4 * 64usize)) - 1u8;
     let parameter = IntBits::from_u128(64, 3);
 
-    let sum = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
-        let addend = e.cast_to(CastTarget::Int(bits), params[0]);
-        let augend = e.int_const(IntBits::from_biguint(bits, &low_limbs_full));
-        let sum = e.bin(BinaryArithOpKind::UAdd, augend, addend);
-        vec![e.cast_to(CastTarget::Int(64), sum)]
-    });
+    let sum = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(64)],
+        |e, params| {
+            let addend = e.cast_to(CastTarget::Int(bits), params[0]);
+            let augend = e.int_const(IntBits::from_biguint(bits, &low_limbs_full));
+            let sum = e.bin(BinaryArithOpKind::UAdd, augend, addend);
+            vec![e.cast_to(CastTarget::Int(64), sum)]
+        },
+    );
     let sum_low_limb = IntBits::from_u128(64, 2);
 
-    let difference = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
-        let subtrahend = e.cast_to(CastTarget::Int(bits), params[0]);
-        let minuend = e.int_const(IntBits::from_biguint(bits, &high));
-        let difference = e.bin(BinaryArithOpKind::USub, minuend, subtrahend);
-        vec![e.cast_to(CastTarget::Int(64), difference)]
-    });
+    let difference = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(64)],
+        |e, params| {
+            let subtrahend = e.cast_to(CastTarget::Int(bits), params[0]);
+            let minuend = e.int_const(IntBits::from_biguint(bits, &high));
+            let difference = e.bin(BinaryArithOpKind::USub, minuend, subtrahend);
+            vec![e.cast_to(CastTarget::Int(64), difference)]
+        },
+    );
     let low_limb = IntBits::from_u128(64, u128::from(u64::MAX - 2));
 
-    let ordering = main_program(&[Type::int(64)], &[Type::int(1)], |e, params| {
-        let left = e.cast_to(CastTarget::Int(bits), params[0]);
-        let right = e.int_const(IntBits::from_biguint(bits, &high));
-        vec![e.cmp(left, right, CmpKind::ULt)]
-    });
+    let ordering = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(1)],
+        |e, params| {
+            let left = e.cast_to(CastTarget::Int(bits), params[0]);
+            let right = e.int_const(IntBits::from_biguint(bits, &high));
+            vec![e.cmp(left, right, CmpKind::ULt)]
+        },
+    );
     let less = IntBits::from_u128(1, 1);
 
     for (operation, ssa, answer) in [
@@ -419,7 +438,7 @@ fn every_witness_column_of_a_limbed_sum_difference_or_ordering_is_pinned() {
         ("USub", difference, low_limb),
         ("ULt", ordering, less),
     ] {
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("{operation} at {bits} bits does not compile: {error}"));
         assert_every_column_is_pinned(
             &format!("{operation} at {bits} bits"),
@@ -451,13 +470,18 @@ fn every_witness_column_of_a_limbed_product_is_pinned() {
     let selected = IntBits::from_u128(1, 1);
 
     let pure_factor = factor.clone();
-    let one_witnessed = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-        let multiplicand = e.cast_to(CastTarget::Int(bits), params[0]);
-        let multiplier = e.int_const(IntBits::from_biguint(bits, &pure_factor));
-        let product = e.bin(BinaryArithOpKind::UMul, multiplicand, multiplier);
-        vec![e.cast_to(CastTarget::Int(64), product)]
-    });
-    let compiled = Compiled::new(one_witnessed)
+    let one_witnessed = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(64)],
+        move |e, params| {
+            let multiplicand = e.cast_to(CastTarget::Int(bits), params[0]);
+            let multiplier = e.int_const(IntBits::from_biguint(bits, &pure_factor));
+            let product = e.bin(BinaryArithOpKind::UMul, multiplicand, multiplier);
+            vec![e.cast_to(CastTarget::Int(64), product)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(one_witnessed)
         .unwrap_or_else(|error| panic!("UMul at {bits} bits does not compile: {error}"));
     assert_every_column_is_pinned(
         &format!("UMul by a constant at {bits} bits"),
@@ -466,6 +490,7 @@ fn every_witness_column_of_a_limbed_product_is_pinned() {
     );
 
     let both_witnessed = main_program(
+        FieldConfig::bn254(),
         &[Type::int(64), Type::int(1)],
         &[Type::int(64)],
         move |e, params| {
@@ -477,7 +502,7 @@ fn every_witness_column_of_a_limbed_product_is_pinned() {
             vec![e.cast_to(CastTarget::Int(64), product)]
         },
     );
-    let compiled = Compiled::new(both_witnessed)
+    let compiled = Compiled::<Bn254>::compile(both_witnessed)
         .unwrap_or_else(|error| panic!("UMul at {bits} bits does not compile: {error}"));
     assert_every_column_is_pinned(
         &format!("UMul of two witnessed values at {bits} bits"),
@@ -519,6 +544,7 @@ fn every_witness_column_of_a_limbed_division_is_pinned() {
     let pure_divisor = large_divisor.clone();
     let pure_dividend = dividend.clone();
     let by_a_constant = main_program(
+        FieldConfig::bn254(),
         &[Type::int(1)],
         &[Type::int(64), Type::int(64)],
         move |e, params| {
@@ -534,7 +560,7 @@ fn every_witness_column_of_a_limbed_division_is_pinned() {
             ]
         },
     );
-    let compiled = Compiled::new(by_a_constant).unwrap_or_else(|error| {
+    let compiled = Compiled::<Bn254>::compile(by_a_constant).unwrap_or_else(|error| {
         panic!("UDiv by a constant at {bits} bits does not compile: {error}")
     });
     let inputs = [
@@ -554,6 +580,7 @@ fn every_witness_column_of_a_limbed_division_is_pinned() {
 
     let pure_dividend = dividend.clone();
     let by_a_witness = main_program(
+        FieldConfig::bn254(),
         &[Type::int(1), Type::int(64)],
         &[Type::int(64), Type::int(64)],
         move |e, params| {
@@ -569,7 +596,7 @@ fn every_witness_column_of_a_limbed_division_is_pinned() {
             ]
         },
     );
-    let compiled = Compiled::new(by_a_witness).unwrap_or_else(|error| {
+    let compiled = Compiled::<Bn254>::compile(by_a_witness).unwrap_or_else(|error| {
         panic!("UDiv by a witness at {bits} bits does not compile: {error}")
     });
     assert_every_column_is_pinned(
@@ -585,6 +612,7 @@ fn every_witness_column_of_a_limbed_division_is_pinned() {
 
     let pure_divisor = large_divisor.clone();
     let smaller_than_the_divisor = main_program(
+        FieldConfig::bn254(),
         &[Type::int(1), Type::int(64)],
         &[Type::int(64), Type::int(64)],
         move |e, params| {
@@ -600,7 +628,7 @@ fn every_witness_column_of_a_limbed_division_is_pinned() {
             ]
         },
     );
-    let compiled = Compiled::new(smaller_than_the_divisor).unwrap_or_else(|error| {
+    let compiled = Compiled::<Bn254>::compile(smaller_than_the_divisor).unwrap_or_else(|error| {
         panic!("UDiv of a smaller dividend at {bits} bits does not compile: {error}")
     });
     let inputs = [&selected, &parameter, &IntBits::zero(64), &parameter];
@@ -629,6 +657,7 @@ fn every_witness_column_of_an_asserted_ordering_is_pinned() {
     let accepted = IntBits::from_u128(1, 1);
 
     let band = main_program(
+        FieldConfig::bn254(),
         &[Type::int(253), Type::int(253)],
         &[Type::int(1)],
         |e, params| {
@@ -640,7 +669,7 @@ fn every_witness_column_of_an_asserted_ordering_is_pinned() {
             vec![e.int_const(IntBits::from_u128(1, 1))]
         },
     );
-    let compiled = Compiled::new(band)
+    let compiled = Compiled::<Bn254>::compile(band)
         .unwrap_or_else(|error| panic!("an asserted int253 ordering does not compile: {error}"));
     assert_every_column_is_pinned(
         "an asserted ordering at 253 bits",
@@ -654,17 +683,22 @@ fn every_witness_column_of_an_asserted_ordering_is_pinned() {
 
     let bits = 320usize;
     let high = BigUint::from(1u8) << 300;
-    let limbed = main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
-        let left = e.cast_to(CastTarget::Int(bits), params[0]);
-        let right = e.int_const(IntBits::from_biguint(bits, &high));
-        e.emit(OpCode::AssertCmp {
-            kind: CmpKind::ULt,
-            lhs: left,
-            rhs: right,
-        });
-        vec![e.int_const(IntBits::from_u128(1, 1))]
-    });
-    let compiled = Compiled::new(limbed)
+    let limbed = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(1)],
+        move |e, params| {
+            let left = e.cast_to(CastTarget::Int(bits), params[0]);
+            let right = e.int_const(IntBits::from_biguint(bits, &high));
+            e.emit(OpCode::AssertCmp {
+                kind: CmpKind::ULt,
+                lhs: left,
+                rhs: right,
+            });
+            vec![e.int_const(IntBits::from_u128(1, 1))]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(limbed)
         .unwrap_or_else(|error| panic!("an asserted int320 ordering does not compile: {error}"));
     assert_every_column_is_pinned(
         "an asserted ordering at 320 bits",
@@ -693,11 +727,12 @@ fn a_sum_or_difference_agrees_with_the_model_at_the_limb_corners() {
 fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
     for bits in [8usize, 200, 252, 253] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(bits), Type::int(bits)],
             &[Type::int(1)],
             |e, params| vec![e.cmp(params[0], params[1], CmpKind::ULt)],
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("ULt at {bits} bits does not compile: {error}"));
 
         let values = corners::wide_values(bits);
@@ -706,7 +741,7 @@ fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
                 let less = Limbed::Ordering
                     .model(lhs, rhs)
                     .expect("an ordering is always answered");
-                let verdict = compiled.run(&input_block(&[lhs, rhs, &less]));
+                let verdict = compiled.run(&input_block::<Bn254>(&[lhs, rhs, &less]));
                 assert!(
                     verdict.is_accepted(),
                     "ULt({lhs:?}, {rhs:?}) at {bits} bits is {less:?}: {verdict:?}"
@@ -714,7 +749,7 @@ fn an_unsigned_ordering_agrees_with_the_model_at_the_limb_corners() {
                 let wrong = less.xor(&IntBits::from_u128(1, 1));
                 assert!(
                     !compiled
-                        .run(&input_block(&[lhs, rhs, &wrong]))
+                        .run(&input_block::<Bn254>(&[lhs, rhs, &wrong]))
                         .is_accepted(),
                     "ULt({lhs:?}, {rhs:?}) at {bits} bits accepted the wrong answer {wrong:?}"
                 );
@@ -870,7 +905,7 @@ fn the_limbed_corner_matrix_agrees_with_the_model() {
         }
         let amounts = limb_shift_amounts(bits, HOST_LIMB_BITS);
         for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
-            check_limbed_shifts(limbed, bits, &values, &amounts, Rhs::Witnessed);
+            check_limbed_grid::<Bn254>(limbed, bits, &values, &amounts, Rhs::Witnessed);
         }
     }
 }
@@ -887,7 +922,7 @@ fn the_signed_limbed_corner_matrix_agrees_with_the_model() {
         let signed = |v: SignedValue| IntBits::from_signed(bits, &v);
         let power = |place: usize| SignedValue::from(BigUint::from(1u8) << place);
         let (low, high) = (bits / 2, bits - 1 - bits / 2);
-        let mut values = signed_limb_corners(bits);
+        let mut values = signed_limb_corners(FieldConfig::bn254(), bits);
         values.extend([
             signed(power(low)),
             signed(-power(low)),
@@ -903,7 +938,7 @@ fn the_signed_limbed_corner_matrix_agrees_with_the_model() {
         ] {
             check_limbed_corners(limbed, bits, &values, Rhs::Witnessed);
         }
-        check_limbed_shifts(
+        check_limbed_grid::<Bn254>(
             Limbed::SignedShiftRight,
             bits,
             &values,
@@ -1050,7 +1085,7 @@ fn limbed_quotients_and_remainders_agree_with_the_model() {
                 })
                 .collect();
             for pairs in pairs.chunks(20) {
-                check_limbed_pairs(limbed, bits, pairs.to_vec(), Rhs::Constant);
+                check_limbed_pairs::<Bn254>(limbed, bits, pairs.to_vec(), Rhs::Constant);
             }
         }
     }
@@ -1109,8 +1144,8 @@ fn limbed_shifts_agree_with_the_model() {
             .cloned()
             .collect();
         for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
-            check_limbed_shifts(limbed, bits, &values, &amounts, Rhs::Witnessed);
-            check_limbed_shifts(limbed, bits, &values, &legal, Rhs::Constant);
+            check_limbed_grid::<Bn254>(limbed, bits, &values, &amounts, Rhs::Witnessed);
+            check_limbed_grid::<Bn254>(limbed, bits, &values, &legal, Rhs::Constant);
         }
     }
 }
@@ -1154,7 +1189,7 @@ fn a_shift_agrees_with_the_model_at_the_widest_widths() {
                     })
                     .collect();
                 for pairs in pairs.chunks(per_program) {
-                    check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
+                    check_limbed_pairs::<Bn254>(limbed, bits, pairs.to_vec(), rhs);
                 }
             }
         }
@@ -1179,7 +1214,7 @@ fn a_pure_value_shifted_by_a_witnessed_amount_agrees_with_the_model() {
         ];
         let amounts = few_shift_amounts(bits, limb);
         for limbed in [Limbed::ShiftLeft, Limbed::ShiftRight] {
-            check_limbed_shifts(limbed, bits, &values, &amounts, Rhs::AgainstPure);
+            check_limbed_grid::<Bn254>(limbed, bits, &values, &amounts, Rhs::AgainstPure);
         }
     }
 }
@@ -1203,32 +1238,37 @@ fn a_shift_by_a_pure_amount_a_loop_computes_agrees_with_the_model() {
         for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
             let program = |iterations: usize, expected: IntBits| {
                 let operand = operand.clone();
-                main_program(&[Type::int(1)], &[], move |e, params| {
-                    let pattern = e.int_const(operand);
-                    let zero = e.int_const(IntBits::zero(bits));
-                    let value = e.select(params[0], pattern, zero);
-                    let start = e.int_const(IntBits::zero(32));
-                    let (head, _) = e.add_block();
-                    let (body, _) = e.add_block();
-                    let (done, _) = e.add_block();
-                    e.seal_and_switch(Terminator::Jmp(head, vec![start, zero]), head);
-                    let count = e.add_parameter(Type::int(32));
-                    let sum = e.add_parameter(Type::int(bits));
-                    let limit = e.int_const(IntBits::from_u128(32, iterations as u128));
-                    let more = e.cmp(count, limit, CmpKind::ULt);
-                    e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
-                    let index = e.cast_to(CastTarget::Int(bits), count);
-                    let stride = e.int_const(IntBits::from_u128(bits, step as u128));
-                    let amount = e.bin(BinaryArithOpKind::UMul, index, stride);
-                    let shifted = e.bin(kind, value, amount);
-                    let next_sum = e.bin(BinaryArithOpKind::Xor, sum, shifted);
-                    let one = e.int_const(IntBits::from_u128(32, 1));
-                    let next = e.bin(BinaryArithOpKind::UAdd, count, one);
-                    e.seal_and_switch(Terminator::Jmp(head, vec![next, next_sum]), done);
-                    let expected = e.int_const(expected);
-                    e.assert_eq(sum, expected);
-                    vec![]
-                })
+                main_program(
+                    FieldConfig::bn254(),
+                    &[Type::int(1)],
+                    &[],
+                    move |e, params| {
+                        let pattern = e.int_const(operand);
+                        let zero = e.int_const(IntBits::zero(bits));
+                        let value = e.select(params[0], pattern, zero);
+                        let start = e.int_const(IntBits::zero(32));
+                        let (head, _) = e.add_block();
+                        let (body, _) = e.add_block();
+                        let (done, _) = e.add_block();
+                        e.seal_and_switch(Terminator::Jmp(head, vec![start, zero]), head);
+                        let count = e.add_parameter(Type::int(32));
+                        let sum = e.add_parameter(Type::int(bits));
+                        let limit = e.int_const(IntBits::from_u128(32, iterations as u128));
+                        let more = e.cmp(count, limit, CmpKind::ULt);
+                        e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+                        let index = e.cast_to(CastTarget::Int(bits), count);
+                        let stride = e.int_const(IntBits::from_u128(bits, step as u128));
+                        let amount = e.bin(BinaryArithOpKind::UMul, index, stride);
+                        let shifted = e.bin(kind, value, amount);
+                        let next_sum = e.bin(BinaryArithOpKind::Xor, sum, shifted);
+                        let one = e.int_const(IntBits::from_u128(32, 1));
+                        let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+                        e.seal_and_switch(Terminator::Jmp(head, vec![next, next_sum]), done);
+                        let expected = e.int_const(expected);
+                        e.assert_eq(sum, expected);
+                        vec![]
+                    },
+                )
             };
             let what = format!("int{bits} {kind:?} by a pure amount");
 
@@ -1239,9 +1279,9 @@ fn a_shift_by_a_pure_amount_a_loop_computes_agrees_with_the_model() {
                     .expect("an amount below the width is accepted");
                 sum.xor(&shifted)
             });
-            let compiled = Compiled::new(program(legal, expected))
+            let compiled = Compiled::<Bn254>::compile(program(legal, expected))
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
-            let selected = |bit: u128| input_block(&[&IntBits::from_u128(1, bit)]);
+            let selected = |bit: u128| input_block::<Bn254>(&[&IntBits::from_u128(1, bit)]);
             let verdict = compiled.run(&selected(1));
             assert!(verdict.is_accepted(), "{what}: {verdict:?}");
             let verdict = compiled
@@ -1254,7 +1294,7 @@ fn a_shift_by_a_pure_amount_a_loop_computes_agrees_with_the_model() {
                 "{what}, the operand zero: {verdict:?}"
             );
 
-            let past = Compiled::new(program(legal + 1, IntBits::zero(bits)));
+            let past = Compiled::<Bn254>::compile(program(legal + 1, IntBits::zero(bits)));
             let refused = match past {
                 Err(_) => true,
                 Ok(compiled) => !compiled.run(&selected(1)).is_accepted(),
@@ -1316,6 +1356,7 @@ fn check_guarded_loop_shift(kind: BinaryArithOpKind, operand: &IntBits, base: u1
     let pattern = operand.clone();
     let model = expected.clone().unwrap_or_else(|| IntBits::zero(bits));
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(1), Type::int(64)],
         &[Type::int(1)],
         move |e, params| {
@@ -1357,10 +1398,10 @@ fn check_guarded_loop_shift(kind: BinaryArithOpKind, operand: &IntBits, base: u1
         },
     );
     let what = format!("int{bits} {kind:?} by the pure amount {base}");
-    let compiled =
-        Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+    let compiled = Compiled::<Bn254>::compile(ssa)
+        .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
     let run = |taken: u128, answer: u128| {
-        compiled.run(&input_block(&[
+        compiled.run(&input_block::<Bn254>(&[
             &IntBits::from_u128(1, taken),
             &IntBits::zero(64),
             &IntBits::from_u128(1, answer),
@@ -1415,21 +1456,9 @@ fn limb_shift_amounts(bits: usize, limb: usize) -> Vec<IntBits> {
     dedup(amounts)
 }
 
-/// Every value shifted by every amount, checked by [`check_limbed_pairs`] a program's worth at a
-/// time.
-fn check_limbed_shifts(
-    limbed: Limbed,
-    bits: usize,
-    values: &[IntBits],
-    amounts: &[IntBits],
-    rhs: Rhs,
-) {
-    check_limbed_grid_in::<Field>(limbed, bits, values, amounts, rhs);
-}
-
-/// Every left operand against every right one over `F`, checked by [`check_limbed_pairs_in`]
+/// Every left operand against every right one over `F`, checked by [`check_limbed_pairs`]
 /// twenty pairs to a program.
-fn check_limbed_grid_in<F: HarnessField>(
+fn check_limbed_grid<F: HarnessField>(
     limbed: Limbed,
     bits: usize,
     lefts: &[IntBits],
@@ -1445,7 +1474,7 @@ fn check_limbed_grid_in<F: HarnessField>(
         })
         .collect();
     for pairs in pairs.chunks(20) {
-        check_limbed_pairs_in::<F>(limbed, bits, pairs.to_vec(), rhs);
+        check_limbed_pairs::<F>(limbed, bits, pairs.to_vec(), rhs);
     }
 }
 
@@ -1457,13 +1486,18 @@ fn a_constant_shift_amount_past_the_width_is_refused() {
     for bits in [128usize, 200, 320] {
         for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
             for amount in [bits, bits + 1] {
-                let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-                    let value = e.cast_to(CastTarget::Int(bits), params[0]);
-                    let amount = e.int_const(IntBits::from_u128(bits, amount as u128));
-                    let shifted = e.bin(kind, value, amount);
-                    vec![e.cast_to(CastTarget::Int(64), shifted)]
-                });
-                let Err(error) = Compiled::new(ssa) else {
+                let ssa = main_program(
+                    FieldConfig::bn254(),
+                    &[Type::int(64)],
+                    &[Type::int(64)],
+                    move |e, params| {
+                        let value = e.cast_to(CastTarget::Int(bits), params[0]);
+                        let amount = e.int_const(IntBits::from_u128(bits, amount as u128));
+                        let shifted = e.bin(kind, value, amount);
+                        vec![e.cast_to(CastTarget::Int(64), shifted)]
+                    },
+                );
+                let Err(error) = Compiled::<Bn254>::compile(ssa) else {
                     panic!("int{bits} {kind:?} by the constant {amount} compiled");
                 };
                 let error = error.to_string();
@@ -1488,6 +1522,7 @@ fn a_guarded_shift_is_checked_only_where_its_guard_holds() {
             for constant in [None, Some(bits)] {
                 let top = high.clone();
                 let ssa = main_program(
+                    FieldConfig::bn254(),
                     &[Type::int(1), Type::int(64), Type::int(64)],
                     &[Type::int(64)],
                     move |e, params| {
@@ -1512,11 +1547,11 @@ fn a_guarded_shift_is_checked_only_where_its_guard_holds() {
                     },
                 );
                 let what = format!("a guarded int{bits} {kind:?} by {constant:?}");
-                let compiled = Compiled::new(ssa)
+                let compiled = Compiled::<Bn254>::compile(ssa)
                     .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
                 let run = |taken: u128, amount: u128, answer: u128| {
-                    compiled.run(&input_block(&[
+                    compiled.run(&input_block::<Bn254>(&[
                         &IntBits::from_u128(1, taken),
                         &IntBits::from_u128(64, 5),
                         &IntBits::from_u128(64, amount),
@@ -1569,6 +1604,7 @@ fn a_wide_amount_is_held_below_its_second_limb_only_where_its_guard_holds() {
     for kind in [BinaryArithOpKind::UShl, BinaryArithOpKind::UShr] {
         let high = high.clone();
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(1), Type::int(64), Type::int(64)],
             &[Type::int(64)],
             move |e, params| {
@@ -1590,10 +1626,10 @@ fn a_wide_amount_is_held_below_its_second_limb_only_where_its_guard_holds() {
             },
         );
         let what = format!("a guarded int{bits} {kind:?} by an amount past its lowest limb");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
         let run = |taken: u128| {
-            compiled.run(&input_block(&[
+            compiled.run(&input_block::<Bn254>(&[
                 &IntBits::from_u128(1, taken),
                 &IntBits::from_u128(64, 5),
                 &IntBits::from_u128(64, 3),
@@ -1645,6 +1681,7 @@ fn every_witness_column_of_a_limbed_shift_is_pinned() {
             for constant in [false, true] {
                 let pattern = operand.clone();
                 let ssa = main_program(
+                    FieldConfig::bn254(),
                     &[Type::int(1), Type::int(64)],
                     &[Type::int(64)],
                     move |e, params| {
@@ -1664,7 +1701,7 @@ fn every_witness_column_of_a_limbed_shift_is_pinned() {
                     "{kind:?} at {bits} bits by {}",
                     if constant { "a constant" } else { "a witness" }
                 );
-                let compiled = Compiled::new(ssa)
+                let compiled = Compiled::<Bn254>::compile(ssa)
                     .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
                 let by = IntBits::from_u128(64, amount);
                 let inputs = [&selected, &by, &answer];
@@ -1704,6 +1741,7 @@ fn a_division_with_a_known_answer_still_refuses_a_zero_divisor() {
             for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
                 for guarded in [false, true] {
                     let ssa = main_program(
+                        FieldConfig::bn254(),
                         &[Type::int(1), Type::int(64)],
                         &[Type::int(64)],
                         move |e, params| {
@@ -1734,12 +1772,12 @@ fn a_division_with_a_known_answer_still_refuses_a_zero_divisor() {
                         },
                     );
                     let what = format!("int{bits} {kind:?}, {what}, guarded={guarded}");
-                    let compiled = Compiled::new(ssa)
+                    let compiled = Compiled::<Bn254>::compile(ssa)
                         .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
                     let answer = u128::from(same && kind == BinaryArithOpKind::UDiv);
                     let run = |divisor: u128, answer: u128| {
-                        compiled.run(&input_block(&[
+                        compiled.run(&input_block::<Bn254>(&[
                             &IntBits::from_u128(1, 1),
                             &IntBits::from_u128(64, divisor),
                             &IntBits::from_u128(64, answer),
@@ -1764,19 +1802,24 @@ fn a_division_with_a_known_answer_still_refuses_a_zero_divisor() {
 fn a_division_known_to_be_zero_keeps_a_witnessed_answer() {
     for bits in [200usize, 320] {
         for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
-            let ssa = main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
-                let divisor = e.cast_to(CastTarget::Int(bits), params[0]);
-                let zero = e.int_const(IntBits::zero(bits));
-                let answer = e.bin(kind, zero, divisor);
-                vec![e.eq(answer, zero)]
-            });
+            let ssa = main_program(
+                FieldConfig::bn254(),
+                &[Type::int(64)],
+                &[Type::int(1)],
+                move |e, params| {
+                    let divisor = e.cast_to(CastTarget::Int(bits), params[0]);
+                    let zero = e.int_const(IntBits::zero(bits));
+                    let answer = e.bin(kind, zero, divisor);
+                    vec![e.eq(answer, zero)]
+                },
+            );
             let what = format!("int{bits} {kind:?} of zero");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
             let one = IntBits::from_u128(1, 1);
-            let verdict = compiled.run(&input_block(&[&IntBits::from_u128(64, 7), &one]));
+            let verdict = compiled.run(&input_block::<Bn254>(&[&IntBits::from_u128(64, 7), &one]));
             assert!(verdict.is_accepted(), "{what}, by seven: {verdict:?}");
-            let verdict = compiled.run(&input_block(&[&IntBits::zero(64), &one]));
+            let verdict = compiled.run(&input_block::<Bn254>(&[&IntBits::zero(64), &one]));
             assert!(verdict.is_refusal(), "{what}, by zero: {verdict:?}");
         }
     }
@@ -1790,13 +1833,18 @@ fn a_division_known_to_be_zero_keeps_a_witnessed_answer() {
 fn a_constant_zero_divisor_is_refused_at_every_width() {
     for bits in [64usize, 128, 200, 320] {
         for kind in [BinaryArithOpKind::UDiv, BinaryArithOpKind::URem] {
-            let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-                let dividend = e.cast_to(CastTarget::Int(bits), params[0]);
-                let zero = e.int_const(IntBits::zero(bits));
-                let answer = e.bin(kind, dividend, zero);
-                vec![e.cast_to(CastTarget::Int(64), answer)]
-            });
-            let Err(error) = Compiled::new(ssa) else {
+            let ssa = main_program(
+                FieldConfig::bn254(),
+                &[Type::int(64)],
+                &[Type::int(64)],
+                move |e, params| {
+                    let dividend = e.cast_to(CastTarget::Int(bits), params[0]);
+                    let zero = e.int_const(IntBits::zero(bits));
+                    let answer = e.bin(kind, dividend, zero);
+                    vec![e.cast_to(CastTarget::Int(64), answer)]
+                },
+            );
+            let Err(error) = Compiled::<Bn254>::compile(ssa) else {
                 panic!("int{bits} {kind:?} by a constant zero compiled");
             };
             let error = error.to_string();
@@ -1837,7 +1885,7 @@ fn check_limbed_corners(limbed: Limbed, bits: usize, values: &[IntBits], rhs: Rh
         | Limbed::SignedOrdering => 50,
     };
     for pairs in pairs.chunks(per_program) {
-        check_limbed_pairs(limbed, bits, pairs.to_vec(), rhs);
+        check_limbed_pairs::<Bn254>(limbed, bits, pairs.to_vec(), rhs);
     }
 }
 
@@ -1855,11 +1903,6 @@ enum Rhs {
     AgainstPure,
 }
 
-/// `limbed` over `pairs`, all in one program, against the model, on bn254 and its WASM lane.
-fn check_limbed_pairs(limbed: Limbed, bits: usize, pairs: Vec<(IntBits, IntBits)>, rhs: Rhs) {
-    check_limbed_pairs_in::<Field>(limbed, bits, pairs, rhs);
-}
-
 /// Whether a limbed grid over `F` runs on the WASM lane as well.
 ///
 /// Goldilocks' 16-bit witness limb makes a wide program large: past 64 bits, LLVM spends about five
@@ -1871,7 +1914,7 @@ fn limbed_grid_has_a_wasm_lane<F: HarnessField>(bits: usize) -> bool {
 }
 
 /// [`check_limbed_pairs_on`], on the lanes [`limbed_grid_has_a_wasm_lane`] gives this width.
-fn check_limbed_pairs_in<F: HarnessField>(
+fn check_limbed_pairs<F: HarnessField>(
     limbed: Limbed,
     bits: usize,
     pairs: Vec<(IntBits, IntBits)>,
@@ -1928,7 +1971,7 @@ fn check_limbed_pairs_on<F: HarnessField>(
         .collect();
 
     let (program_pairs, program_answers) = (pairs.clone(), answers.clone());
-    let ssa = main_program_in(
+    let ssa = main_program(
         F::CONFIG,
         &[Type::int(1), Type::int(32), Type::int(1)],
         &[Type::int(1)],
@@ -1999,7 +2042,7 @@ fn check_limbed_pairs_on<F: HarnessField>(
             one.clone(),
         ]
     };
-    let inputs = |selected: u128| input_block_in::<F>(&block(selected).each_ref());
+    let inputs = |selected: u128| input_block::<F>(&block(selected).each_ref());
 
     let none = u128::from(u32::MAX);
     let verdict = compiled.run(&inputs(none));
@@ -2054,6 +2097,7 @@ fn a_guarded_difference_is_checked_only_where_its_guard_holds() {
         // a borrow out of it has to run the whole chain.
         let high = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 3)));
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(1), Type::int(64), Type::int(64)],
             &[Type::int(64)],
             move |e, params| {
@@ -2075,11 +2119,11 @@ fn a_guarded_difference_is_checked_only_where_its_guard_holds() {
                 vec![e.add_parameter(Type::int(64))]
             },
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("a guarded int{bits} USub does not compile: {error}"));
 
         let run = |taken: u128, lhs: u128, rhs: u128, answer: u128| {
-            compiled.run(&input_block(&[
+            compiled.run(&input_block::<Bn254>(&[
                 &IntBits::from_u128(1, taken),
                 &IntBits::from_u128(64, lhs),
                 &IntBits::from_u128(64, rhs),
@@ -2112,6 +2156,7 @@ fn a_guarded_product_is_checked_only_where_its_guard_holds() {
     for bits in [253usize, 320] {
         let high = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 2)));
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(1), Type::int(64), Type::int(64)],
             &[Type::int(64)],
             move |e, params| {
@@ -2132,11 +2177,11 @@ fn a_guarded_product_is_checked_only_where_its_guard_holds() {
                 vec![e.add_parameter(Type::int(64))]
             },
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("a guarded int{bits} UMul does not compile: {error}"));
 
         let run = |taken: u128, lhs: u128, rhs: u128, answer: u128| {
-            compiled.run(&input_block(&[
+            compiled.run(&input_block::<Bn254>(&[
                 &IntBits::from_u128(1, taken),
                 &IntBits::from_u128(64, lhs),
                 &IntBits::from_u128(64, rhs),
@@ -2177,6 +2222,7 @@ fn a_guarded_division_is_checked_only_where_its_guard_holds() {
             let high = BigUint::from(1u8) << (bits - 3);
             let top = IntBits::from_biguint(bits, &high);
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(1), Type::int(64), Type::int(64)],
                 &[Type::int(64)],
                 move |e, params| {
@@ -2198,11 +2244,11 @@ fn a_guarded_division_is_checked_only_where_its_guard_holds() {
                 },
             );
             let what = format!("a guarded int{bits} {kind:?}");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
             let run = |taken: u128, lhs: u128, rhs: u128, answer: u128| {
-                compiled.run(&input_block(&[
+                compiled.run(&input_block::<Bn254>(&[
                     &IntBits::from_u128(1, taken),
                     &IntBits::from_u128(64, lhs),
                     &IntBits::from_u128(64, rhs),
@@ -2248,6 +2294,7 @@ fn a_guarded_assertion_holds_only_where_its_guard_does() {
         for bits in [253usize, 320] {
             let high = IntBits::from_biguint(bits, &(BigUint::from(1u8) << (bits - 3)));
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(1), Type::int(64), Type::int(64)],
                 &[Type::int(1)],
                 move |e, params| {
@@ -2266,11 +2313,11 @@ fn a_guarded_assertion_holds_only_where_its_guard_does() {
                 },
             );
             let what = format!("a guarded int{bits} {kind:?} assertion");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
             let run = |taken: u128, (lhs, rhs): (u128, u128)| {
-                compiled.run(&input_block(&[
+                compiled.run(&input_block::<Bn254>(&[
                     &IntBits::from_u128(1, taken),
                     &IntBits::from_u128(64, lhs),
                     &IntBits::from_u128(64, rhs),
@@ -2310,8 +2357,8 @@ fn the_whole_corner_matrix_agrees_with_the_model() {
 /// The signed corners a carry chain turns on at `bits`: [`signed_corners`], and either sign of a
 /// value at the lowest limb boundary and at the top limb's, so that a carry or a borrow crosses a
 /// limb and leaves the top under every combination of signs.
-fn signed_limb_corners(bits: usize) -> Vec<IntBits> {
-    signed_limb_corners_at(bits, witness_limb_bits(FieldConfig::bn254()))
+fn signed_limb_corners(field: FieldConfig, bits: usize) -> Vec<IntBits> {
+    signed_limb_corners_at(bits, witness_limb_bits(field))
 }
 
 /// [`signed_limb_corners`] for a `limb`-bit witness limb.
@@ -2338,7 +2385,7 @@ fn signed_limb_corners_at(bits: usize, limb: usize) -> Vec<IntBits> {
 #[test]
 fn a_signed_sum_difference_or_ordering_agrees_with_the_model_either_side_of_the_chain() {
     for bits in [200usize, 252, 253, 257, 320] {
-        let values = signed_limb_corners(bits);
+        let values = signed_limb_corners(FieldConfig::bn254(), bits);
         for limbed in [
             Limbed::SignedSum,
             Limbed::SignedDifference,
@@ -2405,53 +2452,58 @@ fn a_signed_chain_against_a_pure_operand_a_loop_computes_agrees_with_the_model()
         });
 
         let (program_witnessed, program_stride) = (witnessed.clone(), stride.clone());
-        let ssa = main_program(&[Type::int(1)], &[], move |e, params| {
-            let chosen = e.int_const(program_witnessed);
-            let zero = e.int_const(IntBits::zero(bits));
-            let value = e.select(params[0], chosen, zero);
-            let stride = e.int_const(program_stride);
-            let sign = e.int_const(sign);
-            let start = e.int_const(IntBits::from_u128(32, 1));
-            let yes = e.int_const(IntBits::one(1));
-            let no = e.int_const(IntBits::zero(1));
-            let (head, _) = e.add_block();
-            let (body, _) = e.add_block();
-            let (done, _) = e.add_block();
-            e.seal_and_switch(Terminator::Jmp(head, vec![start, zero, yes, no]), head);
-            let count = e.add_parameter(Type::int(32));
-            let acc = e.add_parameter(Type::int(bits));
-            let every_less = e.add_parameter(Type::int(1));
-            let any_greater = e.add_parameter(Type::int(1));
-            let limit = e.int_const(IntBits::from_u128(32, iterations + 1));
-            let more = e.cmp(count, limit, CmpKind::ULt);
-            e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
-            let index = e.cast_to(CastTarget::Int(bits), count);
-            let scaled = e.bin(BinaryArithOpKind::UMul, index, stride);
-            let pure = e.bin(BinaryArithOpKind::Xor, scaled, sign);
-            let sum = e.bin(BinaryArithOpKind::SAdd, value, pure);
-            let difference = e.bin(BinaryArithOpKind::SSub, pure, value);
-            let next_acc = e.bin(BinaryArithOpKind::Xor, acc, sum);
-            let next_acc = e.bin(BinaryArithOpKind::Xor, next_acc, difference);
-            let less = e.cmp(pure, value, CmpKind::SLt);
-            let next_less = e.bin(BinaryArithOpKind::And, every_less, less);
-            let greater = e.cmp(value, pure, CmpKind::SLt);
-            let next_greater = e.bin(BinaryArithOpKind::Or, any_greater, greater);
-            let one = e.int_const(IntBits::from_u128(32, 1));
-            let next = e.bin(BinaryArithOpKind::UAdd, count, one);
-            e.seal_and_switch(
-                Terminator::Jmp(head, vec![next, next_acc, next_less, next_greater]),
-                done,
-            );
-            let expected = e.int_const(expected);
-            e.assert_eq(acc, expected);
-            e.assert_eq(every_less, yes);
-            e.assert_eq(any_greater, no);
-            vec![]
-        });
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(1)],
+            &[],
+            move |e, params| {
+                let chosen = e.int_const(program_witnessed);
+                let zero = e.int_const(IntBits::zero(bits));
+                let value = e.select(params[0], chosen, zero);
+                let stride = e.int_const(program_stride);
+                let sign = e.int_const(sign);
+                let start = e.int_const(IntBits::from_u128(32, 1));
+                let yes = e.int_const(IntBits::one(1));
+                let no = e.int_const(IntBits::zero(1));
+                let (head, _) = e.add_block();
+                let (body, _) = e.add_block();
+                let (done, _) = e.add_block();
+                e.seal_and_switch(Terminator::Jmp(head, vec![start, zero, yes, no]), head);
+                let count = e.add_parameter(Type::int(32));
+                let acc = e.add_parameter(Type::int(bits));
+                let every_less = e.add_parameter(Type::int(1));
+                let any_greater = e.add_parameter(Type::int(1));
+                let limit = e.int_const(IntBits::from_u128(32, iterations + 1));
+                let more = e.cmp(count, limit, CmpKind::ULt);
+                e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+                let index = e.cast_to(CastTarget::Int(bits), count);
+                let scaled = e.bin(BinaryArithOpKind::UMul, index, stride);
+                let pure = e.bin(BinaryArithOpKind::Xor, scaled, sign);
+                let sum = e.bin(BinaryArithOpKind::SAdd, value, pure);
+                let difference = e.bin(BinaryArithOpKind::SSub, pure, value);
+                let next_acc = e.bin(BinaryArithOpKind::Xor, acc, sum);
+                let next_acc = e.bin(BinaryArithOpKind::Xor, next_acc, difference);
+                let less = e.cmp(pure, value, CmpKind::SLt);
+                let next_less = e.bin(BinaryArithOpKind::And, every_less, less);
+                let greater = e.cmp(value, pure, CmpKind::SLt);
+                let next_greater = e.bin(BinaryArithOpKind::Or, any_greater, greater);
+                let one = e.int_const(IntBits::from_u128(32, 1));
+                let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+                e.seal_and_switch(
+                    Terminator::Jmp(head, vec![next, next_acc, next_less, next_greater]),
+                    done,
+                );
+                let expected = e.int_const(expected);
+                e.assert_eq(acc, expected);
+                e.assert_eq(every_less, yes);
+                e.assert_eq(any_greater, no);
+                vec![]
+            },
+        );
         let what = format!("int{bits} signed chain against a pure operand");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
-        let selected = |bit: u128| input_block(&[&IntBits::from_u128(1, bit)]);
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let selected = |bit: u128| input_block::<Bn254>(&[&IntBits::from_u128(1, bit)]);
         let verdict = compiled.run(&selected(1));
         assert!(verdict.is_accepted(), "{what}: {verdict:?}");
         let verdict = compiled
@@ -2472,7 +2524,7 @@ fn a_signed_chain_against_a_pure_operand_a_loop_computes_agrees_with_the_model()
 fn a_signed_shift_left_agrees_with_the_model_past_the_host_word() {
     for bits in [100usize, 320] {
         let amounts = few_shift_amounts(bits, HOST_LIMB_BITS);
-        check_limbed_shifts(
+        check_limbed_grid::<Bn254>(
             Limbed::SignedShiftLeft,
             bits,
             &signed_corners(bits),
@@ -2509,12 +2561,12 @@ fn a_signed_product_quotient_or_right_shift_agrees_with_the_model_past_the_host_
                     })
                     .collect();
                 for pairs in pairs.chunks(8) {
-                    check_limbed_pairs(limbed, bits, pairs.to_vec(), Rhs::Constant);
+                    check_limbed_pairs::<Bn254>(limbed, bits, pairs.to_vec(), Rhs::Constant);
                 }
             }
         }
         let mut amounts = few_shift_amounts(bits, HOST_LIMB_BITS);
-        check_limbed_shifts(
+        check_limbed_grid::<Bn254>(
             Limbed::SignedShiftRight,
             bits,
             &values,
@@ -2525,7 +2577,7 @@ fn a_signed_product_quotient_or_right_shift_agrees_with_the_model_past_the_host_
         // unsigned shift. One at the width is refused at compile time, and so is left out.
         if bits == 320 {
             amounts.pop();
-            check_limbed_shifts(
+            check_limbed_grid::<Bn254>(
                 Limbed::SignedShiftRight,
                 bits,
                 &values,
@@ -2561,7 +2613,7 @@ fn a_signed_product_or_quotient_is_held_to_its_sign_at_int_min() {
             (min.clone(), minus_one.clone()),
             (signed(IntBits::signed_min(bits) + 1), minus_one.clone()),
         ];
-        check_limbed_pairs(Limbed::SignedProduct, bits, products, Rhs::Witnessed);
+        check_limbed_pairs::<Bn254>(Limbed::SignedProduct, bits, products, Rhs::Witnessed);
 
         let divisions = vec![
             (min.clone(), minus_one.clone()),
@@ -2570,7 +2622,7 @@ fn a_signed_product_or_quotient_is_held_to_its_sign_at_int_min() {
             (signed(IntBits::signed_min(bits) + 1), minus_one),
         ];
         for limbed in [Limbed::SignedQuotient, Limbed::SignedRemainder] {
-            check_limbed_pairs(limbed, bits, divisions.clone(), Rhs::Witnessed);
+            check_limbed_pairs::<Bn254>(limbed, bits, divisions.clone(), Rhs::Witnessed);
         }
     }
 }
@@ -2609,25 +2661,30 @@ fn a_signed_operation_on_operands_of_known_sign_agrees_with_the_model() {
         }
     }
 
-    let ssa = main_program(&[Type::int(64)], &[], move |e, params| {
-        let x = e.cast_to(CastTarget::Int(bits), params[0]);
-        for (kind, x_first, constant, want) in &checks {
-            let constant = e.int_const(constant.clone());
-            let (lhs, rhs) = if *x_first {
-                (x, constant)
-            } else {
-                (constant, x)
-            };
-            let got = e.bin(*kind, lhs, rhs);
-            let want = e.int_const(want.clone());
-            e.assert_eq(got, want);
-        }
-        vec![]
-    });
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[],
+        move |e, params| {
+            let x = e.cast_to(CastTarget::Int(bits), params[0]);
+            for (kind, x_first, constant, want) in &checks {
+                let constant = e.int_const(constant.clone());
+                let (lhs, rhs) = if *x_first {
+                    (x, constant)
+                } else {
+                    (constant, x)
+                };
+                let got = e.bin(*kind, lhs, rhs);
+                let want = e.int_const(want.clone());
+                e.assert_eq(got, want);
+            }
+            vec![]
+        },
+    );
     let what = format!("int{bits} signed operations of known sign");
-    let compiled =
-        Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
-    let run = |value: u128| input_block(&[&IntBits::from_u128(64, value)]);
+    let compiled = Compiled::<Bn254>::compile(ssa)
+        .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+    let run = |value: u128| input_block::<Bn254>(&[&IntBits::from_u128(64, value)]);
     let verdict = compiled.run(&run(input));
     assert!(verdict.is_accepted(), "{what}: {verdict:?}");
     let verdict = compiled
@@ -2647,6 +2704,7 @@ fn a_signed_operation_on_operands_of_known_sign_agrees_with_the_model() {
 fn a_signed_answer_known_at_compile_time_stays_witnessed() {
     let bits = 320usize;
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(64)],
         &[Type::int(64), Type::int(64), Type::int(64)],
         move |e, params| {
@@ -2666,10 +2724,11 @@ fn a_signed_answer_known_at_compile_time_stays_witnessed() {
         },
     );
     let what = format!("int{bits} signed answers known to be zero");
-    let compiled =
-        Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+    let compiled = Compiled::<Bn254>::compile(ssa)
+        .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
     let zero = IntBits::zero(64);
-    let run = |value: u128| input_block(&[&IntBits::from_u128(64, value), &zero, &zero, &zero]);
+    let run =
+        |value: u128| input_block::<Bn254>(&[&IntBits::from_u128(64, value), &zero, &zero, &zero]);
     let verdict = compiled.run(&run(5));
     assert!(verdict.is_accepted(), "{what}: {verdict:?}");
     let verdict = compiled.run_wasm(&run(5)).expect("the WASM lane builds");
@@ -2697,19 +2756,24 @@ fn a_known_negative_value_shifted_right_by_a_known_amount_stays_witnessed() {
             .expect("the model accepts the shift")
             .cast(64);
         let (program_value, program_shift) = (value.clone(), shift.clone());
-        let ssa = main_program(&[Type::int(1)], &[Type::int(64)], move |e, params| {
-            let constant = e.int_const(program_value);
-            let witnessed = e.cast_to(CastTarget::WitnessOf, constant);
-            let amount = e.int_const(program_shift);
-            let answer = e.bin(BinaryArithOpKind::SShr, witnessed, amount);
-            let one = e.int_const(IntBits::one(1));
-            e.assert_eq(params[0], one);
-            vec![e.cast_to(CastTarget::Int(64), answer)]
-        });
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(1)],
+            &[Type::int(64)],
+            move |e, params| {
+                let constant = e.int_const(program_value);
+                let witnessed = e.cast_to(CastTarget::WitnessOf, constant);
+                let amount = e.int_const(program_shift);
+                let answer = e.bin(BinaryArithOpKind::SShr, witnessed, amount);
+                let one = e.int_const(IntBits::one(1));
+                e.assert_eq(params[0], one);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            },
+        );
         let what = format!("int{bits} SShr of a known negative value by {amount}");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
-        let verdict = compiled.run(&input_block(&[&IntBits::one(1), &want]));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&IntBits::one(1), &want]));
         assert!(verdict.is_accepted(), "{what}: {verdict:?}");
     }
 }
@@ -2753,6 +2817,7 @@ fn every_witness_column_of_a_signed_product_quotient_or_right_shift_is_pinned() 
             .expect("the model accepts the pair");
         let (program_lhs, program_rhs) = (lhs, rhs);
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(1), Type::int(1)],
             &[Type::int(64)],
             move |e, params| {
@@ -2767,8 +2832,8 @@ fn every_witness_column_of_a_signed_product_quotient_or_right_shift_is_pinned() 
             },
         );
         let what = format!("{kind:?} at {bits} bits");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
         assert_every_column_is_pinned(&what, &compiled, &[&selected, &selected, &low(&want)]);
     }
 
@@ -2778,6 +2843,7 @@ fn every_witness_column_of_a_signed_product_quotient_or_right_shift_is_pinned() 
     for witnessed_amount in [true, false] {
         let program_lhs = lhs.clone();
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(1), Type::int(64)],
             &[Type::int(64)],
             move |e, params| {
@@ -2794,8 +2860,8 @@ fn every_witness_column_of_a_signed_product_quotient_or_right_shift_is_pinned() 
             },
         );
         let what = format!("SShr at {bits} bits, witnessed amount: {witnessed_amount}");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
         assert_every_column_is_pinned(&what, &compiled, &[&selected, &amount, &low(&shifted)]);
     }
 }
@@ -2851,6 +2917,7 @@ fn a_guarded_signed_operation_is_checked_only_where_its_guard_holds() {
                 .value()
                 .expect("the model accepts the holding pair");
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(1), Type::int(1)],
                 &[Type::int(64)],
                 move |e, params| {
@@ -2875,12 +2942,12 @@ fn a_guarded_signed_operation_is_checked_only_where_its_guard_holds() {
                 },
             );
             let what = format!("a guarded int{bits} {kind:?}");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
             let zero = IntBits::zero(64);
             for wasm in [false, true] {
                 // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
-                let refused = |verdict: &Verdict| {
+                let refused = |verdict: &Verdict<Bn254>| {
                     if wasm {
                         verdict.rejects()
                     } else {
@@ -2888,7 +2955,7 @@ fn a_guarded_signed_operation_is_checked_only_where_its_guard_holds() {
                     }
                 };
                 let run = |taken: u128, holding: u128, answer: &IntBits| {
-                    let inputs = input_block(&[
+                    let inputs = input_block::<Bn254>(&[
                         &IntBits::from_u128(1, taken),
                         &IntBits::from_u128(1, holding),
                         answer,
@@ -2961,50 +3028,55 @@ fn a_signed_product_or_quotient_against_a_pure_operand_a_loop_computes_agrees_wi
         });
 
         let (program_witnessed, program_stride) = (witnessed.clone(), stride.clone());
-        let ssa = main_program(&[Type::int(1), Type::int(64)], &[], move |e, params| {
-            let chosen = e.int_const(program_witnessed);
-            let zero = e.int_const(IntBits::zero(bits));
-            let value = e.select(params[0], chosen, zero);
-            let amount = e.cast_to(CastTarget::Int(bits), params[1]);
-            let stride = e.int_const(program_stride);
-            let three = e.int_const(IntBits::from_u128(bits, 3));
-            let start = e.int_const(IntBits::from_u128(32, 1));
-            let (head, _) = e.add_block();
-            let (body, _) = e.add_block();
-            let (done, _) = e.add_block();
-            e.seal_and_switch(Terminator::Jmp(head, vec![start, zero]), head);
-            let count = e.add_parameter(Type::int(32));
-            let acc = e.add_parameter(Type::int(bits));
-            let limit = e.int_const(IntBits::from_u128(32, iterations + 1));
-            let more = e.cmp(count, limit, CmpKind::ULt);
-            e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
-            let index = e.cast_to(CastTarget::Int(bits), count);
-            let scaled = e.bin(BinaryArithOpKind::UMul, index, stride);
-            let magnitude = e.bin(BinaryArithOpKind::UAdd, scaled, three);
-            let pure = e.bin(BinaryArithOpKind::SSub, zero, magnitude);
-            let mut next_acc = acc;
-            for (kind, lhs, rhs) in [
-                (BinaryArithOpKind::SMul, value, pure),
-                (BinaryArithOpKind::SDiv, pure, value),
-                (BinaryArithOpKind::SRem, pure, value),
-                (BinaryArithOpKind::SDiv, value, pure),
-                (BinaryArithOpKind::SShr, pure, amount),
-            ] {
-                let answer = e.bin(kind, lhs, rhs);
-                next_acc = e.bin(BinaryArithOpKind::Xor, next_acc, answer);
-            }
-            let one = e.int_const(IntBits::from_u128(32, 1));
-            let next = e.bin(BinaryArithOpKind::UAdd, count, one);
-            e.seal_and_switch(Terminator::Jmp(head, vec![next, next_acc]), done);
-            let expected = e.int_const(expected);
-            e.assert_eq(acc, expected);
-            vec![]
-        });
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(1), Type::int(64)],
+            &[],
+            move |e, params| {
+                let chosen = e.int_const(program_witnessed);
+                let zero = e.int_const(IntBits::zero(bits));
+                let value = e.select(params[0], chosen, zero);
+                let amount = e.cast_to(CastTarget::Int(bits), params[1]);
+                let stride = e.int_const(program_stride);
+                let three = e.int_const(IntBits::from_u128(bits, 3));
+                let start = e.int_const(IntBits::from_u128(32, 1));
+                let (head, _) = e.add_block();
+                let (body, _) = e.add_block();
+                let (done, _) = e.add_block();
+                e.seal_and_switch(Terminator::Jmp(head, vec![start, zero]), head);
+                let count = e.add_parameter(Type::int(32));
+                let acc = e.add_parameter(Type::int(bits));
+                let limit = e.int_const(IntBits::from_u128(32, iterations + 1));
+                let more = e.cmp(count, limit, CmpKind::ULt);
+                e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+                let index = e.cast_to(CastTarget::Int(bits), count);
+                let scaled = e.bin(BinaryArithOpKind::UMul, index, stride);
+                let magnitude = e.bin(BinaryArithOpKind::UAdd, scaled, three);
+                let pure = e.bin(BinaryArithOpKind::SSub, zero, magnitude);
+                let mut next_acc = acc;
+                for (kind, lhs, rhs) in [
+                    (BinaryArithOpKind::SMul, value, pure),
+                    (BinaryArithOpKind::SDiv, pure, value),
+                    (BinaryArithOpKind::SRem, pure, value),
+                    (BinaryArithOpKind::SDiv, value, pure),
+                    (BinaryArithOpKind::SShr, pure, amount),
+                ] {
+                    let answer = e.bin(kind, lhs, rhs);
+                    next_acc = e.bin(BinaryArithOpKind::Xor, next_acc, answer);
+                }
+                let one = e.int_const(IntBits::from_u128(32, 1));
+                let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+                e.seal_and_switch(Terminator::Jmp(head, vec![next, next_acc]), done);
+                let expected = e.int_const(expected);
+                e.assert_eq(acc, expected);
+                vec![]
+            },
+        );
         let what = format!("int{bits} signed product and quotient against a pure operand");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
         let amount = IntBits::from_u128(64, 67);
-        let selected = |bit: u128| input_block(&[&IntBits::from_u128(1, bit), &amount]);
+        let selected = |bit: u128| input_block::<Bn254>(&[&IntBits::from_u128(1, bit), &amount]);
         let verdict = compiled.run(&selected(1));
         assert!(verdict.is_accepted(), "{what}: {verdict:?}");
         let verdict = compiled
@@ -3043,20 +3115,35 @@ fn every_witness_column_of_a_signed_sum_difference_or_ordering_is_pinned() {
             (e.bin(BinaryArithOpKind::Or, positive, high), positive)
         };
 
-        let sum = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
-            let (lhs, rhs) = operands(e, params[0]);
-            let sum = e.bin(BinaryArithOpKind::SAdd, lhs, rhs);
-            vec![e.cast_to(CastTarget::Int(64), sum)]
-        });
-        let difference = main_program(&[Type::int(64)], &[Type::int(64)], |e, params| {
-            let (lhs, rhs) = operands(e, params[0]);
-            let difference = e.bin(BinaryArithOpKind::SSub, rhs, lhs);
-            vec![e.cast_to(CastTarget::Int(64), difference)]
-        });
-        let ordering = main_program(&[Type::int(64)], &[Type::int(1)], |e, params| {
-            let (lhs, rhs) = operands(e, params[0]);
-            vec![e.cmp(lhs, rhs, CmpKind::SLt)]
-        });
+        let sum = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(64)],
+            |e, params| {
+                let (lhs, rhs) = operands(e, params[0]);
+                let sum = e.bin(BinaryArithOpKind::SAdd, lhs, rhs);
+                vec![e.cast_to(CastTarget::Int(64), sum)]
+            },
+        );
+        let difference = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(64)],
+            |e, params| {
+                let (lhs, rhs) = operands(e, params[0]);
+                let difference = e.bin(BinaryArithOpKind::SSub, rhs, lhs);
+                vec![e.cast_to(CastTarget::Int(64), difference)]
+            },
+        );
+        let ordering = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(1)],
+            |e, params| {
+                let (lhs, rhs) = operands(e, params[0]);
+                vec![e.cmp(lhs, rhs, CmpKind::SLt)]
+            },
+        );
 
         // `(-2^(N-2) | 3) + 3` and `3 - (-2^(N-2) | 3)`, read at their low limb.
         for (operation, ssa, answer) in [
@@ -3065,7 +3152,7 @@ fn every_witness_column_of_a_signed_sum_difference_or_ordering_is_pinned() {
             ("SLt", ordering, IntBits::from_u128(1, 1)),
         ] {
             let what = format!("{operation} at {bits} bits");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
             assert_every_column_is_pinned(&what, &compiled, &[&parameter, &answer]);
         }
@@ -3097,6 +3184,7 @@ fn a_guarded_signed_sum_or_difference_is_checked_only_where_its_guard_holds() {
         ] {
             let base = IntBits::from_signed(bits, &base);
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(1), Type::int(64), Type::int(1)],
                 &[Type::int(64)],
                 move |e, params| {
@@ -3126,13 +3214,13 @@ fn a_guarded_signed_sum_or_difference_is_checked_only_where_its_guard_holds() {
                 },
             );
             let what = format!("a guarded int{bits} {kind:?}");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
             let zero = IntBits::zero(64);
             for wasm in [false, true] {
                 // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
-                let refused = |verdict: &Verdict| {
+                let refused = |verdict: &Verdict<Bn254>| {
                     if wasm {
                         verdict.rejects()
                     } else {
@@ -3140,7 +3228,7 @@ fn a_guarded_signed_sum_or_difference_is_checked_only_where_its_guard_holds() {
                     }
                 };
                 let run = |taken: u128, rhs: u128, answer: &IntBits| {
-                    let inputs = input_block(&[
+                    let inputs = input_block::<Bn254>(&[
                         &IntBits::from_u128(1, taken),
                         &IntBits::from_u128(64, rhs),
                         &IntBits::from_u128(1, 1),
@@ -3186,6 +3274,7 @@ fn a_guarded_signed_assertion_holds_only_where_its_guard_does() {
         for swapped in [false, true] {
             let sign = sign.clone();
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(1), Type::int(64)],
                 &[Type::int(1)],
                 move |e, params| {
@@ -3211,12 +3300,12 @@ fn a_guarded_signed_assertion_holds_only_where_its_guard_does() {
                 },
             );
             let what = format!("a guarded int{bits} signed assertion, swapped: {swapped}");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
             for wasm in [false, true] {
                 // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
-                let refused = |verdict: &Verdict| {
+                let refused = |verdict: &Verdict<Bn254>| {
                     if wasm {
                         verdict.rejects()
                     } else {
@@ -3224,7 +3313,7 @@ fn a_guarded_signed_assertion_holds_only_where_its_guard_does() {
                     }
                 };
                 let run = |taken: u128| {
-                    let inputs = input_block(&[
+                    let inputs = input_block::<Bn254>(&[
                         &IntBits::from_u128(1, taken),
                         &IntBits::from_u128(64, 7),
                         &IntBits::from_u128(1, taken),
@@ -3271,51 +3360,56 @@ fn a_witnessed_sign_extension_agrees_with_the_model() {
     ] {
         let values = signed_corners(from);
         let program_values = values.clone();
-        let ssa = main_program(&[Type::int(1)], &[Type::int(1)], move |e, params| {
-            let mut all = None;
-            for (index, value) in program_values.iter().enumerate() {
-                let next = &program_values[(index + 1) % program_values.len()];
-                let chosen = e.int_const(value.clone());
-                let other = e.int_const(next.clone());
-                let source = e.select(params[0], other, chosen);
-                let extended = e.fresh_value();
-                e.emit(OpCode::SExt {
-                    result: extended,
-                    value: source,
-                    from_bits: from,
-                    to_bits: to,
-                });
-                let want = e.int_const(value.sign_extend(to));
-                let other_want = e.int_const(next.sign_extend(to));
-                let want = e.select(params[0], other_want, want);
-                let same = e.eq(extended, want);
-                all = Some(match all {
-                    None => same,
-                    Some(all) => e.bin(BinaryArithOpKind::And, all, same),
-                });
-            }
-            vec![all.expect("there is at least one corner")]
-        });
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(1)],
+            &[Type::int(1)],
+            move |e, params| {
+                let mut all = None;
+                for (index, value) in program_values.iter().enumerate() {
+                    let next = &program_values[(index + 1) % program_values.len()];
+                    let chosen = e.int_const(value.clone());
+                    let other = e.int_const(next.clone());
+                    let source = e.select(params[0], other, chosen);
+                    let extended = e.fresh_value();
+                    e.emit(OpCode::SExt {
+                        result: extended,
+                        value: source,
+                        from_bits: from,
+                        to_bits: to,
+                    });
+                    let want = e.int_const(value.sign_extend(to));
+                    let other_want = e.int_const(next.sign_extend(to));
+                    let want = e.select(params[0], other_want, want);
+                    let same = e.eq(extended, want);
+                    all = Some(match all {
+                        None => same,
+                        Some(all) => e.bin(BinaryArithOpKind::And, all, same),
+                    });
+                }
+                vec![all.expect("there is at least one corner")]
+            },
+        );
         let what = format!("a witnessed sign extension from int{from} to int{to}");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
         let one = IntBits::from_u128(1, 1);
         for flag in [0u128, 1] {
             let flag = IntBits::from_u128(1, flag);
-            let verdict = compiled.run(&input_block(&[&flag, &one]));
+            let verdict = compiled.run(&input_block::<Bn254>(&[&flag, &one]));
             assert!(
                 verdict.is_accepted(),
                 "{what}, selector {flag:?}: {verdict:?}"
             );
-            let wrong = compiled.run(&input_block(&[&flag, &IntBits::zero(1)]));
+            let wrong = compiled.run(&input_block::<Bn254>(&[&flag, &IntBits::zero(1)]));
             assert!(
                 !wrong.is_accepted(),
                 "{what}, selector {flag:?}: a wrong answer was accepted"
             );
         }
         let verdict = compiled
-            .run_wasm(&input_block(&[&IntBits::zero(1), &one]))
+            .run_wasm(&input_block::<Bn254>(&[&IntBits::zero(1), &one]))
             .expect("the WASM lane builds");
         assert!(
             verdict.is_accepted(),
@@ -3337,48 +3431,53 @@ fn a_sign_extension_of_a_known_top_limb_agrees_with_the_model() {
     let negative = IntBits::from_signed(from, &-(SignedValue::from(5u8) << 200usize));
     for set in [false, true] {
         let constant = negative.clone();
-        let ssa = main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
-            let source = if set {
-                let constant = e.int_const(constant.clone());
-                e.cast_to(CastTarget::WitnessOf, constant)
-            } else {
-                e.cast_to(CastTarget::Int(from), params[0])
-            };
-            let extended = e.fresh_value();
-            e.emit(OpCode::SExt {
-                result: extended,
-                value: source,
-                from_bits: from,
-                to_bits: to,
-            });
-            // The parameter is or-ed into both sides, so that the witnessed constant meets a
-            // witnessed value limb by limb.
-            let low = e.cast_to(CastTarget::Int(to), params[0]);
-            let (extended, want) = if set {
-                let want = e.int_const(constant.sign_extend(to));
-                (
-                    e.bin(BinaryArithOpKind::Or, extended, low),
-                    e.bin(BinaryArithOpKind::Or, want, low),
-                )
-            } else {
-                (extended, low)
-            };
-            let same = e.eq(extended, want);
-            let amount = e.int_const(IntBits::from_u128(to, 900));
-            let top = e.bin(BinaryArithOpKind::UShr, extended, amount);
-            let top_want = e.bin(BinaryArithOpKind::UShr, want, amount);
-            let top_same = e.eq(top, top_want);
-            vec![e.bin(BinaryArithOpKind::And, same, top_same)]
-        });
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(1)],
+            move |e, params| {
+                let source = if set {
+                    let constant = e.int_const(constant.clone());
+                    e.cast_to(CastTarget::WitnessOf, constant)
+                } else {
+                    e.cast_to(CastTarget::Int(from), params[0])
+                };
+                let extended = e.fresh_value();
+                e.emit(OpCode::SExt {
+                    result: extended,
+                    value: source,
+                    from_bits: from,
+                    to_bits: to,
+                });
+                // The parameter is or-ed into both sides, so that the witnessed constant meets a
+                // witnessed value limb by limb.
+                let low = e.cast_to(CastTarget::Int(to), params[0]);
+                let (extended, want) = if set {
+                    let want = e.int_const(constant.sign_extend(to));
+                    (
+                        e.bin(BinaryArithOpKind::Or, extended, low),
+                        e.bin(BinaryArithOpKind::Or, want, low),
+                    )
+                } else {
+                    (extended, low)
+                };
+                let same = e.eq(extended, want);
+                let amount = e.int_const(IntBits::from_u128(to, 900));
+                let top = e.bin(BinaryArithOpKind::UShr, extended, amount);
+                let top_want = e.bin(BinaryArithOpKind::UShr, want, amount);
+                let top_same = e.eq(top, top_want);
+                vec![e.bin(BinaryArithOpKind::And, same, top_same)]
+            },
+        );
         let what = format!("a sign extension of a known top limb, sign set: {set}");
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
         let parameter = IntBits::all_ones(64);
         let one = IntBits::from_u128(1, 1);
-        let verdict = compiled.run(&input_block(&[&parameter, &one]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&parameter, &one]));
         assert!(verdict.is_accepted(), "{what}: {verdict:?}");
         let verdict = compiled
-            .run_wasm(&input_block(&[&parameter, &one]))
+            .run_wasm(&input_block::<Bn254>(&[&parameter, &one]))
             .expect("the WASM lane builds");
         assert!(verdict.is_accepted(), "{what}, WASM: {verdict:?}");
     }
@@ -3389,19 +3488,24 @@ fn a_sign_extension_of_a_known_top_limb_agrees_with_the_model() {
 #[test]
 fn every_witness_column_of_a_sign_extension_is_pinned() {
     let to = 320usize;
-    let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-        let extended = e.fresh_value();
-        e.emit(OpCode::SExt {
-            result: extended,
-            value: params[0],
-            from_bits: 64,
-            to_bits: to,
-        });
-        let amount = e.int_const(IntBits::from_u128(to, (to - 64) as u128));
-        let top = e.bin(BinaryArithOpKind::UShr, extended, amount);
-        vec![e.cast_to(CastTarget::Int(64), top)]
-    });
-    let compiled = Compiled::new(ssa)
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(64)],
+        move |e, params| {
+            let extended = e.fresh_value();
+            e.emit(OpCode::SExt {
+                result: extended,
+                value: params[0],
+                from_bits: 64,
+                to_bits: to,
+            });
+            let amount = e.int_const(IntBits::from_u128(to, (to - 64) as u128));
+            let top = e.bin(BinaryArithOpKind::UShr, extended, amount);
+            vec![e.cast_to(CastTarget::Int(64), top)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(ssa)
         .unwrap_or_else(|error| panic!("a sign extension to int{to} does not compile: {error}"));
     let negative = IntBits::from_signed(64, &SignedValue::from(-3));
     assert_every_column_is_pinned(
@@ -3425,13 +3529,21 @@ fn a_witness_shift_left_by_a_literal_amount_is_lowered() {
     let amount = 120;
     let value = IntBits::from_u128(bits, 0xab);
 
-    let ssa = main_program(&[Type::int(bits)], &[Type::int(bits)], |e, params| {
-        let literal = e.int_const(IntBits::from_u128(bits, amount as u128));
-        vec![e.bin(BinaryArithOpKind::UShl, params[0], literal)]
-    });
-    let compiled = Compiled::new(ssa).expect("a shift by a literal compiles");
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(bits)],
+        &[Type::int(bits)],
+        |e, params| {
+            let literal = e.int_const(IntBits::from_u128(bits, amount as u128));
+            vec![e.bin(BinaryArithOpKind::UShl, params[0], literal)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a shift by a literal compiles");
 
-    let verdict = compiled.run(&input_block(&[&value, &value.shifted_left(amount)]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[
+        &value,
+        &value.shifted_left(amount),
+    ]));
     assert!(verdict.is_accepted(), "int{bits} << {amount}: {verdict:?}");
 }
 
@@ -3445,13 +3557,21 @@ fn a_literal_shift_at_a_hundred_and_twenty_eight_bits_wraps_at_every_amount() {
     let bits = 128;
     let value = IntBits::all_ones(bits);
     for amount in [3usize, 120, 125, 126, 127] {
-        let ssa = main_program(&[Type::int(bits)], &[Type::int(bits)], |e, params| {
-            let literal = e.int_const(IntBits::from_u128(bits, amount as u128));
-            vec![e.bin(BinaryArithOpKind::UShl, params[0], literal)]
-        });
-        let compiled = Compiled::new(ssa)
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(bits)],
+            &[Type::int(bits)],
+            |e, params| {
+                let literal = e.int_const(IntBits::from_u128(bits, amount as u128));
+                vec![e.bin(BinaryArithOpKind::UShl, params[0], literal)]
+            },
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("int{bits} << {amount} does not compile: {error}"));
-        let verdict = compiled.run(&input_block(&[&value, &value.shifted_left(amount)]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[
+            &value,
+            &value.shifted_left(amount),
+        ]));
         assert!(
             verdict.is_accepted(),
             "int{bits} << {amount} wraps: {verdict:?}"
@@ -3506,7 +3626,7 @@ fn a_pure_wide_element_read_out_of_a_sequence_is_computed_on() {
 
     let program_elements = elements.clone();
     let program_other = other.clone();
-    let ssa = main_program(&[], &returns, move |e, _| {
+    let ssa = main_program(FieldConfig::bn254(), &[], &returns, move |e, _| {
         let constants: Vec<ValueId> = program_elements
             .iter()
             .map(|element| e.int_const(element.clone()))
@@ -3533,15 +3653,15 @@ fn a_pure_wide_element_read_out_of_a_sequence_is_computed_on() {
         }
         answers
     });
-    let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+    let compiled = Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| {
         panic!("a pure wide element computed on does not compile: {error}")
     });
 
     let answers: Vec<&IntBits> = expected.iter().collect();
-    let verdict = compiled.run(&input_block(&answers));
+    let verdict = compiled.run(&input_block::<Bn254>(&answers));
     assert!(verdict.is_accepted(), "{verdict:?}");
     let verdict = compiled
-        .run_wasm(&input_block(&answers))
+        .run_wasm(&input_block::<Bn254>(&answers))
         .expect("the WASM lane builds");
     assert!(verdict.is_accepted(), "WASM: {verdict:?}");
     for index in 0..expected.len() {
@@ -3549,7 +3669,7 @@ fn a_pure_wide_element_read_out_of_a_sequence_is_computed_on() {
         wrong[index] = wrong[index].xor(&IntBits::one(wrong[index].bits()));
         let wrong: Vec<&IntBits> = wrong.iter().collect();
         assert!(
-            !compiled.run(&input_block(&wrong)).is_accepted(),
+            !compiled.run(&input_block::<Bn254>(&wrong)).is_accepted(),
             "answer {index} accepted a wrong value"
         );
     }
@@ -3571,36 +3691,41 @@ fn a_pure_wide_value_a_loop_computes_is_carried_to_its_limbs() {
     let low = |value: &BigUint| IntBits::from_biguint(64, &(value % (BigUint::from(1u8) << 64)));
 
     for multiplied in [false, true] {
-        let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-            let zero = e.int_const(IntBits::zero(32));
-            let one = e.int_const(IntBits::from_u128(bits, 1));
-            let (head, _) = e.add_block();
-            let (back, _) = e.add_block();
-            let (done, _) = e.add_block();
-            e.seal_and_switch(Terminator::Jmp(head, vec![zero, one]), head);
-            let count = e.add_parameter(Type::int(32));
-            let power = e.add_parameter(Type::int(bits));
-            let three = e.int_const(IntBits::from_u128(bits, 3));
-            let power = e.bin(BinaryArithOpKind::UMul, power, three);
-            let step = e.int_const(IntBits::from_u128(32, 1));
-            let count = e.bin(BinaryArithOpKind::UAdd, count, step);
-            let limit = e.int_const(IntBits::from_u128(32, 200));
-            let more = e.cmp(count, limit, CmpKind::ULt);
-            e.seal_and_switch(Terminator::JmpIf(more, back, done), back);
-            e.seal_and_switch(Terminator::Jmp(head, vec![count, power]), done);
-            let value = if multiplied {
-                let factor = e.cast_to(CastTarget::Int(bits), params[0]);
-                e.bin(BinaryArithOpKind::UMul, factor, power)
-            } else {
-                power
-            };
-            vec![e.cast_to(CastTarget::Int(64), value)]
-        });
-        let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let zero = e.int_const(IntBits::zero(32));
+                let one = e.int_const(IntBits::from_u128(bits, 1));
+                let (head, _) = e.add_block();
+                let (back, _) = e.add_block();
+                let (done, _) = e.add_block();
+                e.seal_and_switch(Terminator::Jmp(head, vec![zero, one]), head);
+                let count = e.add_parameter(Type::int(32));
+                let power = e.add_parameter(Type::int(bits));
+                let three = e.int_const(IntBits::from_u128(bits, 3));
+                let power = e.bin(BinaryArithOpKind::UMul, power, three);
+                let step = e.int_const(IntBits::from_u128(32, 1));
+                let count = e.bin(BinaryArithOpKind::UAdd, count, step);
+                let limit = e.int_const(IntBits::from_u128(32, 200));
+                let more = e.cmp(count, limit, CmpKind::ULt);
+                e.seal_and_switch(Terminator::JmpIf(more, back, done), back);
+                e.seal_and_switch(Terminator::Jmp(head, vec![count, power]), done);
+                let value = if multiplied {
+                    let factor = e.cast_to(CastTarget::Int(bits), params[0]);
+                    e.bin(BinaryArithOpKind::UMul, factor, power)
+                } else {
+                    power
+                };
+                vec![e.cast_to(CastTarget::Int(64), value)]
+            },
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| {
             panic!("the loop, multiplied: {multiplied}, does not compile: {error}")
         });
         let inputs = |factor: u64, answer: &IntBits| {
-            input_block(&[&IntBits::from_u128(64, u128::from(factor)), answer])
+            input_block::<Bn254>(&[&IntBits::from_u128(64, u128::from(factor)), answer])
         };
 
         for factor in [1u64, 5] {
@@ -3651,6 +3776,7 @@ fn a_dead_witnessed_operation_still_rejects_its_overflow() {
             BinaryArithOpKind::UMul,
         ] {
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(8), Type::int(8)],
                 &[Type::int(1)],
                 move |e, params| {
@@ -3668,11 +3794,11 @@ fn a_dead_witnessed_operation_still_rejects_its_overflow() {
                     vec![e.int_const(IntBits::from_u128(1, 1))]
                 },
             );
-            let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+            let compiled = Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| {
                 panic!("a dead int{bits} {kind:?} does not compile: {error}")
             });
             let run = |lhs: u128, rhs: u128| {
-                compiled.run(&input_block(&[
+                compiled.run(&input_block::<Bn254>(&[
                     &IntBits::from_u128(8, lhs),
                     &IntBits::from_u128(8, rhs),
                     &one,
@@ -3744,6 +3870,7 @@ fn a_dead_witnessed_signed_operation_still_rejects_its_overflow() {
         ];
         for (kind, fits, overflows) in cases {
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(bits), Type::int(bits)],
                 &[Type::int(1)],
                 move |e, params| {
@@ -3751,11 +3878,11 @@ fn a_dead_witnessed_signed_operation_still_rejects_its_overflow() {
                     vec![e.int_const(IntBits::from_u128(1, 1))]
                 },
             );
-            let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+            let compiled = Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| {
                 panic!("a dead int{bits} {kind:?} does not compile: {error}")
             });
             let run = |(lhs, rhs): (u128, u128)| {
-                compiled.run(&input_block(&[
+                compiled.run(&input_block::<Bn254>(&[
                     &IntBits::from_u128(bits, lhs),
                     &IntBits::from_u128(bits, rhs),
                     &one,
@@ -3818,19 +3945,24 @@ fn a_dead_wide_witnessed_signed_operation_still_rejects_its_failure() {
         ];
         for (kind, fits, fails) in cases {
             let (program_fits, program_fails) = (fits.clone(), fails.clone());
-            let ssa = main_program(&[Type::int(1)], &[Type::int(1)], move |e, params| {
-                let operand = |e: &mut HLBlockEmitter<'_>, fits: &IntBits, fails: &IntBits| {
-                    let fits = e.int_const(fits.clone());
-                    let fails = e.int_const(fails.clone());
-                    e.select(params[0], fits, fails)
-                };
-                let lhs = operand(e, &program_fits.0, &program_fails.0);
-                let rhs = operand(e, &program_fits.1, &program_fails.1);
-                e.bin(kind, lhs, rhs);
-                vec![e.int_const(IntBits::from_u128(1, 1))]
-            });
+            let ssa = main_program(
+                FieldConfig::bn254(),
+                &[Type::int(1)],
+                &[Type::int(1)],
+                move |e, params| {
+                    let operand = |e: &mut HLBlockEmitter<'_>, fits: &IntBits, fails: &IntBits| {
+                        let fits = e.int_const(fits.clone());
+                        let fails = e.int_const(fails.clone());
+                        e.select(params[0], fits, fails)
+                    };
+                    let lhs = operand(e, &program_fits.0, &program_fails.0);
+                    let rhs = operand(e, &program_fits.1, &program_fails.1);
+                    e.bin(kind, lhs, rhs);
+                    vec![e.int_const(IntBits::from_u128(1, 1))]
+                },
+            );
             let what = format!("a dead int{bits} {kind:?}");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
             assert!(
                 mavros_int_semantics::eval(IntOp::from(kind), &fits.0, &fits.1)
@@ -3846,7 +3978,7 @@ fn a_dead_wide_witnessed_signed_operation_still_rejects_its_failure() {
             );
             for wasm in [false, true] {
                 // A refusal is a trap on the VM, and a witness the constraints refuse on WASM.
-                let refused = |verdict: &Verdict| {
+                let refused = |verdict: &Verdict<Bn254>| {
                     if wasm {
                         verdict.rejects()
                     } else {
@@ -3854,7 +3986,7 @@ fn a_dead_wide_witnessed_signed_operation_still_rejects_its_failure() {
                     }
                 };
                 let run = |selected: u128| {
-                    let inputs = input_block(&[&IntBits::from_u128(1, selected), &one]);
+                    let inputs = input_block::<Bn254>(&[&IntBits::from_u128(1, selected), &one]);
                     if wasm {
                         compiled.run_wasm(&inputs).expect("the WASM lane builds")
                     } else {
@@ -3885,33 +4017,38 @@ fn a_dead_wide_witnessed_signed_operation_still_rejects_its_failure() {
 fn a_pure_int_min_over_a_witnessed_minus_one_is_refused() {
     for (param, bits) in [(64usize, 64usize), (126, 126), (127, 127), (64, 320)] {
         for kind in [BinaryArithOpKind::SDiv, BinaryArithOpKind::SRem] {
-            let ssa = main_program(&[Type::int(param)], &[Type::int(1)], move |e, params| {
-                let divisor = if param == bits {
-                    params[0]
-                } else {
-                    let extended = e.fresh_value();
-                    e.emit(OpCode::SExt {
-                        result: extended,
-                        value: params[0],
-                        from_bits: param,
-                        to_bits: bits,
-                    });
-                    extended
-                };
-                let min = e.int_const(IntBits::one(bits).shifted_left(bits - 1));
-                let answer = e.bin(kind, min, divisor);
-                let zero = e.int_const(IntBits::zero(bits));
-                vec![e.eq(answer, zero)]
-            });
+            let ssa = main_program(
+                FieldConfig::bn254(),
+                &[Type::int(param)],
+                &[Type::int(1)],
+                move |e, params| {
+                    let divisor = if param == bits {
+                        params[0]
+                    } else {
+                        let extended = e.fresh_value();
+                        e.emit(OpCode::SExt {
+                            result: extended,
+                            value: params[0],
+                            from_bits: param,
+                            to_bits: bits,
+                        });
+                        extended
+                    };
+                    let min = e.int_const(IntBits::one(bits).shifted_left(bits - 1));
+                    let answer = e.bin(kind, min, divisor);
+                    let zero = e.int_const(IntBits::zero(bits));
+                    vec![e.eq(answer, zero)]
+                },
+            );
             let what = format!("int{bits} INT_MIN {kind:?} a witnessed divisor");
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
 
             // Refused whichever answer is declared, so it is the division that fails rather than
             // the return check.
             let minus_one = IntBits::all_ones(param);
             for declared in [0u128, 1] {
-                let inputs = input_block(&[&minus_one, &IntBits::from_u128(1, declared)]);
+                let inputs = input_block::<Bn254>(&[&minus_one, &IntBits::from_u128(1, declared)]);
                 let verdict = compiled.run(&inputs);
                 assert!(verdict.is_refusal(), "{what} of -1: {verdict:?}");
                 let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -3920,7 +4057,7 @@ fn a_pure_int_min_over_a_witnessed_minus_one_is_refused() {
 
             // `INT_MIN / 1` is `INT_MIN`, which is not zero, and `INT_MIN % 1` is zero.
             let declared = IntBits::from_u128(1, u128::from(kind == BinaryArithOpKind::SRem));
-            let inputs = input_block(&[&IntBits::one(param), &declared]);
+            let inputs = input_block::<Bn254>(&[&IntBits::one(param), &declared]);
             let verdict = compiled.run(&inputs);
             assert!(verdict.is_accepted(), "{what} of 1: {verdict:?}");
             let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -3949,6 +4086,7 @@ fn a_witnessed_bitwise_operation_computes_at_every_width() {
             BinaryArithOpKind::Xor,
         ] {
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::int(64), Type::int(64)],
                 &[Type::int(64)],
                 move |e, params| {
@@ -3958,7 +4096,7 @@ fn a_witnessed_bitwise_operation_computes_at_every_width() {
                     vec![e.cast_to(CastTarget::Int(64), answer)]
                 },
             );
-            let compiled = Compiled::new(ssa)
+            let compiled = Compiled::<Bn254>::compile(ssa)
                 .unwrap_or_else(|error| panic!("an int{bits} {kind:?} is refused: {error}"));
 
             // Operands with bits in both halves of every limb, so a decomposition that dropped or
@@ -3977,7 +4115,7 @@ fn a_witnessed_bitwise_operation_computes_at_every_width() {
                 BinaryArithOpKind::Or => a | c,
                 _ => a ^ c,
             };
-            let verdict = compiled.run(&input_block(&[
+            let verdict = compiled.run(&input_block::<Bn254>(&[
                 &IntBits::from_u128(64, x),
                 &IntBits::from_u128(64, y),
                 &IntBits::from_u128(64, want),
@@ -4005,24 +4143,29 @@ fn a_wide_bitwise_operation_takes_one_pure_operand() {
         let expected = &high + BigUint::from(input & 0x0F0F_0F0F);
 
         let (high_bit, mask_bits, want_bits) = (high, mask, expected);
-        let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-            let widened = e.cast_to(CastTarget::Int(bits), params[0]);
-            let high = e.int_const(IntBits::from_biguint(bits, &high_bit));
-            let witnessed = e.bin(BinaryArithOpKind::Or, widened, high);
-            // The mask meets the operand in the top limb and in the bottom, so a decomposition
-            // that mislaid either end shows up in the answer.
-            let mask = e.int_const(IntBits::from_biguint(bits, &mask_bits));
-            let masked = e.bin(BinaryArithOpKind::And, witnessed, mask);
-            // Compared **whole**. Narrowing the result to the return width would read its lowest
-            // limb alone, and every limb above it could be dropped unseen.
-            let want = e.int_const(IntBits::from_biguint(bits, &want_bits));
-            let same = e.eq(masked, want);
-            vec![e.cast_to(CastTarget::Int(64), same)]
-        });
-        let compiled = Compiled::new(ssa)
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let widened = e.cast_to(CastTarget::Int(bits), params[0]);
+                let high = e.int_const(IntBits::from_biguint(bits, &high_bit));
+                let witnessed = e.bin(BinaryArithOpKind::Or, widened, high);
+                // The mask meets the operand in the top limb and in the bottom, so a decomposition
+                // that mislaid either end shows up in the answer.
+                let mask = e.int_const(IntBits::from_biguint(bits, &mask_bits));
+                let masked = e.bin(BinaryArithOpKind::And, witnessed, mask);
+                // Compared **whole**. Narrowing the result to the return width would read its
+                // lowest limb alone, and every limb above it could be dropped unseen.
+                let want = e.int_const(IntBits::from_biguint(bits, &want_bits));
+                let same = e.eq(masked, want);
+                vec![e.cast_to(CastTarget::Int(64), same)]
+            },
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("an int{bits} mixed bitwise is refused: {error}"));
 
-        let verdict = compiled.run(&input_block(&[
+        let verdict = compiled.run(&input_block::<Bn254>(&[
             &IntBits::from_u128(64, u128::from(input)),
             &IntBits::from_u128(64, 1),
         ]));
@@ -4045,6 +4188,7 @@ fn a_wide_bitwise_operation_takes_one_pure_operand() {
 fn a_witnessed_complement_computes_at_every_width() {
     for bits in [96usize, 200, 253, 254, 320] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(64), Type::int(64)],
             &[Type::int(64)],
             move |e, params| {
@@ -4055,12 +4199,12 @@ fn a_witnessed_complement_computes_at_every_width() {
                 vec![e.cast_to(CastTarget::Int(64), answer)]
             },
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("an int{bits} complement is refused: {error}"));
 
         let (x, y) = (0xDEAD_BEEF_0BAD_F00Du64, 0xF0F0_F0F0_0F0F_0F0Fu64);
         let want = !x ^ y;
-        let verdict = compiled.run(&input_block(&[
+        let verdict = compiled.run(&input_block::<Bn254>(&[
             &IntBits::from_u128(64, u128::from(x)),
             &IntBits::from_u128(64, u128::from(y)),
             &IntBits::from_u128(64, u128::from(want)),
@@ -4089,19 +4233,24 @@ fn a_complement_outside_the_witness_domain_computes_at_every_width() {
     const PURE: u64 = 0xDEAD;
 
     for bits in [96usize, 200, 253, 254, 320] {
-        let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-            let pure = e.int_const(IntBits::from_biguint(bits, &BigUint::from(PURE)));
-            let flipped = e.not(pure);
-            let witnessed = e.cast_to(CastTarget::Int(bits), params[0]);
-            let answer = e.bin(BinaryArithOpKind::Xor, flipped, witnessed);
-            vec![e.cast_to(CastTarget::Int(64), answer)]
-        });
-        let compiled = Compiled::new(ssa)
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(64)],
+            move |e, params| {
+                let pure = e.int_const(IntBits::from_biguint(bits, &BigUint::from(PURE)));
+                let flipped = e.not(pure);
+                let witnessed = e.cast_to(CastTarget::Int(bits), params[0]);
+                let answer = e.bin(BinaryArithOpKind::Xor, flipped, witnessed);
+                vec![e.cast_to(CastTarget::Int(64), answer)]
+            },
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("an int{bits} pure complement is refused: {error}"));
 
         let x = 0xDEAD_BEEF_0BAD_F00Du64;
         let want = !PURE ^ x;
-        let verdict = compiled.run(&input_block(&[
+        let verdict = compiled.run(&input_block::<Bn254>(&[
             &IntBits::from_u128(64, u128::from(x)),
             &IntBits::from_u128(64, u128::from(want)),
         ]));
@@ -4256,24 +4405,17 @@ fn pure_choice(
     e.bin(BinaryArithOpKind::Or, kept, other)
 }
 
-/// `main(chosen: u1, name: u32, also_chosen: u1) -> u1`, which passes its parameters to an
-/// **unconstrained** function whose body `body` builds, and returns its answer.
+/// `main(chosen: u1, name: u32, also_chosen: u1) -> u1` over `field`, which passes its parameters
+/// to an **unconstrained** function whose body `body` builds, and returns its answer.
 ///
 /// Every value in the body is pure and the parameters are not literals, so the answer comes from
 /// the arithmetic of the interpreter and of the compiled WASM, behind the guard IR, with no
 /// constraint anywhere and no constant folder able to answer first.
 fn unconstrained_program(
-    body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> ValueId,
-) -> HLSSA {
-    unconstrained_program_in(FieldConfig::bn254(), body)
-}
-
-/// [`unconstrained_program`] over `field`.
-fn unconstrained_program_in(
     field: FieldConfig,
     body: impl FnOnce(&mut HLBlockEmitter<'_>, &[ValueId]) -> ValueId,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let body_id = ssa.add_function("pure_body".to_string());
     let mut sb = HLSSABuilder::new(&mut ssa);
@@ -4307,16 +4449,11 @@ fn unconstrained_program_in(
     ssa
 }
 
-/// The inputs an [`unconstrained_program`] runs on: both choices made, `name` named, and the answer
-/// `1` expected.
-fn unconstrained_inputs(name: u128) -> Vec<InputValueOrdered> {
-    unconstrained_inputs_in(name)
-}
-
-/// [`unconstrained_inputs`] in `F`.
-fn unconstrained_inputs_in<F: HarnessField>(name: u128) -> Vec<InputValueOrdered<F>> {
+/// The inputs an [`unconstrained_program`] runs on, in `F`: both choices made, `name` named, and
+/// the answer `1` expected.
+fn unconstrained_inputs<F: HarnessField>(name: u128) -> Vec<InputValueOrdered<F>> {
     let one = IntBits::from_u128(1, 1);
-    input_block_in(&[&one, &IntBits::from_u128(32, name), &one, &one])
+    input_block(&[&one, &IntBits::from_u128(32, name), &one, &one])
 }
 
 /// `triples`, computed outside the witness domain, against the model, on both lanes.
@@ -4336,7 +4473,7 @@ fn check_pure_signed_triples(bits: usize, triples: Vec<(PureSigned, IntBits, Int
         .collect();
 
     let (program_triples, program_answers) = (triples.clone(), answers.clone());
-    let ssa = unconstrained_program(move |e, params| {
+    let ssa = unconstrained_program(FieldConfig::bn254(), move |e, params| {
         let zero = e.int_const(IntBits::zero(bits));
         let mut all = None;
         for (index, (((op, lhs, rhs), answer), unnamed)) in program_triples
@@ -4368,7 +4505,7 @@ fn check_pure_signed_triples(bits: usize, triples: Vec<(PureSigned, IntBits, Int
         }
         all.expect("there is at least one triple")
     });
-    let compiled = Compiled::new(ssa)
+    let compiled = Compiled::<Bn254>::compile(ssa)
         .unwrap_or_else(|error| panic!("pure signed int{bits} does not compile: {error}"));
 
     let inputs = unconstrained_inputs;
@@ -4425,7 +4562,7 @@ fn a_pure_signed_operation_agrees_with_the_model_past_the_host_limb() {
 #[test]
 fn a_pure_sign_extension_agrees_with_the_model() {
     let extensions = [(100usize, 128usize), (100, 1000), (128, 129), (200, 16384)];
-    let ssa = unconstrained_program(move |e, params| {
+    let ssa = unconstrained_program(FieldConfig::bn254(), move |e, params| {
         let mut all = None;
         for (from, to) in extensions {
             let zero = e.int_const(IntBits::zero(from));
@@ -4443,9 +4580,9 @@ fn a_pure_sign_extension_agrees_with_the_model() {
         }
         all.expect("there is at least one extension")
     });
-    let compiled = Compiled::new(ssa)
+    let compiled = Compiled::<Bn254>::compile(ssa)
         .unwrap_or_else(|error| panic!("a pure sign extension does not compile: {error}"));
-    let inputs = unconstrained_inputs(0);
+    let inputs = unconstrained_inputs::<Bn254>(0);
     let verdict = compiled.run(&inputs);
     assert!(verdict.is_accepted(), "{verdict:?}");
     let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -4488,7 +4625,7 @@ fn a_pure_spread_and_unspread_agree_with_the_model() {
         ]
     };
 
-    let ssa = unconstrained_program(move |e, params| {
+    let ssa = unconstrained_program(FieldConfig::bn254(), move |e, params| {
         let mut checks = Vec::new();
         for (bits, read) in spreads {
             let zero = e.int_const(IntBits::zero(bits));
@@ -4517,9 +4654,9 @@ fn a_pure_spread_and_unspread_agree_with_the_model() {
             .reduce(|all, same| e.bin(BinaryArithOpKind::And, all, same))
             .expect("there is at least one check")
     });
-    let compiled = Compiled::new(ssa)
+    let compiled = Compiled::<Bn254>::compile(ssa)
         .unwrap_or_else(|error| panic!("a pure spread does not compile: {error}"));
-    let inputs = unconstrained_inputs(0);
+    let inputs = unconstrained_inputs::<Bn254>(0);
     let verdict = compiled.run(&inputs);
     assert!(verdict.is_accepted(), "{verdict:?}");
     let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -4532,9 +4669,9 @@ fn a_pure_spread_and_unspread_agree_with_the_model() {
 fn pure_field_bit_windows_read_the_canonical_integer() {
     let field = FieldConfig::bn254();
     for window in pure_field_windows(field) {
-        let compiled = Compiled::<Field>::new(pure_field_window_program(field, window))
+        let compiled = Compiled::<Bn254>::compile(pure_field_window_program(field, window))
             .unwrap_or_else(|error| panic!("the window {window:?} does not compile: {error}"));
-        let inputs = unconstrained_inputs(0);
+        let inputs = unconstrained_inputs::<Bn254>(0);
         let verdict = compiled.run(&inputs);
         assert!(verdict.is_accepted(), "{window:?}: {verdict:?}");
         let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -4550,9 +4687,10 @@ fn pure_field_casts_agree_with_the_model() {
     let widths = [
         1usize, 63, 64, 65, 100, 127, 128, 129, 253, 254, 255, 256, 257, 1000, 16384,
     ];
-    let compiled = Compiled::<Field>::new(pure_field_casts_program(FieldConfig::bn254(), &widths))
-        .unwrap_or_else(|error| panic!("a pure field cast does not compile: {error}"));
-    let inputs = unconstrained_inputs(0);
+    let compiled =
+        Compiled::<Bn254>::compile(pure_field_casts_program(FieldConfig::bn254(), &widths))
+            .unwrap_or_else(|error| panic!("a pure field cast does not compile: {error}"));
+    let inputs = unconstrained_inputs::<Bn254>(0);
     let verdict = compiled.run(&inputs);
     assert!(verdict.is_accepted(), "{verdict:?}");
     let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -4567,7 +4705,7 @@ fn element_of(field: FieldConfig, canonical: &BigUint) -> FieldElement {
 }
 
 /// `main` checking both field casts of pure values in `field` at every corner and `widths`, through
-/// an [`unconstrained_program_in`]: `1` exactly when every cast answers the model.
+/// an [`unconstrained_program`]: `1` exactly when every cast answers the model.
 ///
 /// The integer side is chosen by a parameter and the element is multiplied by one cast from a
 /// parameter, so no constant folder answers first.
@@ -4576,7 +4714,7 @@ fn pure_field_casts_program(field: FieldConfig, widths: &[usize]) -> HLSSA {
     let element = move |canonical: &BigUint| element_of(field, canonical);
     let widths = widths.to_vec();
 
-    unconstrained_program_in(field, move |e, params| {
+    unconstrained_program(field, move |e, params| {
         let mut checks = Vec::new();
         let one = e.cast_to_field(params[0]);
         for bits in widths {
@@ -4626,12 +4764,12 @@ fn pure_field_windows(field: FieldConfig) -> Vec<(usize, usize)> {
 }
 
 /// `main` checking one bit window of pure elements in `field` at every corner, through an
-/// [`unconstrained_program_in`]: `1` exactly when each window is the canonical integer's bits.
+/// [`unconstrained_program`]: `1` exactly when each window is the canonical integer's bits.
 ///
 /// Each element is multiplied by one cast from a parameter, so no constant folder answers first.
 fn pure_field_window_program(field: FieldConfig, (offset, width): (usize, usize)) -> HLSSA {
     let modulus = biguint_of_limbs(field.modulus_limbs());
-    unconstrained_program_in(field, move |e, params| {
+    unconstrained_program(field, move |e, params| {
         let one = e.cast_to_field(params[0]);
         let mut checks = Vec::new();
         for canonical in corners::field_cast_elements(&modulus) {
@@ -4697,55 +4835,60 @@ fn check_guarded_pure_signed(bits: usize, triples: &[(PureSigned, IntBits, IntBi
     let (program_triples, program_answers) = (triples.to_vec(), answers.clone());
     let mut parameters = vec![Type::int(1); triples.len()];
     parameters.push(Type::int(8));
-    let ssa = main_program(&parameters, &[Type::int(1)], move |e, params| {
-        let yes = e.int_const(IntBits::from_u128(1, 1));
-        let start = e.int_const(IntBits::zero(8));
-        let (head, _) = e.add_block();
-        let (body, _) = e.add_block();
-        let (done, _) = e.add_block();
-        e.seal_and_switch(Terminator::Jmp(head, vec![start, yes]), head);
-        let count = e.add_parameter(Type::int(8));
-        let last = e.add_parameter(Type::int(1));
-        let limit = e.int_const(IntBits::from_u128(8, 2));
-        let more = e.cmp(count, limit, CmpKind::ULt);
-        e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &parameters,
+        &[Type::int(1)],
+        move |e, params| {
+            let yes = e.int_const(IntBits::from_u128(1, 1));
+            let start = e.int_const(IntBits::zero(8));
+            let (head, _) = e.add_block();
+            let (body, _) = e.add_block();
+            let (done, _) = e.add_block();
+            e.seal_and_switch(Terminator::Jmp(head, vec![start, yes]), head);
+            let count = e.add_parameter(Type::int(8));
+            let last = e.add_parameter(Type::int(1));
+            let limit = e.int_const(IntBits::from_u128(8, 2));
+            let more = e.cmp(count, limit, CmpKind::ULt);
+            e.seal_and_switch(Terminator::JmpIf(more, body, done), body);
 
-        // Zero, but only once the loop has run, so every operand below is never a literal.
-        let hundred = e.int_const(IntBits::from_u128(8, 100));
-        let nothing = e.bin(BinaryArithOpKind::UDiv, count, hundred);
-        let nothing = e.cast_to(CastTarget::Int(bits), nothing);
+            // Zero, but only once the loop has run, so every operand below is never a literal.
+            let hundred = e.int_const(IntBits::from_u128(8, 100));
+            let nothing = e.bin(BinaryArithOpKind::UDiv, count, hundred);
+            let nothing = e.cast_to(CastTarget::Int(bits), nothing);
 
-        let mut all = yes;
-        for (index, ((op, lhs, rhs), answer)) in
-            program_triples.iter().zip(&program_answers).enumerate()
-        {
-            let lhs = e.int_const(lhs.clone());
-            let lhs = e.bin(BinaryArithOpKind::Xor, nothing, lhs);
-            let rhs = e.int_const(rhs.clone());
-            let rhs = e.bin(BinaryArithOpKind::Xor, nothing, rhs);
-            let (taken, _) = e.add_block();
-            let (skipped, _) = e.add_block();
-            let (merge, _) = e.add_block();
-            e.seal_and_switch(Terminator::JmpIf(params[index], taken, skipped), taken);
-            let got = op.emit(e, lhs, rhs);
-            let agrees = match answer {
-                Some(want) => {
-                    let want = e.int_const(want.clone());
-                    e.cmp(got, want, CmpKind::Eq)
-                }
-                None => yes,
-            };
-            e.seal_and_switch(Terminator::Jmp(merge, vec![agrees]), skipped);
-            e.seal_and_switch(Terminator::Jmp(merge, vec![yes]), merge);
-            let merged = e.add_parameter(Type::int(1));
-            all = e.bin(BinaryArithOpKind::And, all, merged);
-        }
-        let one = e.int_const(IntBits::from_u128(8, 1));
-        let next = e.bin(BinaryArithOpKind::UAdd, count, one);
-        e.seal_and_switch(Terminator::Jmp(head, vec![next, all]), done);
-        vec![last]
-    });
-    let compiled = Compiled::new(ssa)
+            let mut all = yes;
+            for (index, ((op, lhs, rhs), answer)) in
+                program_triples.iter().zip(&program_answers).enumerate()
+            {
+                let lhs = e.int_const(lhs.clone());
+                let lhs = e.bin(BinaryArithOpKind::Xor, nothing, lhs);
+                let rhs = e.int_const(rhs.clone());
+                let rhs = e.bin(BinaryArithOpKind::Xor, nothing, rhs);
+                let (taken, _) = e.add_block();
+                let (skipped, _) = e.add_block();
+                let (merge, _) = e.add_block();
+                e.seal_and_switch(Terminator::JmpIf(params[index], taken, skipped), taken);
+                let got = op.emit(e, lhs, rhs);
+                let agrees = match answer {
+                    Some(want) => {
+                        let want = e.int_const(want.clone());
+                        e.cmp(got, want, CmpKind::Eq)
+                    }
+                    None => yes,
+                };
+                e.seal_and_switch(Terminator::Jmp(merge, vec![agrees]), skipped);
+                e.seal_and_switch(Terminator::Jmp(merge, vec![yes]), merge);
+                let merged = e.add_parameter(Type::int(1));
+                all = e.bin(BinaryArithOpKind::And, all, merged);
+            }
+            let one = e.int_const(IntBits::from_u128(8, 1));
+            let next = e.bin(BinaryArithOpKind::UAdd, count, one);
+            e.seal_and_switch(Terminator::Jmp(head, vec![next, all]), done);
+            vec![last]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(ssa)
         .unwrap_or_else(|error| panic!("guarded pure signed int{bits} does not compile: {error}"));
 
     let one = IntBits::from_u128(1, 1);
@@ -4764,7 +4907,7 @@ fn check_guarded_pure_signed(bits: usize, triples: &[(PureSigned, IntBits, IntBi
         let zero = IntBits::zero(8);
         inputs.push(&zero);
         inputs.push(&one);
-        let inputs = input_block(&inputs);
+        let inputs = input_block::<Bn254>(&inputs);
         if wasm {
             compiled.run_wasm(&inputs).expect("the WASM lane builds")
         } else {
@@ -4843,9 +4986,12 @@ const WIDEST_TRIPLES_PER_PROGRAM: usize = 3;
 
 /// `main(a: int(from)) -> int(to) { a as int(to) }`, the narrowing written as a bare cast.
 fn program_casting_down(from: usize, to: usize) -> HLSSA {
-    main_program(&[Type::int(from)], &[Type::int(to)], move |e, params| {
-        vec![e.cast_to(CastTarget::Int(to), params[0])]
-    })
+    main_program(
+        FieldConfig::bn254(),
+        &[Type::int(from)],
+        &[Type::int(to)],
+        move |e, params| vec![e.cast_to(CastTarget::Int(to), params[0])],
+    )
 }
 
 /// A bare narrowing cast of a witnessed value **truncates**, at every width one element carries.
@@ -4855,14 +5001,21 @@ fn program_casting_down(from: usize, to: usize) -> HLSSA {
 /// in front of it.
 #[test]
 fn a_bare_narrowing_cast_truncates_at_every_width() {
-    for bits in [64usize, 96, 128, 129, 200, first_width_past_the_field() - 1] {
-        let compiled = Compiled::new(program_casting_down(bits, 32))
+    for bits in [
+        64usize,
+        96,
+        128,
+        129,
+        200,
+        first_width_past_the_field(FieldConfig::bn254()) - 1,
+    ] {
+        let compiled = Compiled::<Bn254>::compile(program_casting_down(bits, 32))
             .unwrap_or_else(|error| panic!("an int{bits} narrowing: {error}"));
 
         // Bits far above the target, so what is checked is the truncation and not the value.
         let source = IntBits::from_u128(bits, (5u128 << 40) + 7);
         let truncated = IntBits::from_u128(32, 7);
-        let verdict = compiled.run(&input_block(&[&source, &truncated]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&source, &truncated]));
         assert!(
             verdict.is_accepted(),
             "int{bits} did not truncate to 7: {verdict:?}"
@@ -4870,7 +5023,7 @@ fn a_bare_narrowing_cast_truncates_at_every_width() {
 
         // The host must report a wrong expected return separately from a VM trap.
         let wrong = IntBits::from_u128(32, 8);
-        let refused = compiled.run(&input_block(&[&source, &wrong]));
+        let refused = compiled.run(&input_block::<Bn254>(&[&source, &wrong]));
         assert!(
             matches!(refused, Verdict::ReturnMismatch { .. }),
             "int{bits} accepted a wrong truncation: {refused:?}"
@@ -4887,10 +5040,11 @@ fn a_bare_narrowing_cast_truncates_at_every_width() {
 /// limb, so the widths here are not multiples of the limb.
 #[test]
 fn a_narrowing_between_two_widths_held_as_limbs() {
-    let injective = first_width_past_the_field() - 1;
+    let injective = first_width_past_the_field(FieldConfig::bn254()) - 1;
     let source = BigUint::from(1u8) << 200;
     for (from, to) in [(384usize, 300usize), (320, 254), (384, 319), (320, 256)] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(injective)],
             &[Type::int(1)],
             move |e, params| {
@@ -4902,18 +5056,18 @@ fn a_narrowing_between_two_widths_held_as_limbs() {
                 vec![e.cmp(narrowed, want, CmpKind::Eq)]
             },
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("int{from} narrowed to int{to}: {error}"));
 
         let param = IntBits::from_biguint(injective, &source);
-        let verdict = compiled.run(&input_block(&[&param, &IntBits::from_u128(1, 1)]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&param, &IntBits::from_u128(1, 1)]));
         assert!(
             verdict.is_accepted(),
             "int{from} narrowed to int{to}: {verdict:?}"
         );
 
         // And it can go red: the same program asked for the opposite answer.
-        let verdict = compiled.run(&input_block(&[&param, &IntBits::from_u128(1, 0)]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&param, &IntBits::from_u128(1, 0)]));
         assert!(
             !verdict.is_accepted(),
             "int{from} narrowed to int{to}: a wrong answer was accepted"
@@ -4933,8 +5087,8 @@ fn a_narrowing_cast_costs_no_window_where_the_value_is_already_inside_it() {
     let truncated = IntBits::from_u128(32, 7);
 
     let columns = |ssa| {
-        let compiled = Compiled::new(ssa).expect("a narrowing compiles");
-        let verdict = compiled.run(&input_block(&[&source, &truncated]));
+        let compiled = Compiled::<Bn254>::compile(ssa).expect("a narrowing compiles");
+        let verdict = compiled.run(&input_block::<Bn254>(&[&source, &truncated]));
         verdict
             .witness()
             .unwrap_or_else(|| panic!("the narrowing ran: {verdict:?}"))
@@ -4943,6 +5097,7 @@ fn a_narrowing_cast_costs_no_window_where_the_value_is_already_inside_it() {
 
     let bare = columns(program_casting_down(64, 32));
     let windowed = columns(main_program(
+        FieldConfig::bn254(),
         &[Type::int(64)],
         &[Type::int(32)],
         |e, params| {
@@ -4960,9 +5115,9 @@ fn a_narrowing_cast_costs_no_window_where_the_value_is_already_inside_it() {
 /// A widening cast is untouched by the rule: only a narrowing one has bits to discard.
 #[test]
 fn a_witnessed_widening_cast_is_not_refused() {
-    let _ =
-        Compiled::new(program_casting_down(64, 200)).expect("a widening cast is not a narrowing");
-    let _ = Compiled::new(program_casting_down(200, 200))
+    let _ = Compiled::<Bn254>::compile(program_casting_down(64, 200))
+        .expect("a widening cast is not a narrowing");
+    let _ = Compiled::<Bn254>::compile(program_casting_down(200, 200))
         .expect("a cast to its own width narrows nothing");
 }
 
@@ -4978,6 +5133,7 @@ fn a_witnessed_widening_cast_is_not_refused() {
 #[test]
 fn a_wide_width_reaches_the_wide_lane() {
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(256), Type::int(256)],
         &[Type::int(256)],
         |e, params| {
@@ -5015,6 +5171,7 @@ fn each_width_picks_its_own_lane() {
         (65, "add_int128", "add_intn"),
     ] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(bits), Type::int(bits)],
             &[Type::int(bits)],
             |e, params| vec![e.bin(BinaryArithOpKind::UAdd, params[0], params[1])],
@@ -5035,6 +5192,7 @@ fn each_width_picks_its_own_lane() {
 #[test]
 fn the_wide_lane_covers_comparison_and_the_width_cast() {
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(320), Type::int(320)],
         &[Type::int(64)],
         |e, params| {
@@ -5056,10 +5214,15 @@ fn the_wide_lane_covers_comparison_and_the_width_cast() {
 /// value and they would all still pass.
 #[test]
 fn the_wide_lane_covers_both_directions_of_the_field_boundary() {
-    let ssa = main_program(&[Type::int(200)], &[Type::int(200)], |e, params| {
-        let element = e.cast_to_field(params[0]);
-        vec![e.cast_to(CastTarget::Int(200), element)]
-    });
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(200)],
+        &[Type::int(200)],
+        |e, params| {
+            let element = e.cast_to_field(params[0]);
+            vec![e.cast_to(CastTarget::Int(200), element)]
+        },
+    );
     let listing = bytecode_listing(&ssa);
 
     for op in ["cast_intn_to_field 200 ", "cast_field_to_intn 200 "] {
@@ -5078,6 +5241,7 @@ fn the_wide_lane_covers_both_directions_of_the_field_boundary() {
 #[should_panic(expected = "does not cover the 4 frame cell(s)")]
 fn a_wide_sum_with_a_narrower_operand_is_an_ice_in_codegen() {
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(256), Type::int(32)],
         &[Type::int(256)],
         |e, params| vec![e.bin(BinaryArithOpKind::UAdd, params[0], params[1])],
@@ -5090,6 +5254,7 @@ fn a_wide_sum_with_a_narrower_operand_is_an_ice_in_codegen() {
 #[should_panic(expected = "does not cover the 2 frame cell(s)")]
 fn a_double_lane_sum_with_a_narrower_operand_is_an_ice_in_codegen() {
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(96), Type::int(32)],
         &[Type::int(96)],
         |e, params| vec![e.bin(BinaryArithOpKind::UAdd, params[0], params[1])],
@@ -5107,24 +5272,33 @@ fn a_double_lane_sum_with_a_narrower_operand_is_an_ice_in_codegen() {
 fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
     let shifting = |bits: usize, amount: Type| {
         main_program(
+            FieldConfig::bn254(),
             &[Type::int(bits), amount],
             &[Type::int(bits)],
             |e, params| vec![e.bin(BinaryArithOpKind::UShl, params[0], params[1])],
         )
     };
     let indexing = |index: Type| {
-        main_program(&[index], &[Type::field()], |e, params| {
-            let elements: Vec<ValueId> = (0..3).map(|k| e.field_const(k)).collect();
-            let array = e.mk_seq(elements, SequenceTargetType::Array(3), Type::field());
-            vec![e.array_get(array, params[0])]
-        })
+        main_program(
+            FieldConfig::bn254(),
+            &[index],
+            &[Type::field()],
+            |e, params| {
+                let elements: Vec<ValueId> = (0..3).map(|k| e.field_const(k)).collect();
+                let array = e.mk_seq(elements, SequenceTargetType::Array(3), Type::field());
+                vec![e.array_get(array, params[0])]
+            },
+        )
     };
     let shift = "a shift amount must have the shifted value's type";
     let index = "a sequence index must be an int32";
     let sign_extending = |to_bits: usize| {
-        main_program(&[Type::int(32)], &[Type::int(to_bits)], move |e, params| {
-            vec![e.sext(params[0], 32, to_bits)]
-        })
+        main_program(
+            FieldConfig::bn254(),
+            &[Type::int(32)],
+            &[Type::int(to_bits)],
+            move |e, params| vec![e.sext(params[0], 32, to_bits)],
+        )
     };
     let cases = [
         (
@@ -5135,8 +5309,8 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an int256 shifted by an int32",
             shift,
-            // An int256 cannot cross the entry point, so it is widened inside.
             main_program(
+                FieldConfig::bn254(),
                 &[Type::int(32), Type::int(32)],
                 &[Type::int(32)],
                 |e, params| {
@@ -5168,6 +5342,7 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
             "an array of integers mapped to Field",
             "a Map cast only adds or strips WitnessOf",
             main_program(
+                FieldConfig::bn254(),
                 &[Type::int(32).array_of(2)],
                 &[Type::field().array_of(2)],
                 |e, params| {
@@ -5178,25 +5353,29 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
         (
             "an array of wide integers mapped to a wider integer",
             "a Map cast only adds or strips WitnessOf",
-            // An int256 cannot cross the entry point, so the array is built inside.
-            main_program(&[Type::int(32)], &[Type::int(32)], |e, params| {
-                let wide = e.cast_to(CastTarget::Int(256), params[0]);
-                let array = e.mk_seq(
-                    vec![wide, wide],
-                    SequenceTargetType::Array(2),
-                    Type::int(256),
-                );
-                let wider = e.cast_to(CastTarget::Map(Box::new(CastTarget::Int(320))), array);
-                let index = e.int_const(IntBits::zero(32));
-                let element = e.array_get(wider, index);
-                vec![e.cast_to(CastTarget::Int(32), element)]
-            }),
+            main_program(
+                FieldConfig::bn254(),
+                &[Type::int(32)],
+                &[Type::int(32)],
+                |e, params| {
+                    let wide = e.cast_to(CastTarget::Int(256), params[0]);
+                    let array = e.mk_seq(
+                        vec![wide, wide],
+                        SequenceTargetType::Array(2),
+                        Type::int(256),
+                    );
+                    let wider = e.cast_to(CastTarget::Map(Box::new(CastTarget::Int(320))), array);
+                    let index = e.int_const(IntBits::zero(32));
+                    let element = e.array_get(wider, index);
+                    vec![e.cast_to(CastTarget::Int(32), element)]
+                },
+            ),
         ),
     ];
     for (what, reason, ssa) in cases {
-        let Err(refusal) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Compiled::new(ssa)))
-        else {
+        let Err(refusal) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Compiled::<Bn254>::compile(ssa)
+        })) else {
             panic!("{what} compiled");
         };
         let message = refusal
@@ -5210,69 +5389,26 @@ fn an_operand_of_a_type_the_ir_does_not_admit_is_a_compiler_error() {
     }
 }
 
-/// A return past the field's width publishes its residue, so `x` and `x + p` publish the same value
-/// and a declared return cannot tell them apart. This is the known limitation of
-/// `bind_return_deep` in `docs/field-agnosticism.md`; lifting it has to change this test.
-#[test]
-fn a_return_past_the_field_publishes_its_residue() {
-    check_a_return_past_the_field::<Field>(first_width_past_the_field());
-    check_a_return_past_the_field::<mavros_artifacts::Goldilocks>(64);
-}
-
-fn check_a_return_past_the_field<F: HarnessField>(bits: usize) {
-    let field = F::CONFIG;
-    let modulus = biguint_of_limbs(field.modulus_limbs());
-    for offset in [BigUint::ZERO, modulus] {
-        let compiled = Compiled::<F>::compile(main_program_in(
-            field,
-            &[Type::int(32)],
-            &[Type::int(bits)],
-            |e, params| {
-                let wide = e.cast_to(CastTarget::Int(bits), params[0]);
-                let offset = e.int_const(IntBits::from_biguint(bits, &offset));
-                vec![e.uadd(wide, offset)]
-            },
-        ))
-        .unwrap_or_else(|error| panic!("{:?}: the return does not compile: {error}", field.id()));
-        for x in [0u32, 5, 0xdead_beef] {
-            let element = |value: u64| InputValueOrdered::Field(F::of_biguint(&value.into()));
-            let input = element(x.into());
-            let verdict = compiled.run(&[input.clone(), element(x.into())]);
-            assert!(
-                verdict.is_accepted(),
-                "{:?}: x = {x} + {offset}: {verdict:?}",
-                field.id()
-            );
-            let verdict = compiled.run(&[input, element(u64::from(x) + 1)]);
-            assert!(
-                matches!(verdict, Verdict::ReturnMismatch { .. }),
-                "{:?}: x = {x} + {offset} declared as the next element: {verdict:?}",
-                field.id()
-            );
-        }
-    }
-}
-
 /// A cast into `Field` of a constant wider than the field carries injectively compiles, and answers
 /// the residue: `5` and `p + 5` both cast to `5`.
 #[test]
 fn a_wide_constant_cast_to_field_is_its_residue() {
-    let wide = first_width_past_the_field();
+    let wide = first_width_past_the_field(FieldConfig::bn254());
     let modulus = biguint_of_limbs(FieldConfig::bn254().modulus_limbs());
     for value in [BigUint::from(5u8), &modulus + 5u8] {
         let constant = IntBits::from_biguint(wide, &value);
-        let ssa = main_program(&[], &[Type::field()], move |e, _| {
+        let ssa = main_program(FieldConfig::bn254(), &[], &[Type::field()], move |e, _| {
             let value = e.int_const(constant);
             vec![e.cast_to_field(value)]
         });
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("int{wide} {value} as Field: {error}"));
-        let verdict = compiled.run(&[InputValueOrdered::Field(Field::from(5u64))]);
+        let verdict = compiled.run(&[InputValueOrdered::Field(Bn254::from(5u64))]);
         assert!(
             verdict.is_accepted(),
             "int{wide} {value} as Field: {verdict:?}"
         );
-        let verdict = compiled.run(&[InputValueOrdered::Field(Field::from(6u64))]);
+        let verdict = compiled.run(&[InputValueOrdered::Field(Bn254::from(6u64))]);
         assert!(
             matches!(verdict, Verdict::ReturnMismatch { .. }),
             "int{wide} {value} as Field declared as 6: {verdict:?}"
@@ -5285,7 +5421,7 @@ fn a_wide_constant_cast_to_field_is_its_residue() {
 /// place value or limb order answers another element.
 #[test]
 fn a_witnessed_limbed_integer_casts_to_field_as_its_residue() {
-    check_a_limbed_cast_to_field::<Field>();
+    check_a_limbed_cast_to_field::<Bn254>();
     check_a_limbed_cast_to_field::<mavros_artifacts::Goldilocks>();
 }
 
@@ -5295,7 +5431,7 @@ fn check_a_limbed_cast_to_field<F: HarnessField>() {
     let bits = 320;
     let constant =
         (BigUint::from(1u8) << 300u32) + (BigUint::from(1u8) << 200u32) + &modulus * 3u8 + 5u8;
-    let compiled = Compiled::<F>::compile(main_program_in(
+    let compiled = Compiled::<F>::compile(main_program(
         field,
         &[Type::int(32)],
         &[Type::field()],
@@ -5342,7 +5478,7 @@ fn program_casting_a_field_down<F: HarnessField>(target: CastTarget) -> HLSSA {
     let (CastTarget::Int(bits) | CastTarget::IntUnchecked(bits)) = target else {
         panic!("{target} is not an integer cast");
     };
-    main_program_in(
+    main_program(
         F::CONFIG,
         &[Type::field()],
         &[Type::int(bits)],
@@ -5358,7 +5494,7 @@ fn program_casting_a_field_down<F: HarnessField>(target: CastTarget) -> HLSSA {
 /// the field's, where the window's canonical decomposition is at its widest.
 #[test]
 fn a_bare_witnessed_field_cast_truncates_the_element() {
-    check_a_bare_field_cast_truncates::<Field>();
+    check_a_bare_field_cast_truncates::<Bn254>();
     check_a_bare_field_cast_truncates::<mavros_artifacts::Goldilocks>();
 }
 
@@ -5412,7 +5548,7 @@ fn check_a_bare_field_cast_truncates<F: HarnessField>() {
 /// element, so the honest witness does not satisfy them. Whatever emits the cast owes the bound.
 #[test]
 fn an_unchecked_witnessed_field_cast_relabels_the_element() {
-    check_an_unchecked_field_cast_relabels::<Field>();
+    check_an_unchecked_field_cast_relabels::<Bn254>();
     check_an_unchecked_field_cast_relabels::<mavros_artifacts::Goldilocks>();
 }
 
@@ -5472,20 +5608,26 @@ fn a_one_bit_signed_product_or_quotient_by_the_pattern_one_is_not_folded() {
     let minus_one = IntBits::from_u128(1, 1);
     let zero = IntBits::zero(1);
     for (kind, constant_first) in [(SMul, false), (SMul, true), (SDiv, false)] {
-        let ssa = main_program(&[Type::int(1)], &[Type::int(1)], move |e, params| {
-            let one = e.int_const(IntBits::from_u128(1, 1));
-            let (lhs, rhs) = if constant_first {
-                (one, params[0])
-            } else {
-                (params[0], one)
-            };
-            vec![e.bin(kind, lhs, rhs)]
-        });
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(1)],
+            &[Type::int(1)],
+            move |e, params| {
+                let one = e.int_const(IntBits::from_u128(1, 1));
+                let (lhs, rhs) = if constant_first {
+                    (one, params[0])
+                } else {
+                    (params[0], one)
+                };
+                vec![e.bin(kind, lhs, rhs)]
+            },
+        );
         let what = format!("{kind:?}, constant first: {constant_first}");
-        let compiled = Compiled::new(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
-        let verdict = compiled.run(&input_block(&[&minus_one, &minus_one]));
+        let compiled =
+            Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&minus_one, &minus_one]));
         assert!(verdict.is_refusal(), "{what} at -1: {verdict:?}");
-        let verdict = compiled.run(&input_block(&[&zero, &zero]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&zero, &zero]));
         assert!(verdict.is_accepted(), "{what} at 0: {verdict:?}");
     }
 }
@@ -5493,6 +5635,7 @@ fn a_one_bit_signed_product_or_quotient_by_the_pattern_one_is_not_folded() {
 /// `main(a: int(bits)) -> int(2 * bits) { spread(a) }`.
 fn program_spreading(bits: usize) -> HLSSA {
     main_program(
+        FieldConfig::bn254(),
         &[Type::int(bits)],
         &[Type::int(2 * bits)],
         move |e, params| vec![e.spread(params[0], bits)],
@@ -5502,6 +5645,7 @@ fn program_spreading(bits: usize) -> HLSSA {
 /// `main(a: int(bits)) -> int(bits / 2) { unspread(a).odd }`, the inverse of a spread.
 fn program_unspreading(bits: usize) -> HLSSA {
     main_program(
+        FieldConfig::bn254(),
         &[Type::int(bits)],
         &[Type::int(bits / 2)],
         move |e, params| {
@@ -5550,6 +5694,7 @@ fn a_spread_or_unspread_takes_the_wide_opcode_past_the_narrow_one() {
 fn an_odd_width_unspread_agrees_with_the_model() {
     for bits in [3usize, 7, 33, 63] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(bits)],
             &[Type::int(bits / 2), Type::int(bits.div_ceil(2))],
             move |e, params| {
@@ -5557,13 +5702,13 @@ fn an_odd_width_unspread_agrees_with_the_model() {
                 vec![odd, even]
             },
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("an int{bits} unspread is refused: {error}"));
 
         for value in corners::values(bits) {
             let value = IntBits::from_u128(bits, value);
             let (odd, even) = value.unspread(bits);
-            let inputs = input_block(&[&value, &odd, &even]);
+            let inputs = input_block::<Bn254>(&[&value, &odd, &even]);
             let verdict = compiled.run(&inputs);
             assert!(verdict.is_accepted(), "int{bits} {value:?}: {verdict:?}");
             let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5590,15 +5735,19 @@ fn an_odd_width_unspread_agrees_with_the_model() {
 /// chunks. A pure spread discards those bits instead, which no witnessed one may do.
 #[test]
 fn a_witnessed_spread_rejects_the_bits_above_its_read() {
-    let ssa = main_program(&[Type::int(16)], &[Type::int(32)], |e, params| {
-        vec![e.spread(params[0], 8)]
-    });
-    let compiled = Compiled::new(ssa).expect("a spread of 8 bits of an int16 compiles");
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(16)],
+        &[Type::int(32)],
+        |e, params| vec![e.spread(params[0], 8)],
+    );
+    let compiled =
+        Compiled::<Bn254>::compile(ssa).expect("a spread of 8 bits of an int16 compiles");
 
     for value in [0u128, 1, 0x5A, 0xFF] {
         let value = IntBits::from_u128(16, value);
         let spread = value.spread(8);
-        let inputs = input_block(&[&value, &spread]);
+        let inputs = input_block::<Bn254>(&[&value, &spread]);
         let verdict = compiled.run(&inputs);
         assert!(verdict.is_accepted(), "{value:?}: {verdict:?}");
         let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5617,7 +5766,7 @@ fn a_witnessed_spread_rejects_the_bits_above_its_read() {
     for value in [0x100u128, 0x1FF, 0xFFFF] {
         let value = IntBits::from_u128(16, value);
         for declared in [value.spread(8), value.spread(16)] {
-            let inputs = input_block(&[&value, &declared]);
+            let inputs = input_block::<Bn254>(&[&value, &declared]);
             let verdict = compiled.run(&inputs);
             assert!(verdict.rejects(), "{value:?} as {declared:?}: {verdict:?}");
             let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5637,6 +5786,7 @@ fn a_witnessed_spread_rejects_the_bits_above_its_read() {
 #[test]
 fn a_witnessed_unspread_rejects_the_bits_above_its_read() {
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(16)],
         &[Type::int(8), Type::int(8)],
         |e, params| {
@@ -5644,12 +5794,13 @@ fn a_witnessed_unspread_rejects_the_bits_above_its_read() {
             vec![odd, even]
         },
     );
-    let compiled = Compiled::new(ssa).expect("an unspread of 7 bits of an int16 compiles");
+    let compiled =
+        Compiled::<Bn254>::compile(ssa).expect("an unspread of 7 bits of an int16 compiles");
 
     for value in [0u128, 1, 0x2A, 0x55, 0x7F] {
         let value = IntBits::from_u128(16, value);
         let (odd, even) = value.unspread(7);
-        let inputs = input_block(&[&value, &odd, &even]);
+        let inputs = input_block::<Bn254>(&[&value, &odd, &even]);
         let verdict = compiled.run(&inputs);
         assert!(verdict.is_accepted(), "{value:?}: {verdict:?}");
         let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5668,7 +5819,7 @@ fn a_witnessed_unspread_rejects_the_bits_above_its_read() {
     for value in [0x80u128, 0xAA, 0x100, 0xFFFF] {
         let value = IntBits::from_u128(16, value);
         for (odd, even) in [value.unspread(7), value.unspread(16)] {
-            let inputs = input_block(&[&value, &odd, &even]);
+            let inputs = input_block::<Bn254>(&[&value, &odd, &even]);
             let verdict = compiled.run(&inputs);
             assert!(
                 verdict.rejects(),
@@ -5731,9 +5882,8 @@ fn assembled(e: &mut HLBlockEmitter<'_>, windows: &[ValueId], bits: usize) -> Va
 /// `main` taking an `int(bits)` as 64-bit windows, assembling it, and returning the windows of
 /// `spread(x, spread_read)` and of both streams of `unspread(x, unspread_read)`.
 ///
-/// An entry point takes and returns only what one field element holds, so a value past the field
-/// is assembled and taken apart inside the program, with the representation's `Or`, shifts and
-/// narrowing casts.
+/// The windows are assembled and taken apart inside the program, so the representation's `Or`,
+/// shifts and narrowing casts run alongside the spread.
 fn program_spreading_witnessed(bits: usize, spread_read: usize, unspread_read: usize) -> HLSSA {
     let params: Vec<Type> = window_widths(bits).into_iter().map(Type::int).collect();
     let returns: Vec<Type> = [2 * bits, bits / 2, bits.div_ceil(2)]
@@ -5741,7 +5891,7 @@ fn program_spreading_witnessed(bits: usize, spread_read: usize, unspread_read: u
         .flat_map(window_widths)
         .map(Type::int)
         .collect();
-    main_program(&params, &returns, move |e, params| {
+    main_program(FieldConfig::bn254(), &params, &returns, move |e, params| {
         let x = assembled(e, params, bits);
         let spread = e.spread(x, spread_read);
         let (odd, even) = e.unspread(x, unspread_read);
@@ -5795,7 +5945,7 @@ fn a_witnessed_spread_and_unspread_agree_with_the_model_past_the_field() {
         (600, 600, 333),
         (601, 601, 513),
     ] {
-        let compiled = Compiled::new(program_spreading_witnessed(
+        let compiled = Compiled::<Bn254>::compile(program_spreading_witnessed(
             bits,
             spread_read,
             unspread_read,
@@ -5812,7 +5962,7 @@ fn a_witnessed_spread_and_unspread_agree_with_the_model_past_the_field() {
         for value in values {
             let value = value.cast(bits);
             let block = spreading_inputs(&value, spread_read, unspread_read);
-            let inputs = input_block(&block.iter().collect::<Vec<_>>());
+            let inputs = input_block::<Bn254>(&block.iter().collect::<Vec<_>>());
             let verdict = compiled.run(&inputs);
             assert!(verdict.is_accepted(), "int{bits} {value:?}: {verdict:?}");
             let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5851,7 +6001,7 @@ fn a_witnessed_spread_or_unspread_past_the_field_rejects_the_bits_above_its_read
         (600, 600, 513, 514),
         (600, 600, 513, 550),
     ] {
-        let compiled = Compiled::new(program_spreading_witnessed(
+        let compiled = Compiled::<Bn254>::compile(program_spreading_witnessed(
             bits,
             spread_read,
             unspread_read,
@@ -5864,7 +6014,7 @@ fn a_witnessed_spread_or_unspread_past_the_field_rejects_the_bits_above_its_read
         let computed = spreading_inputs(&value, spread_read, unspread_read);
         let whole = spreading_inputs(&value, bits, bits);
         for block in [computed, whole] {
-            let inputs = input_block(&block.iter().collect::<Vec<_>>());
+            let inputs = input_block::<Bn254>(&block.iter().collect::<Vec<_>>());
             let verdict = compiled.run(&inputs);
             assert!(
                 verdict.rejects(),
@@ -5888,7 +6038,7 @@ fn a_witnessed_spread_or_unspread_past_the_field_rejects_the_bits_above_its_read
 #[test]
 fn a_limb_an_unspread_reads_one_bit_of_is_held_to_that_bit() {
     let (bits, read) = (600usize, 513usize);
-    let compiled = Compiled::new(program_spreading_witnessed(bits, bits, read))
+    let compiled = Compiled::<Bn254>::compile(program_spreading_witnessed(bits, bits, read))
         .unwrap_or_else(|error| panic!("an int{bits} spread and unspread are refused: {error}"));
     let value = IntBits::from_u128(bits, 0b11).shifted_left(512);
     let (odd, even) = value.unspread(read);
@@ -5897,7 +6047,7 @@ fn a_limb_an_unspread_reads_one_bit_of_is_held_to_that_bit() {
         .iter()
         .flat_map(pattern_windows)
         .collect();
-    let inputs = input_block(&block.iter().collect::<Vec<_>>());
+    let inputs = input_block::<Bn254>(&block.iter().collect::<Vec<_>>());
     let verdict = compiled.run(&inputs);
     assert!(verdict.rejects(), "{verdict:?}");
     let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
@@ -5922,7 +6072,7 @@ fn program_spreading_under_a_branch(bits: usize, read: usize, unspread: bool) ->
         .flat_map(|width| window_widths(*width))
         .map(Type::int)
         .collect();
-    main_program(&params, &returns, move |e, params| {
+    main_program(FieldConfig::bn254(), &params, &returns, move |e, params| {
         let x = assembled(e, &params[1..], bits);
         let (then_id, _) = e.add_block();
         let (else_id, _) = e.add_block();
@@ -5974,8 +6124,9 @@ fn a_guarded_witnessed_spread_rejects_the_bits_above_its_read_only_where_taken()
             "a guarded int{bits} {} of {read} bits",
             if unspread { "unspread" } else { "spread" }
         );
-        let compiled = Compiled::new(program_spreading_under_a_branch(bits, read, unspread))
-            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let compiled =
+            Compiled::<Bn254>::compile(program_spreading_under_a_branch(bits, read, unspread))
+                .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
         let answers = |value: &IntBits| -> Vec<IntBits> {
             if unspread {
                 let (odd, even) = value.unspread(read);
@@ -5988,7 +6139,7 @@ fn a_guarded_witnessed_spread_rejects_the_bits_above_its_read_only_where_taken()
             let mut block = vec![IntBits::from_u128(1, taken)];
             block.extend(pattern_windows(value));
             block.extend(answers);
-            let inputs = input_block(&block.iter().collect::<Vec<_>>());
+            let inputs = input_block::<Bn254>(&block.iter().collect::<Vec<_>>());
             let wasm = compiled.run_wasm(&inputs).expect("the WASM lane builds");
             (compiled.run(&inputs), wasm)
         };
@@ -6030,15 +6181,15 @@ fn a_guarded_witnessed_spread_rejects_the_bits_above_its_read_only_where_taken()
 // THE FIELD BOUNDARY
 // ================================================================================================
 
-/// The first width whose values are not all distinct field elements.
+/// The first width whose values are not all distinct elements of `field`.
 ///
 /// `2^bits <= p` makes an `Int -> Field` cast injective, and writing the modulus takes exactly this
 /// many bits, so this is the first width at which two integers share an element.
 ///
 /// Derived from the field's bit size rather than the compiler's `widest_injective_int_bits`, so
 /// that the test checks they agree.
-fn first_width_past_the_field() -> usize {
-    FieldConfig::bn254().field_bit_size() as usize
+fn first_width_past_the_field(field: FieldConfig) -> usize {
+    field.field_bit_size() as usize
 }
 
 /// Every integer parameter of `main` is range-checked to its width where it is written to a
@@ -6049,48 +6200,258 @@ fn first_width_past_the_field() -> usize {
 /// convention to take one.
 #[test]
 fn the_widest_injective_width_is_an_entry_point_parameter() {
-    let injective = first_width_past_the_field() - 1;
+    let injective = first_width_past_the_field(FieldConfig::bn254()) - 1;
 
     for width in [129usize, 200, injective] {
-        let ssa = main_program(&[Type::int(width)], &[Type::field()], |e, params| {
-            vec![e.cast_to_field(params[0])]
-        });
-        let compiled = Compiled::new(ssa)
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(width)],
+            &[Type::field()],
+            |e, params| vec![e.cast_to_field(params[0])],
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("int{width} is not an entry-point parameter: {error}"));
 
         let value = IntBits::from_biguint(
             width,
             &((BigUint::from(1u8) << (width - 8)) + BigUint::from(7u8)),
         );
-        let verdict = compiled.run(&input_block(&[&value, &value]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&value, &value]));
         assert!(verdict.is_accepted(), "int{width} parameter: {verdict:?}");
     }
 }
 
-/// An integer wider than one input element carries cannot cross this ABI directly. The frontend
-/// rejects such parameters; a hand-built SSA that bypasses it is refused with an error, wherever
-/// the integer sits in the parameter.
-#[test]
-fn a_main_parameter_wider_than_the_field_is_a_compiler_error() {
-    let width = first_width_past_the_field();
+/// The limbs of `value` as an `int{width}` on `field`, little-endian.
+fn limbs_in(field: FieldConfig, width: usize, value: &BigUint) -> Vec<IntBits> {
+    let pattern = IntBits::from_biguint(width, value);
+    let mut low = 0;
+    int_limb_widths(width, field)
+        .into_iter()
+        .map(|limb_width| {
+            let limb = pattern.bit_range(low, limb_width);
+            low += limb_width;
+            limb
+        })
+        .collect()
+}
+
+/// Where the wide integer a test's `main` returns comes from.
+#[derive(Clone, Copy, Debug)]
+enum ReturnSource {
+    /// The witnessed parameter itself.
+    Parameter,
+    /// A constant.
+    Constant,
+    /// The parameter plus one, through the carry chain.
+    Sum,
+    /// An unconstrained function's answer, given the parameter.
+    Hint,
+}
+
+/// `main` over `field` returning a `typ` that holds `source`'s `int{width}` in its last slot: the
+/// value itself, `[0, value]`, or `(3, value)`. Every source but a constant reads one `int{width}`
+/// parameter.
+fn wide_return_program(
+    field: FieldConfig,
+    width: usize,
+    source: ReturnSource,
+    typ: &Type,
+    value: &BigUint,
+) -> HLSSA {
     let wide = Type::int(width);
-    for param in [
-        wide.clone(),
-        wide.clone().array_of(2),
-        Type::tuple_of(vec![Type::field(), wide]),
-    ] {
-        let ssa = main_program(&[param.clone()], &[Type::field()], |e, _| {
-            vec![e.field_const(e.field().zero())]
-        });
-        let Err(error) = Compiled::new(ssa) else {
-            panic!("main({param:?}) compiled");
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
+    let main_id = ssa.get_unique_entrypoint_id();
+    let mut builder = HLSSABuilder::new(&mut ssa);
+    let hint_type = wide.clone();
+    let (hint, ()) = builder.add_function("hint".to_string(), move |b| {
+        b.function.add_return_type(hint_type.clone());
+        let entry = b.function.get_entry_id();
+        let mut e = b
+            .block(entry)
+            .with_source_location(SourceLocation::synthetic("hint"));
+        let input = e.add_parameter(hint_type);
+        e.terminate_return(vec![input]);
+    });
+    builder.modify_function(main_id, |b| {
+        b.function.add_return_type(typ.clone());
+        let entry = b.function.get_entry_id();
+        let mut e = b
+            .block(entry)
+            .with_source_location(SourceLocation::synthetic("main"));
+        let x = match source {
+            ReturnSource::Constant => e.int_const(IntBits::from_biguint(width, value)),
+            ReturnSource::Parameter => e.add_parameter(wide.clone()),
+            ReturnSource::Sum => {
+                let x = e.add_parameter(wide.clone());
+                let one = e.int_const(IntBits::one(width));
+                e.bin(BinaryArithOpKind::UAdd, x, one)
+            }
+            ReturnSource::Hint => {
+                let x = e.add_parameter(wide.clone());
+                e.call_unconstrained(hint, vec![x], 1)[0]
+            }
         };
-        assert!(matches!(error, DriverError::LoweringRefused(_)), "{error}");
-        let message = error.to_string();
-        assert!(
-            message.contains(&format!("an int{width} crosses the entry point")),
-            "{message}"
-        );
+        let returned = match &typ.expr {
+            TypeExpr::Int(_) => x,
+            TypeExpr::Array(..) => {
+                let zero = e.int_const(IntBits::zero(width));
+                e.mk_seq(vec![zero, x], SequenceTargetType::Array(2), wide.clone())
+            }
+            _ => {
+                let byte = e.int_const(IntBits::from_u128(8, 3));
+                e.mk_tuple(vec![byte, x], vec![Type::int(8), wide.clone()])
+            }
+        };
+        e.terminate_return(vec![returned]);
+    });
+    ssa
+}
+
+/// A `main` return wider than one element carries is published as its limbs, one column each,
+/// wherever the integer sits in the type and wherever it comes from.
+///
+/// Each column is bound: moving one alone breaks a constraint, and so does moving `2^w` into a limb
+/// from the one above it, which keeps the value the limbs spell. One column holding the whole
+/// integer would publish its residue, `v` and `v + p` alike.
+#[test]
+fn a_main_return_wider_than_an_element_is_published_as_its_limbs() {
+    check_a_wide_main_return::<Bn254>();
+    check_a_wide_main_return::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_a_wide_main_return<F: HarnessField>() {
+    let field = F::CONFIG;
+    for width in [multi_cell_int_bits(field) + 1, 300] {
+        let wide = Type::int(width);
+        // The top bit and the low limb are set, every limb between is zero.
+        let value = (BigUint::from(1u8) << (width - 1)) + 5u8;
+        let limbs = limbs_in(field, width, &value);
+        let zeros = limbs_in(field, width, &BigUint::ZERO);
+        let count = limbs.len();
+        for source in [
+            ReturnSource::Parameter,
+            ReturnSource::Constant,
+            ReturnSource::Sum,
+            ReturnSource::Hint,
+        ] {
+            // The return's elements, and where each wide integer's limbs start among them.
+            for (typ, elements, starts) in [
+                (wide.clone(), limbs.clone(), vec![0]),
+                (
+                    wide.clone().array_of(2),
+                    [zeros.clone(), limbs.clone()].concat(),
+                    vec![0, count],
+                ),
+                (
+                    Type::tuple_of(vec![Type::int(8), wide.clone()]),
+                    [vec![IntBits::from_u128(8, 3)], limbs.clone()].concat(),
+                    vec![1],
+                ),
+            ] {
+                let ssa = wide_return_program(field, width, source, &typ, &value);
+                let what = format!("{:?}: {source:?} -> {typ:?}", field.id());
+                let compiled =
+                    Compiled::<F>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+                let param = match source {
+                    ReturnSource::Constant => vec![],
+                    ReturnSource::Sum => limbs_in(field, width, &(&value - 1u8)),
+                    ReturnSource::Parameter | ReturnSource::Hint => limbs.clone(),
+                };
+                let block: Vec<&IntBits> = param.iter().chain(&elements).collect();
+                let inputs = input_block::<F>(&block);
+                let verdict = compiled.run(&inputs);
+                assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+                if let Some(verdict) = compiled.run_wasm(&inputs) {
+                    assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
+                }
+
+                let witness = verdict.witness().unwrap();
+                let columns = compiled.return_columns();
+                assert_eq!(columns.len(), elements.len(), "{what}");
+                for column in columns.clone() {
+                    let mut moved = witness.to_vec();
+                    moved[column] = moved[column] + F::ONE;
+                    assert!(
+                        compiled.first_unsatisfied_constraint(&moved).is_some(),
+                        "{what}: return column {column} moves alone"
+                    );
+                }
+                for start in starts {
+                    for (index, limb) in limbs.iter().enumerate().take(count - 1) {
+                        let column = columns.start + start + index;
+                        let mut traded = witness.to_vec();
+                        traded[column] = traded[column] + F::from(1u128 << limb.bits());
+                        traded[column + 1] = traded[column + 1] - F::ONE;
+                        assert!(
+                            compiled.first_unsatisfied_constraint(&traded).is_some(),
+                            "{what}: limb {index} at element {start} trades its place value with \
+                             the next"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A `main` parameter wider than one element carries crosses as its limbs, one input element and
+/// one column each, wherever the integer sits in the type.
+#[test]
+fn a_main_parameter_wider_than_an_element_crosses_as_its_limbs() {
+    check_a_wide_main_parameter::<Bn254>();
+    check_a_wide_main_parameter::<mavros_artifacts::Goldilocks>();
+}
+
+fn check_a_wide_main_parameter<F: HarnessField>() {
+    let field = F::CONFIG;
+    for width in [multi_cell_int_bits(field) + 1, 300] {
+        let wide = Type::int(width);
+        // The top 32 bits are `2^31`, the low ones `5`: every limb but the low and the top is zero.
+        let value = (BigUint::from(1u8) << (width - 1)) + 5u8;
+        let limbs = limbs_in(field, width, &value);
+        let zeros = limbs_in(field, width, &BigUint::ZERO);
+        let byte = IntBits::from_u128(8, 3);
+        for (typ, elements) in [
+            (wide.clone(), limbs.clone()),
+            (
+                wide.clone().array_of(2),
+                [zeros.clone(), limbs.clone()].concat(),
+            ),
+            (
+                Type::tuple_of(vec![Type::int(8), wide.clone()]),
+                [vec![byte.clone()], limbs.clone()].concat(),
+            ),
+        ] {
+            let ssa = main_program(field, &[typ.clone()], &[Type::int(32)], |e, params| {
+                let x = match &typ.expr {
+                    TypeExpr::Int(_) => params[0],
+                    TypeExpr::Array(..) => {
+                        let one = e.int_const(IntBits::from_u128(32, 1));
+                        e.array_get(params[0], one)
+                    }
+                    _ => e.tuple_proj(params[0], 1),
+                };
+                let amount = e.int_const(IntBits::from_u128(width, (width - 32) as u128));
+                let top = e.ushr(x, amount);
+                vec![e.cast_to(CastTarget::Int(32), top)]
+            });
+            let what = format!("{:?}: main({typ:?})", field.id());
+            let compiled =
+                Compiled::<F>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+            assert_eq!(
+                compiled.param_columns().len(),
+                elements.len(),
+                "{what}: one column per input element"
+            );
+            let answer = IntBits::from_u128(32, 1 << 31);
+            let block: Vec<&IntBits> = elements.iter().chain([&answer]).collect();
+            let inputs = input_block::<F>(&block);
+            let verdict = compiled.run(&inputs);
+            assert!(verdict.is_accepted(), "{what}: {verdict:?}");
+            if let Some(verdict) = compiled.run_wasm(&inputs) {
+                assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
+            }
+        }
     }
 }
 
@@ -6102,14 +6463,17 @@ fn a_main_parameter_wider_than_the_field_is_a_compiler_error() {
 #[test]
 fn a_wide_entry_point_parameter_is_held_to_its_width() {
     for width in [129usize, 200] {
-        let ssa = main_program(&[Type::int(width)], &[Type::field()], |e, params| {
-            vec![e.cast_to_field(params[0])]
-        });
-        let compiled = Compiled::new(ssa).expect("a wide parameter compiles");
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(width)],
+            &[Type::field()],
+            |e, params| vec![e.cast_to_field(params[0])],
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide parameter compiles");
 
         // One bit above the declared width: only the entry point's range check stands between it
         // and the rest of the program.
-        let past = Field::from(BigUint::from(1u8) << width);
+        let past = Bn254::from(BigUint::from(1u8) << width);
         let verdict = compiled.run(&[
             InputValueOrdered::Field(past),
             InputValueOrdered::Field(past),
@@ -6125,14 +6489,19 @@ fn a_wide_entry_point_parameter_is_held_to_its_width() {
 /// dropped rather than decomposed: the largest element passes it.
 #[test]
 fn a_range_check_past_what_the_field_carries_always_holds() {
-    for bits in [first_width_past_the_field(), 300] {
-        let ssa = main_program(&[Type::field()], &[Type::field()], |e, params| {
-            e.rangecheck(params[0], bits);
-            vec![params[0]]
-        });
-        let compiled = Compiled::new(ssa)
+    for bits in [first_width_past_the_field(FieldConfig::bn254()), 300] {
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::field()],
+            &[Type::field()],
+            |e, params| {
+                e.rangecheck(params[0], bits);
+                vec![params[0]]
+            },
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("a {bits}-bit range check compiles: {error}"));
-        let largest = -Field::from(1u64);
+        let largest = -Bn254::from(1u64);
         let verdict = compiled.run(&[
             InputValueOrdered::Field(largest),
             InputValueOrdered::Field(largest),
@@ -6151,23 +6520,28 @@ fn a_range_check_past_what_the_field_carries_always_holds() {
 #[test]
 fn a_wide_value_survives_being_carried_and_comes_back() {
     let wide = 320usize;
-    let ssa = main_program(&[Type::int(64)], &[Type::int(1)], |e, params| {
-        let start = e.cast_to(CastTarget::Int(wide), params[0]);
-        let no = e.int_const(IntBits::zero(1));
-        let mut carried = start;
-        for _ in 0..4 {
-            carried = e.select(no, start, carried);
-        }
-        let narrowed = e.cast_to(CastTarget::Int(64), carried);
-        vec![e.cmp(narrowed, params[0], CmpKind::Eq)]
-    });
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(1)],
+        |e, params| {
+            let start = e.cast_to(CastTarget::Int(wide), params[0]);
+            let no = e.int_const(IntBits::zero(1));
+            let mut carried = start;
+            for _ in 0..4 {
+                carried = e.select(no, start, carried);
+            }
+            let narrowed = e.cast_to(CastTarget::Int(64), carried);
+            vec![e.cmp(narrowed, params[0], CmpKind::Eq)]
+        },
+    );
 
-    let compiled =
-        Compiled::new(ssa).unwrap_or_else(|error| panic!("an int{wide} round trip: {error}"));
+    let compiled = Compiled::<Bn254>::compile(ssa)
+        .unwrap_or_else(|error| panic!("an int{wide} round trip: {error}"));
 
     let value = IntBits::from_u128(64, (1u128 << 40) + 5);
     let one = IntBits::from_u128(1, 1);
-    let verdict = compiled.run(&input_block(&[&value, &one]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &one]));
     assert!(verdict.is_accepted(), "int{wide} round trip: {verdict:?}");
 }
 
@@ -6175,32 +6549,38 @@ fn a_wide_value_survives_being_carried_and_comes_back() {
 #[test]
 fn a_wide_value_carried_through_a_phi_comes_back() {
     let wide = 320usize;
-    let ssa = main_program(&[Type::int(128)], &[Type::int(64)], move |e, params| {
-        let start = e.cast_to(CastTarget::Int(wide), params[0]);
-        let counter = e.int_const(IntBits::zero(32));
-        let limit = e.int_const(IntBits::from_u128(32, 3));
-        let carried = e.build_loop(
-            vec![
-                (counter, Type::int(32)),
-                (start, Type::witness_of(Type::int(wide))),
-            ],
-            |b, parameters| b.ult(parameters[0], limit),
-            |b, parameters| {
-                let one = b.int_const(IntBits::one(32));
-                let next = b.uadd(parameters[0], one);
-                // The wide value is passed straight back round, so the only thing the loop does to
-                // it is carry it through the header's parameter list three times over.
-                vec![next, parameters[1]]
-            },
-        );
-        vec![e.cast_to(CastTarget::Int(64), carried[1])]
-    });
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(128)],
+        &[Type::int(64)],
+        move |e, params| {
+            let start = e.cast_to(CastTarget::Int(wide), params[0]);
+            let counter = e.int_const(IntBits::zero(32));
+            let limit = e.int_const(IntBits::from_u128(32, 3));
+            let carried = e.build_loop(
+                vec![
+                    (counter, Type::int(32)),
+                    (start, Type::witness_of(Type::int(wide))),
+                ],
+                |b, parameters| b.ult(parameters[0], limit),
+                |b, parameters| {
+                    let one = b.int_const(IntBits::one(32));
+                    let next = b.uadd(parameters[0], one);
+                    // The wide value is passed straight back round, so the only thing the loop does
+                    // to it is carry it through the header's parameter list three times over.
+                    vec![next, parameters[1]]
+                },
+            );
+            vec![e.cast_to(CastTarget::Int(64), carried[1])]
+        },
+    );
 
-    let compiled = Compiled::new(ssa).unwrap_or_else(|error| panic!("an int{wide} loop: {error}"));
+    let compiled = Compiled::<Bn254>::compile(ssa)
+        .unwrap_or_else(|error| panic!("an int{wide} loop: {error}"));
 
     let value = IntBits::from_u128(128, (1u128 << 100) + 9);
     let low = IntBits::from_u128(64, 9);
-    let verdict = compiled.run(&input_block(&[&value, &low]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &low]));
     assert!(
         verdict.is_accepted(),
         "int{wide} through a phi: {verdict:?}"
@@ -6215,6 +6595,7 @@ fn a_wide_value_carried_through_a_phi_comes_back() {
 fn a_wide_equality_assertion_reads_every_limb() {
     let wide = 320usize;
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(128), Type::int(128)],
         &[Type::int(64)],
         move |e, params| {
@@ -6228,16 +6609,16 @@ fn a_wide_equality_assertion_reads_every_limb() {
             vec![e.cast_to(CastTarget::Int(64), lhs)]
         },
     );
-    let compiled = Compiled::new(ssa).expect("a wide assertion compiles");
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide assertion compiles");
 
     let low = IntBits::from_u128(64, 9);
     let value = IntBits::from_u128(128, (1u128 << 100) + 9);
-    let equal = compiled.run(&input_block(&[&value, &value, &low]));
+    let equal = compiled.run(&input_block::<Bn254>(&[&value, &value, &low]));
     assert!(equal.is_accepted(), "int{wide} == itself: {equal:?}");
 
     // The same low limb, a different high one.
     let other = IntBits::from_u128(128, (1u128 << 101) + 9);
-    let differing = compiled.run(&input_block(&[&value, &other, &low]));
+    let differing = compiled.run(&input_block::<Bn254>(&[&value, &other, &low]));
     assert!(
         differing.is_refusal(),
         "a difference above the low limb went unasserted: {differing:?}"
@@ -6257,15 +6638,21 @@ fn a_wide_value_compared_against_a_wide_constant_reads_every_limb() {
     // equal.
     let low = IntBits::from_u128(64, 5);
     for (constant, expected) in [(5u128, 1u64), ((1u128 << 70) + 5, 0)] {
-        let ssa = main_program(&[Type::int(64)], &[Type::int(1)], |e, params| {
-            let widened = e.cast_to(CastTarget::Int(wide), params[0]);
-            let other = e.int_const(IntBits::from_u128(wide, constant));
-            vec![e.cmp(widened, other, CmpKind::Eq)]
-        });
-        let compiled = Compiled::new(ssa).expect("a wide comparison against a constant compiles");
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(1)],
+            |e, params| {
+                let widened = e.cast_to(CastTarget::Int(wide), params[0]);
+                let other = e.int_const(IntBits::from_u128(wide, constant));
+                vec![e.cmp(widened, other, CmpKind::Eq)]
+            },
+        );
+        let compiled =
+            Compiled::<Bn254>::compile(ssa).expect("a wide comparison against a constant compiles");
 
         let answer = IntBits::from_u128(1, u128::from(expected));
-        let verdict = compiled.run(&input_block(&[&low, &answer]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&low, &answer]));
         assert!(
             verdict.is_accepted(),
             "int{wide} == {constant} should be {expected}: {verdict:?}"
@@ -6284,17 +6671,22 @@ fn a_wide_value_compared_against_a_wide_constant_reads_every_limb() {
 #[test]
 fn a_constant_the_field_cannot_carry_still_selects_and_narrows() {
     for bits in [254usize, 255, 300] {
-        let ssa = main_program(&[Type::int(1)], &[Type::int(64)], |e, params| {
-            let big = e.emit_constant(Constant::Int(IntBits::from_biguint(
-                bits,
-                &(BigUint::from(1u8) << (bits - 1)),
-            )));
-            let small = e.int_const(IntBits::from_u128(bits, 3));
-            let chosen = e.select(params[0], big, small);
-            vec![e.cast_to(CastTarget::Int(64), chosen)]
-        });
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("an int{bits} constant: {error}"));
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(1)],
+            &[Type::int(64)],
+            |e, params| {
+                let big = e.emit_constant(Constant::Int(IntBits::from_biguint(
+                    bits,
+                    &(BigUint::from(1u8) << (bits - 1)),
+                )));
+                let small = e.int_const(IntBits::from_u128(bits, 3));
+                let chosen = e.select(params[0], big, small);
+                vec![e.cast_to(CastTarget::Int(64), chosen)]
+            },
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("an int{bits} constant: {error}"));
 
         // `2^(bits-1)` has no bits below 64, so its low word is zero; the other arm is 3.
         let yes = IntBits::from_u128(1, 1);
@@ -6302,9 +6694,9 @@ fn a_constant_the_field_cannot_carry_still_selects_and_narrows() {
         let zero = IntBits::from_u128(64, 0);
         let three = IntBits::from_u128(64, 3);
 
-        let taken = compiled.run(&input_block(&[&yes, &zero]));
+        let taken = compiled.run(&input_block::<Bn254>(&[&yes, &zero]));
         assert!(taken.is_accepted(), "int{bits} constant taken: {taken:?}");
-        let other = compiled.run(&input_block(&[&no, &three]));
+        let other = compiled.run(&input_block::<Bn254>(&[&no, &three]));
         assert!(
             other.is_accepted(),
             "int{bits} constant passed over: {other:?}"
@@ -6330,15 +6722,20 @@ fn a_constant_the_field_cannot_carry_still_selects_and_narrows() {
 #[test]
 fn every_column_of_a_wide_value_is_pinned() {
     let wide = 320usize;
-    let ssa = main_program(&[Type::int(128)], &[Type::int(64)], |e, params| {
-        let widened = e.cast_to(CastTarget::Int(wide), params[0]);
-        vec![e.cast_to(CastTarget::Int(64), widened)]
-    });
-    let compiled = Compiled::new(ssa).expect("a wide round trip compiles");
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(128)],
+        &[Type::int(64)],
+        |e, params| {
+            let widened = e.cast_to(CastTarget::Int(wide), params[0]);
+            vec![e.cast_to(CastTarget::Int(64), widened)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide round trip compiles");
 
     let value = IntBits::from_u128(128, (1u128 << 100) + 5);
     let low = IntBits::from_u128(64, 5);
-    let verdict = compiled.run(&input_block(&[&value, &low]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &low]));
     let witness = verdict
         .witness()
         .unwrap_or_else(|| panic!("an int{wide} round trip: {verdict:?}"))
@@ -6346,7 +6743,7 @@ fn every_column_of_a_wide_value_is_pinned() {
 
     for column in 0..witness.len() {
         let mut perturbed = witness.clone();
-        perturbed[column] += Field::from(1u64);
+        perturbed[column] += Bn254::from(1u64);
         assert!(
             compiled.first_unsatisfied_constraint(&perturbed).is_some(),
             "column {column} of {} is unconstrained — adding one to it left every constraint \
@@ -6374,6 +6771,7 @@ fn every_column_of_a_wide_value_is_pinned() {
 fn every_column_of_a_wide_sequence_is_pinned() {
     let wide = 320usize;
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(253), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -6391,12 +6789,12 @@ fn every_column_of_a_wide_sequence_is_pinned() {
             vec![e.cast_to(CastTarget::Int(64), read)]
         },
     );
-    let compiled = Compiled::new(ssa).expect("a wide sequence compiles");
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide sequence compiles");
 
     let value = IntBits::from_biguint(253, &((BigUint::from(1u8) << 200) + BigUint::from(5u8)));
     let index = IntBits::from_u128(32, 0);
     let low = IntBits::from_u128(64, 5);
-    let verdict = compiled.run(&input_block(&[&value, &index, &low]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &low]));
     let witness = verdict
         .witness()
         .unwrap_or_else(|| panic!("an int{wide} sequence: {verdict:?}"))
@@ -6404,7 +6802,7 @@ fn every_column_of_a_wide_sequence_is_pinned() {
 
     for column in 0..witness.len() {
         let mut perturbed = witness.clone();
-        perturbed[column] += Field::from(1u64);
+        perturbed[column] += Bn254::from(1u64);
         assert!(
             compiled.first_unsatisfied_constraint(&perturbed).is_some(),
             "column {column} of {} is unconstrained — adding one to it left every constraint \
@@ -6421,17 +6819,12 @@ fn every_column_of_a_wide_sequence_is_pinned() {
 /// differ, so the declared return names which element was read.
 #[test]
 fn a_witness_indexed_read_tells_apart_two_elements_one_modulus_apart() {
-    check_a_read_of_two_elements_one_modulus_apart::<Field>(FieldConfig::bn254(), 256);
-    check_a_read_of_two_elements_one_modulus_apart::<mavros_artifacts::Goldilocks>(
-        FieldConfig::goldilocks(),
-        64,
-    );
+    check_a_read_of_two_elements_one_modulus_apart::<Bn254>(256);
+    check_a_read_of_two_elements_one_modulus_apart::<mavros_artifacts::Goldilocks>(64);
 }
 
-fn check_a_read_of_two_elements_one_modulus_apart<F: HarnessField>(
-    field: FieldConfig,
-    bits: usize,
-) {
+fn check_a_read_of_two_elements_one_modulus_apart<F: HarnessField>(bits: usize) {
+    let field = F::CONFIG;
     let modulus = biguint_of_limbs(field.modulus_limbs());
     let elements = [
         IntBits::from_u128(bits, 5),
@@ -6439,7 +6832,7 @@ fn check_a_read_of_two_elements_one_modulus_apart<F: HarnessField>(
     ];
     assert!(BigUint::from(&elements[1]) > modulus, "both fit the width");
     let program_elements = elements.clone();
-    let ssa = main_program_in(
+    let ssa = main_program(
         field,
         &[Type::int(32)],
         &[Type::int(32)],
@@ -6460,13 +6853,13 @@ fn check_a_read_of_two_elements_one_modulus_apart<F: HarnessField>(
     assert_ne!(low(&elements[0]), low(&elements[1]));
     for (index, (read, other)) in [(0, 1), (1, 0)].into_iter().enumerate() {
         let index = IntBits::from_u128(32, index as u128);
-        let verdict = compiled.run(&input_block_in::<F>(&[&index, &low(&elements[read])]));
+        let verdict = compiled.run(&input_block::<F>(&[&index, &low(&elements[read])]));
         assert!(
             verdict.is_accepted(),
             "{:?} [{index:?}]: {verdict:?}",
             field.id()
         );
-        let verdict = compiled.run(&input_block_in::<F>(&[&index, &low(&elements[other])]));
+        let verdict = compiled.run(&input_block::<F>(&[&index, &low(&elements[other])]));
         assert!(
             matches!(verdict, Verdict::ReturnMismatch { .. }),
             "{:?} [{index:?}] declared as the other element: {verdict:?}",
@@ -6480,7 +6873,7 @@ fn check_a_read_of_two_elements_one_modulus_apart<F: HarnessField>(
 /// `p - 1`, around `2^n` for every window width, and at the low half of `p`.
 #[test]
 fn a_witnessed_field_bit_window_reads_the_canonical_integer() {
-    check_witnessed_field_windows::<Field>();
+    check_witnessed_field_windows::<Bn254>();
     check_witnessed_field_windows::<mavros_artifacts::Goldilocks>();
 }
 
@@ -6519,7 +6912,7 @@ fn check_witnessed_field_windows<F: HarnessField>() {
         (top - 32, 32),
     ];
     for (offset, width) in windows {
-        let compiled = Compiled::<F>::compile(main_program_in(
+        let compiled = Compiled::<F>::compile(main_program(
             field,
             &[Type::field()],
             &[Type::int(width)],
@@ -6560,6 +6953,7 @@ fn check_witnessed_field_windows<F: HarnessField>() {
 /// address the lookup.
 fn program_indexing_a_sequence_of(bits: usize) -> HLSSA {
     main_program(
+        FieldConfig::bn254(),
         &[Type::int(64), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -6590,19 +6984,19 @@ fn program_indexing_a_sequence_of(bits: usize) -> HLSSA {
 /// different shapes.
 #[test]
 fn a_sequence_element_wider_than_the_field_is_transposed() {
-    for bits in [first_width_past_the_field(), 320] {
-        let compiled = Compiled::new(program_indexing_a_sequence_of(bits))
+    for bits in [first_width_past_the_field(FieldConfig::bn254()), 320] {
+        let compiled = Compiled::<Bn254>::compile(program_indexing_a_sequence_of(bits))
             .unwrap_or_else(|error| panic!("an int{bits} element is not read: {error}"));
 
         let value = IntBits::from_u128(64, 0xdead_beef);
         let index = IntBits::from_u128(32, 1);
         let expected = IntBits::from_u128(64, 7);
-        let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &expected]));
         assert!(verdict.is_accepted(), "int{bits} element: {verdict:?}");
 
         // And the lane can go red: a declared return the program does not compute is refused.
         let wrong = IntBits::from_u128(64, 8);
-        let verdict = compiled.run(&input_block(&[&value, &index, &wrong]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &wrong]));
         assert!(
             !verdict.is_accepted(),
             "int{bits} element: a wrong answer was accepted"
@@ -6621,7 +7015,7 @@ fn a_sequence_element_wider_than_the_field_is_transposed() {
 /// cell instead of `cells` leaves the whole workspace green.
 #[test]
 fn an_element_between_the_narrow_lanes_and_the_transpose_is_read_whole() {
-    let injective = first_width_past_the_field() - 1;
+    let injective = first_width_past_the_field(FieldConfig::bn254()) - 1;
     // The first width past the double lane, one in the middle, and the widest the band holds.
     for bits in [2 * HOST_LIMB_BITS + 1, 200, injective] {
         let top = IntBits::from_biguint(
@@ -6632,6 +7026,7 @@ fn an_element_between_the_narrow_lanes_and_the_transpose_is_read_whole() {
         );
         let expected = top.clone();
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(injective), Type::int(32)],
             &[Type::int(1)],
             move |e, params| {
@@ -6647,17 +7042,25 @@ fn an_element_between_the_narrow_lanes_and_the_transpose_is_read_whole() {
                 vec![e.cmp(read, want, CmpKind::Eq)]
             },
         );
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("an int{bits} element is not read: {error}"));
 
         let value = IntBits::from_biguint(injective, &(BigUint::from(1u8) << 200));
         let index = IntBits::from_u128(32, 1);
-        let verdict = compiled.run(&input_block(&[&value, &index, &IntBits::from_u128(1, 1)]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[
+            &value,
+            &index,
+            &IntBits::from_u128(1, 1),
+        ]));
         assert!(verdict.is_accepted(), "int{bits} element: {verdict:?}");
 
         // And it can go red: slot 0 is the parameter, which is not the constant.
         let miss = IntBits::from_u128(32, 0);
-        let verdict = compiled.run(&input_block(&[&value, &miss, &IntBits::from_u128(1, 1)]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[
+            &value,
+            &miss,
+            &IntBits::from_u128(1, 1),
+        ]));
         assert!(
             !verdict.is_accepted(),
             "int{bits} element: a wrong answer was accepted"
@@ -6681,6 +7084,7 @@ fn a_wide_array_becomes_a_slice() {
     };
     let expected = top(2);
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(253), Type::int(32)],
         &[Type::int(1)],
         move |e, params| {
@@ -6697,18 +7101,26 @@ fn a_wide_array_becomes_a_slice() {
             vec![e.cmp(read, want, CmpKind::Eq)]
         },
     );
-    let compiled = Compiled::new(ssa).expect("a wide array becomes a slice");
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide array becomes a slice");
 
     let value = IntBits::from_biguint(253, &(BigUint::from(1u8) << 200));
     let index = IntBits::from_u128(32, 1);
-    let verdict = compiled.run(&input_block(&[&value, &index, &IntBits::from_u128(1, 1)]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[
+        &value,
+        &index,
+        &IntBits::from_u128(1, 1),
+    ]));
     assert!(
         verdict.is_accepted(),
         "an int{bits} array to slice: {verdict:?}"
     );
 
     let miss = IntBits::from_u128(32, 0);
-    let verdict = compiled.run(&input_block(&[&value, &miss, &IntBits::from_u128(1, 1)]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[
+        &value,
+        &miss,
+        &IntBits::from_u128(1, 1),
+    ]));
     assert!(
         !verdict.is_accepted(),
         "an int{bits} array to slice: a wrong answer was accepted"
@@ -6722,43 +7134,48 @@ fn a_wide_array_becomes_a_slice() {
 /// for an entry to be read as. Transposing it makes every entry a narrow constant, which does.
 #[test]
 fn a_blob_sequence_of_wide_constants_is_read() {
-    for bits in [first_width_past_the_field(), 320] {
-        let ssa = main_program(&[Type::int(32)], &[Type::int(1)], move |e, params| {
-            let blob = e.emit_constant(Constant::Blob(Blob::new(
-                Type::int(bits),
-                vec![
-                    // Top-limb values, so a reading that drops the high limbs is detectable.
-                    Constant::Int(IntBits::from_biguint(
-                        bits,
-                        &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(3u8)),
-                    )),
-                    Constant::Int(IntBits::from_biguint(
-                        bits,
-                        &((BigUint::from(1u8) << (bits - 9)) + BigUint::from(4u8)),
-                    )),
-                ],
-            )));
-            let array = e.mk_seq_of_blob(Type::int(bits), blob);
-            let element = e.array_get(array, params[0]);
-            // Compared against the whole expected element rather than narrowed to 64 bits. A
-            // narrowing return sees only the low limb, so a split that put the low window in every
-            // limb would still answer correctly.
-            let expected = e.int_const(IntBits::from_biguint(
-                bits,
-                &((BigUint::from(1u8) << (bits - 9)) + BigUint::from(4u8)),
-            ));
-            vec![e.cmp(element, expected, CmpKind::Eq)]
-        });
+    for bits in [first_width_past_the_field(FieldConfig::bn254()), 320] {
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(32)],
+            &[Type::int(1)],
+            move |e, params| {
+                let blob = e.emit_constant(Constant::Blob(Blob::new(
+                    Type::int(bits),
+                    vec![
+                        // Top-limb values, so a reading that drops the high limbs is detectable.
+                        Constant::Int(IntBits::from_biguint(
+                            bits,
+                            &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(3u8)),
+                        )),
+                        Constant::Int(IntBits::from_biguint(
+                            bits,
+                            &((BigUint::from(1u8) << (bits - 9)) + BigUint::from(4u8)),
+                        )),
+                    ],
+                )));
+                let array = e.mk_seq_of_blob(Type::int(bits), blob);
+                let element = e.array_get(array, params[0]);
+                // Compared against the whole expected element. A return narrowed to 64 bits sees
+                // only the low limb, so a split that put the low window in every limb would still
+                // answer correctly.
+                let expected = e.int_const(IntBits::from_biguint(
+                    bits,
+                    &((BigUint::from(1u8) << (bits - 9)) + BigUint::from(4u8)),
+                ));
+                vec![e.cmp(element, expected, CmpKind::Eq)]
+            },
+        );
 
-        let compiled = Compiled::new(ssa)
+        let compiled = Compiled::<Bn254>::compile(ssa)
             .unwrap_or_else(|error| panic!("an int{bits} blob element is not read: {error}"));
         let index = IntBits::from_u128(32, 1);
         let expected = IntBits::from_u128(1, 1);
-        let verdict = compiled.run(&input_block(&[&index, &expected]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&index, &expected]));
         assert!(verdict.is_accepted(), "int{bits} blob element: {verdict:?}");
 
         let wrong = IntBits::from_u128(1, 0);
-        let verdict = compiled.run(&input_block(&[&index, &wrong]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&index, &wrong]));
         assert!(
             !verdict.is_accepted(),
             "int{bits} blob element: a wrong answer was accepted"
@@ -6773,6 +7190,7 @@ fn every_sequence_shape_carries_a_wide_element() {
     // `MkRepeated`: every slot is the same wide element, derived from a parameter so that it is
     // witnessed.
     let repeated = main_program(
+        FieldConfig::bn254(),
         &[Type::int(64), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -6782,37 +7200,42 @@ fn every_sequence_shape_carries_a_wide_element() {
             vec![e.cast_to(CastTarget::Int(64), read)]
         },
     );
-    let compiled = Compiled::new(repeated).expect("a repeated wide element");
+    let compiled = Compiled::<Bn254>::compile(repeated).expect("a repeated wide element");
     let value = IntBits::from_u128(64, 0xfeed);
     let index = IntBits::from_u128(32, 2);
     let expected = IntBits::from_u128(64, 0xfeed);
-    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &expected]));
     assert!(verdict.is_accepted(), "MkRepeated: {verdict:?}");
 
     // A slice, which reaches its elements through the slice opcodes rather than the tape. Its
     // elements are **constants**, the shape that folds if a read reassembles a whole wide value
     // instead of keeping its limbs.
-    let sliced = main_program(&[Type::int(32)], &[Type::int(64)], move |e, params| {
-        let top = |low: u128| {
-            IntBits::from_biguint(
-                bits,
-                &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(low)),
-            )
-        };
-        let first = e.int_const(top(1));
-        let second = e.int_const(top(2));
-        let slice = e.mk_seq(
-            vec![first, second],
-            SequenceTargetType::Slice,
-            Type::int(bits),
-        );
-        let read = e.array_get(slice, params[0]);
-        vec![e.cast_to(CastTarget::Int(64), read)]
-    });
-    let compiled = Compiled::new(sliced).expect("a wide slice element");
+    let sliced = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(32)],
+        &[Type::int(64)],
+        move |e, params| {
+            let top = |low: u128| {
+                IntBits::from_biguint(
+                    bits,
+                    &((BigUint::from(1u8) << (bits - 8)) + BigUint::from(low)),
+                )
+            };
+            let first = e.int_const(top(1));
+            let second = e.int_const(top(2));
+            let slice = e.mk_seq(
+                vec![first, second],
+                SequenceTargetType::Slice,
+                Type::int(bits),
+            );
+            let read = e.array_get(slice, params[0]);
+            vec![e.cast_to(CastTarget::Int(64), read)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(sliced).expect("a wide slice element");
     let index = IntBits::from_u128(32, 1);
     let expected = IntBits::from_u128(64, 2);
-    let verdict = compiled.run(&input_block(&[&index, &expected]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&index, &expected]));
     assert!(verdict.is_accepted(), "slice of constants: {verdict:?}");
 }
 
@@ -6833,6 +7256,7 @@ fn a_four_element_wide_array_is_read_written_and_nested() {
 
     // Read at a witness index.
     let read = main_program(
+        FieldConfig::bn254(),
         &[Type::int(253), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -6851,15 +7275,16 @@ fn a_four_element_wide_array_is_read_written_and_nested() {
             vec![e.cast_to(CastTarget::Int(64), element)]
         },
     );
-    let compiled = Compiled::new(read).expect("[int256; 4] read");
+    let compiled = Compiled::<Bn254>::compile(read).expect("[int256; 4] read");
     let value = IntBits::from_biguint(253, &(BigUint::from(1u8) << 200));
     let index = IntBits::from_u128(32, 3);
     let expected = IntBits::from_u128(64, 3);
-    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &expected]));
     assert!(verdict.is_accepted(), "[int256; 4] read: {verdict:?}");
 
     // Written at a witness index, and read back at a constant one.
     let written = main_program(
+        FieldConfig::bn254(),
         &[Type::int(253), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -6881,15 +7306,16 @@ fn a_four_element_wide_array_is_read_written_and_nested() {
             vec![e.cast_to(CastTarget::Int(64), element)]
         },
     );
-    let compiled = Compiled::new(written).expect("[int256; 4] write");
+    let compiled = Compiled::<Bn254>::compile(written).expect("[int256; 4] write");
     // Written at slot 0, so slot 2 keeps its constant.
     let index = IntBits::from_u128(32, 0);
     let expected = IntBits::from_u128(64, 3);
-    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &expected]));
     assert!(verdict.is_accepted(), "[int256; 4] write: {verdict:?}");
 
     // Nested, with the outer row chosen at a witness index.
     let nested = main_program(
+        FieldConfig::bn254(),
         &[Type::int(253), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -6917,10 +7343,10 @@ fn a_four_element_wide_array_is_read_written_and_nested() {
             vec![e.cast_to(CastTarget::Int(64), element)]
         },
     );
-    let compiled = Compiled::new(nested).expect("[[int256; 2]; 2]");
+    let compiled = Compiled::<Bn254>::compile(nested).expect("[[int256; 2]; 2]");
     let index = IntBits::from_u128(32, 1);
     let expected = IntBits::from_u128(64, 2);
-    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &expected]));
     assert!(verdict.is_accepted(), "[[int256; 2]; 2]: {verdict:?}");
 }
 
@@ -6942,6 +7368,7 @@ fn a_wide_slice_grows_and_reports_its_length() {
     };
 
     let pushed = main_program(
+        FieldConfig::bn254(),
         &[Type::int(253), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -6953,23 +7380,28 @@ fn a_wide_slice_grows_and_reports_its_length() {
             vec![e.cast_to(CastTarget::Int(64), read)]
         },
     );
-    let compiled = Compiled::new(pushed).expect("a wide slice push");
+    let compiled = Compiled::<Bn254>::compile(pushed).expect("a wide slice push");
     let value = IntBits::from_biguint(253, &(BigUint::from(1u8) << 200));
     // Slot 0 is the seed, whose low 64 bits are 1.
     let index = IntBits::from_u128(32, 0);
     let expected = IntBits::from_u128(64, 1);
-    let verdict = compiled.run(&input_block(&[&value, &index, &expected]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &index, &expected]));
     assert!(verdict.is_accepted(), "a wide slice push: {verdict:?}");
 
-    let length = main_program(&[Type::int(253)], &[Type::int(32)], move |e, params| {
-        let wide = e.cast_to(CastTarget::Int(bits), params[0]);
-        let slice = e.mk_seq(vec![wide], SequenceTargetType::Slice, Type::int(bits));
-        let longer = e.slice_push(slice, vec![wide], SliceOpDir::Back);
-        vec![e.slice_len(longer)]
-    });
-    let compiled = Compiled::new(length).expect("a wide slice length");
+    let length = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(253)],
+        &[Type::int(32)],
+        move |e, params| {
+            let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+            let slice = e.mk_seq(vec![wide], SequenceTargetType::Slice, Type::int(bits));
+            let longer = e.slice_push(slice, vec![wide], SliceOpDir::Back);
+            vec![e.slice_len(longer)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(length).expect("a wide slice length");
     let two = IntBits::from_u128(32, 2);
-    let verdict = compiled.run(&input_block(&[&value, &two]));
+    let verdict = compiled.run(&input_block::<Bn254>(&[&value, &two]));
     assert!(verdict.is_accepted(), "a wide slice length: {verdict:?}");
 }
 
@@ -6983,18 +7415,23 @@ fn a_wide_slice_grows_and_reports_its_length() {
 /// `harness::compile_wasm`.
 #[test]
 fn the_wasm_lane_agrees_at_a_wide_width() {
-    let injective = first_width_past_the_field() - 1;
+    let injective = first_width_past_the_field(FieldConfig::bn254()) - 1;
     let mut ran = 0usize;
 
     // The field boundary, up to the widest width one element carries, with the value in the top
     // limb. Past 128 bits the element spans more cells than the narrow lanes hold.
     for bits in [64usize, 128, 129, 200, injective] {
-        let ssa = main_program(&[Type::field()], &[Type::field()], |e, params| {
-            let wide = e.cast_to(CastTarget::Int(bits), params[0]);
-            vec![e.cast_to_field(wide)]
-        });
-        let compiled = Compiled::new(ssa).expect("a wide round trip compiles");
-        let value = Field::from((BigUint::from(1u8) << (bits - 8)) + BigUint::from(7u8));
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::field()],
+            &[Type::field()],
+            |e, params| {
+                let wide = e.cast_to(CastTarget::Int(bits), params[0]);
+                vec![e.cast_to_field(wide)]
+            },
+        );
+        let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide round trip compiles");
+        let value = Bn254::from((BigUint::from(1u8) << (bits - 8)) + BigUint::from(7u8));
         let inputs = [
             InputValueOrdered::Field(value),
             InputValueOrdered::Field(value),
@@ -7011,14 +7448,19 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
     }
 
     // And the multi-cell representation, above the width the field carries at all.
-    let ssa = main_program(&[Type::int(128)], &[Type::int(64)], |e, params| {
-        let widened = e.cast_to(CastTarget::Int(320), params[0]);
-        vec![e.cast_to(CastTarget::Int(64), widened)]
-    });
-    let compiled = Compiled::new(ssa).expect("an int320 round trip compiles");
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(128)],
+        &[Type::int(64)],
+        |e, params| {
+            let widened = e.cast_to(CastTarget::Int(320), params[0]);
+            vec![e.cast_to(CastTarget::Int(64), widened)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("an int320 round trip compiles");
     let value = IntBits::from_u128(128, (1u128 << 100) + 5);
     let low = IntBits::from_u128(64, 5);
-    if let Some(wasm) = compiled.run_wasm(&input_block(&[&value, &low])) {
+    if let Some(wasm) = compiled.run_wasm(&input_block::<Bn254>(&[&value, &low])) {
         ran += 1;
         assert!(wasm.is_accepted(), "an int320 round trip in WASM: {wasm:?}");
     }
@@ -7027,12 +7469,12 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
     // compiled half of the lookup: `ELEM_CELLS` in the VM and the transposed tables in codegen are
     // both unreachable from the scalar programs above.
     for bits in [200usize, 320] {
-        let compiled = Compiled::new(program_indexing_a_sequence_of(bits))
+        let compiled = Compiled::<Bn254>::compile(program_indexing_a_sequence_of(bits))
             .unwrap_or_else(|error| panic!("an int{bits} sequence compiles: {error}"));
         let value = IntBits::from_u128(64, 0xdead_beef);
         let index = IntBits::from_u128(32, 1);
         let expected = IntBits::from_u128(64, 7);
-        if let Some(wasm) = compiled.run_wasm(&input_block(&[&value, &index, &expected])) {
+        if let Some(wasm) = compiled.run_wasm(&input_block::<Bn254>(&[&value, &index, &expected])) {
             ran += 1;
             assert!(
                 wasm.is_accepted(),
@@ -7046,6 +7488,7 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
     // half-limbs. Neither the split nor the ragged top limb is exercised by a scalar round trip.
     for bits in [200usize, 254] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(64), Type::int(64)],
             &[Type::int(64)],
             move |e, params| {
@@ -7055,9 +7498,9 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
                 vec![e.cast_to(CastTarget::Int(64), answer)]
             },
         );
-        let compiled = Compiled::new(ssa).expect("a wide bitwise compiles");
+        let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide bitwise compiles");
         let (x, y) = (0xF0F0_F0F0_0F0F_0F0Fu128, 0x00FF_00FF_FF00_FF00u128);
-        let inputs = input_block(&[
+        let inputs = input_block::<Bn254>(&[
             &IntBits::from_u128(64, x),
             &IntBits::from_u128(64, y),
             &IntBits::from_u128(64, x ^ y),
@@ -7073,6 +7516,7 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
     // per limb, the top one at the narrower width that limb actually carries.
     for bits in [200usize, 254] {
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(64), Type::int(64)],
             &[Type::int(64)],
             move |e, params| {
@@ -7083,9 +7527,9 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
                 vec![e.cast_to(CastTarget::Int(64), answer)]
             },
         );
-        let compiled = Compiled::new(ssa).expect("a wide complement compiles");
+        let compiled = Compiled::<Bn254>::compile(ssa).expect("a wide complement compiles");
         let (x, y) = (0xDEAD_BEEF_0BAD_F00Du64, 0xF0F0_F0F0_0F0F_0F0Fu64);
-        let inputs = input_block(&[
+        let inputs = input_block::<Bn254>(&[
             &IntBits::from_u128(64, u128::from(x)),
             &IntBits::from_u128(64, u128::from(y)),
             &IntBits::from_u128(64, u128::from(!x ^ y)),
@@ -7117,7 +7561,7 @@ fn the_wasm_lane_agrees_at_a_wide_width() {
 fn a_dead_spread_still_rejects_the_bits_above_its_read() {
     for width in [16usize, 600] {
         for in_callee in [false, true] {
-            let mut ssa = HLSSA::with_main("main".to_string());
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
             let main_id = ssa.get_unique_entrypoint_id();
             let mut builder = HLSSABuilder::new(&mut ssa);
             let (callee_id, ()) = builder.add_function("checks".to_string(), |b| {
@@ -7143,10 +7587,10 @@ fn a_dead_spread_still_rejects_the_bits_above_its_read() {
                 }
                 e.terminate_return(vec![]);
             });
-            let compiled = Compiled::new(ssa).unwrap_or_else(|error| {
+            let compiled = Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| {
                 panic!("int{width}, in a callee: {in_callee}, does not compile: {error}")
             });
-            let input = |value: u128| input_block(&[&IntBits::from_u128(16, value)]);
+            let input = |value: u128| input_block::<Bn254>(&[&IntBits::from_u128(16, value)]);
             let verdict = compiled.run(&input(255));
             assert!(
                 verdict.is_accepted(),
@@ -7201,13 +7645,18 @@ fn reading_a_pure_wide_element(
     body: impl FnOnce(&mut HLBlockEmitter<'_>, ValueId, ValueId) -> Vec<ValueId>,
 ) -> HLSSA {
     let elements = pure_wide_elements();
-    main_program(&[Type::int(64)], &returns, move |e, params| {
-        let constants: Vec<ValueId> = elements.iter().map(|v| e.int_const(v.clone())).collect();
-        let array = e.mk_seq(constants, SequenceTargetType::Array(3), Type::int(320));
-        let count = loop_count(e);
-        let element = e.array_get(array, count);
-        body(e, element, params[0])
-    })
+    main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &returns,
+        move |e, params| {
+            let constants: Vec<ValueId> = elements.iter().map(|v| e.int_const(v.clone())).collect();
+            let array = e.mk_seq(constants, SequenceTargetType::Array(3), Type::int(320));
+            let count = loop_count(e);
+            let element = e.array_get(array, count);
+            body(e, element, params[0])
+        },
+    )
 }
 
 /// A pure wide element read out of a sequence reaches every kind of consumer, on both lanes.
@@ -7368,17 +7817,19 @@ fn a_pure_wide_element_read_out_of_a_sequence_reaches_every_consumer() {
             vec![e.cast_to(CastTarget::Int(64), top)]
         });
         let want = want.shifted_right(256).cast(64);
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
-        let verdict = compiled.run(&input_block(&[&input, &want]));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("{what} does not compile: {error}"));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&input, &want]));
         assert!(verdict.is_accepted(), "{what}: {verdict:?}");
         let verdict = compiled
-            .run_wasm(&input_block(&[&input, &want]))
+            .run_wasm(&input_block::<Bn254>(&[&input, &want]))
             .expect("the WASM lane builds");
         assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
         let wrong = want.xor(&IntBits::one(64));
         assert!(
-            !compiled.run(&input_block(&[&input, &wrong])).is_accepted(),
+            !compiled
+                .run(&input_block::<Bn254>(&[&input, &wrong]))
+                .is_accepted(),
             "{what} accepted a wrong answer"
         );
     }
@@ -7403,9 +7854,10 @@ fn a_pure_wide_equality_asserted_in_a_witness_branch_binds_only_where_taken() {
             e.seal_and_switch(Terminator::Jmp(merge, vec![]), merge);
             vec![]
         });
-        let compiled = Compiled::new(ssa).unwrap_or_else(|error| panic!("{index}: {error}"));
-        let not_taken = input_block(&[&IntBits::zero(64)]);
-        let taken = input_block(&[&IntBits::from_u128(64, 1)]);
+        let compiled =
+            Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| panic!("{index}: {error}"));
+        let not_taken = input_block::<Bn254>(&[&IntBits::zero(64)]);
+        let taken = input_block::<Bn254>(&[&IntBits::from_u128(64, 1)]);
         assert!(compiled.run(&not_taken).is_accepted(), "{index} not taken");
         let verdict = compiled.run(&taken);
         assert_eq!(verdict.is_accepted(), holds, "{index} taken: {verdict:?}");
@@ -7422,7 +7874,7 @@ fn a_pure_wide_equality_asserted_in_a_witness_branch_binds_only_where_taken() {
 /// the top limb of `x ^ (w as int320)`, called as a constrained or an unconstrained function.
 fn calling_with_a_pure_wide_element(unconstrained: bool) -> HLSSA {
     let elements = pure_wide_elements();
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let mut builder = HLSSABuilder::new(&mut ssa);
     let (callee, ()) = builder.add_function("callee".to_string(), |b| {
@@ -7469,15 +7921,15 @@ fn a_pure_wide_element_is_handed_to_a_call_whole() {
     let input = IntBits::from_u128(64, 12345);
     let want = element.xor(&input.cast(320)).shifted_right(256).cast(64);
     for unconstrained in [false, true] {
-        let compiled = Compiled::new(calling_with_a_pure_wide_element(unconstrained))
+        let compiled = Compiled::<Bn254>::compile(calling_with_a_pure_wide_element(unconstrained))
             .unwrap_or_else(|error| panic!("unconstrained: {unconstrained}: {error}"));
-        let verdict = compiled.run(&input_block(&[&input, &want]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&input, &want]));
         assert!(
             verdict.is_accepted(),
             "unconstrained: {unconstrained}: {verdict:?}"
         );
         let verdict = compiled
-            .run_wasm(&input_block(&[&input, &want]))
+            .run_wasm(&input_block::<Bn254>(&[&input, &want]))
             .expect("the WASM lane builds");
         assert!(
             verdict.is_accepted(),
@@ -7485,7 +7937,9 @@ fn a_pure_wide_element_is_handed_to_a_call_whole() {
         );
         let wrong = want.xor(&IntBits::one(64));
         assert!(
-            !compiled.run(&input_block(&[&input, &wrong])).is_accepted(),
+            !compiled
+                .run(&input_block::<Bn254>(&[&input, &wrong]))
+                .is_accepted(),
             "unconstrained: {unconstrained} accepted a wrong answer"
         );
     }
@@ -7497,6 +7951,7 @@ fn a_pure_wide_element_is_handed_to_a_call_whole() {
 fn a_witness_indexed_wide_read_in_a_witness_branch_binds_only_where_taken() {
     let high = IntBits::from_biguint(320, &((BigUint::from(1u8) << 312u32) + BigUint::from(7u8)));
     let ssa = main_program(
+        FieldConfig::bn254(),
         &[Type::int(64), Type::int(32)],
         &[Type::int(64)],
         move |e, params| {
@@ -7522,9 +7977,9 @@ fn a_witness_indexed_wide_read_in_a_witness_branch_binds_only_where_taken() {
             vec![e.add_parameter(Type::int(64))]
         },
     );
-    let compiled = Compiled::new(ssa).expect("a guarded wide read compiles");
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a guarded wide read compiles");
     let run = |w: u128, index: u128, answer: u128| {
-        compiled.run(&input_block(&[
+        compiled.run(&input_block::<Bn254>(&[
             &IntBits::from_u128(64, w),
             &IntBits::from_u128(32, index),
             &IntBits::from_u128(64, answer),
@@ -7550,7 +8005,7 @@ fn a_witness_indexed_wide_read_in_a_witness_branch_binds_only_where_taken() {
 #[test]
 fn an_unconstrained_function_answers_a_wide_integer() {
     for sequence in [false, true] {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let mut builder = HLSSABuilder::new(&mut ssa);
         let answer_type = if sequence {
@@ -7599,16 +8054,16 @@ fn an_unconstrained_function_answers_a_wide_integer() {
             let back = e.cast_to(CastTarget::Int(64), back);
             e.terminate_return(vec![back]);
         });
-        let compiled =
-            Compiled::new(ssa).unwrap_or_else(|error| panic!("in a sequence: {sequence}: {error}"));
+        let compiled = Compiled::<Bn254>::compile(ssa)
+            .unwrap_or_else(|error| panic!("in a sequence: {sequence}: {error}"));
         let input = IntBits::from_u128(64, 12345);
-        let verdict = compiled.run(&input_block(&[&input, &input]));
+        let verdict = compiled.run(&input_block::<Bn254>(&[&input, &input]));
         assert!(
             verdict.is_accepted(),
             "in a sequence: {sequence}: {verdict:?}"
         );
         let verdict = compiled
-            .run_wasm(&input_block(&[&input, &input]))
+            .run_wasm(&input_block::<Bn254>(&[&input, &input]))
             .expect("the WASM lane builds");
         assert!(
             verdict.is_accepted(),
@@ -7616,7 +8071,9 @@ fn an_unconstrained_function_answers_a_wide_integer() {
         );
         let wrong = input.xor(&IntBits::one(64));
         assert!(
-            !compiled.run(&input_block(&[&input, &wrong])).is_accepted(),
+            !compiled
+                .run(&input_block::<Bn254>(&[&input, &wrong]))
+                .is_accepted(),
             "in a sequence: {sequence} accepted a wrong answer"
         );
     }
@@ -7639,10 +8096,10 @@ fn a_pure_wide_ordering_asserted_in_a_witness_branch_binds_only_where_taken() {
         e.seal_and_switch(Terminator::Jmp(merge, vec![]), merge);
         vec![]
     });
-    let compiled = Compiled::new(ssa).expect("a guarded pure ordering compiles");
-    let not_taken = compiled.run(&input_block(&[&IntBits::zero(64)]));
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a guarded pure ordering compiles");
+    let not_taken = compiled.run(&input_block::<Bn254>(&[&IntBits::zero(64)]));
     assert!(not_taken.is_accepted(), "{not_taken:?}");
-    let taken = compiled.run(&input_block(&[&IntBits::from_u128(64, 1)]));
+    let taken = compiled.run(&input_block::<Bn254>(&[&IntBits::from_u128(64, 1)]));
     assert!(taken.rejects(), "{taken:?}");
 }
 
@@ -7655,7 +8112,7 @@ fn a_pure_wide_ordering_asserted_in_a_witness_branch_binds_only_where_taken() {
 /// on Goldilocks), and a wrong one is refused.
 #[test]
 fn a_witnessed_field_reads_back_as_a_wide_integer() {
-    check_a_witnessed_field_reads_back_as_a_wide_integer::<Field>(64, 190);
+    check_a_witnessed_field_reads_back_as_a_wide_integer::<Bn254>(64, 190);
     check_a_witnessed_field_reads_back_as_a_wide_integer::<mavros_artifacts::Goldilocks>(32, 48);
 }
 
@@ -7675,7 +8132,7 @@ fn check_a_witnessed_field_reads_back_as_a_wide_integer<F: HarnessField>(
         &modulus - 1u8,
     ];
     for bits in [top, top + 46, 1000] {
-        let ssa = main_program_in(
+        let ssa = main_program(
             field,
             &[Type::field()],
             &[Type::int(window), Type::int(window)],
@@ -7751,6 +8208,7 @@ fn an_integer_decomposes_into_bits_and_bytes_at_every_width() {
         let value = wide.clone();
         let digit_bits = if bytes { 8 } else { 1 };
         let ssa = main_program(
+            FieldConfig::bn254(),
             &[Type::int(64)],
             &[Type::int(digit_bits)],
             move |e, params| {
@@ -7779,9 +8237,10 @@ fn an_integer_decomposes_into_bits_and_bytes_at_every_width() {
             "int{bits} into {digits} {}, digit {read}",
             if bytes { "bytes" } else { "bits" }
         );
-        let compiled = Compiled::new(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+        let compiled =
+            Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
         let inputs = |answer: u128| {
-            input_block(&[
+            input_block::<Bn254>(&[
                 &IntBits::from_u128(64, 5),
                 &IntBits::from_u128(digit_bits, answer),
             ])
@@ -7799,16 +8258,21 @@ fn an_integer_decomposes_into_bits_and_bytes_at_every_width() {
     }
 
     // Bit 299 is past 280 bits.
-    let ssa = main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
-        let operand = e.cast_to(CastTarget::Int(300), params[0]);
-        let high = e.int_const(IntBits::from_biguint(300, &(BigUint::from(1u8) << 299u32)));
-        let operand = e.bin(BinaryArithOpKind::Or, operand, high);
-        let decomposed = e.to_bits(operand, Endianness::Little, 280);
-        let index = e.int_const(IntBits::zero(32));
-        vec![e.array_get(decomposed, index)]
-    });
-    let compiled = Compiled::new(ssa).expect("a short decomposition compiles");
-    let verdict = compiled.run(&input_block(&[
+    let ssa = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(1)],
+        move |e, params| {
+            let operand = e.cast_to(CastTarget::Int(300), params[0]);
+            let high = e.int_const(IntBits::from_biguint(300, &(BigUint::from(1u8) << 299u32)));
+            let operand = e.bin(BinaryArithOpKind::Or, operand, high);
+            let decomposed = e.to_bits(operand, Endianness::Little, 280);
+            let index = e.int_const(IntBits::zero(32));
+            vec![e.array_get(decomposed, index)]
+        },
+    );
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("a short decomposition compiles");
+    let verdict = compiled.run(&input_block::<Bn254>(&[
         &IntBits::from_u128(64, 5),
         &IntBits::one(1),
     ]));
@@ -7823,27 +8287,33 @@ fn a_bit_window_of_a_wide_integer_is_cut_from_it() {
     for (offset, width) in [(0usize, 64usize), (40, 100), (236, 64)] {
         for witnessed in [true, false] {
             let pattern = IntBits::from_biguint(300, &value);
-            let ssa = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-                let constant = e.int_const(pattern);
-                let operand = if witnessed {
-                    let wide = e.cast_to(CastTarget::Int(300), params[0]);
-                    e.bin(BinaryArithOpKind::Or, wide, constant)
-                } else {
-                    constant
-                };
-                let window = e.bit_range(operand, offset, width);
-                vec![e.cast_to(CastTarget::Int(64), window)]
-            });
+            let ssa = main_program(
+                FieldConfig::bn254(),
+                &[Type::int(64)],
+                &[Type::int(64)],
+                move |e, params| {
+                    let constant = e.int_const(pattern);
+                    let operand = if witnessed {
+                        let wide = e.cast_to(CastTarget::Int(300), params[0]);
+                        e.bin(BinaryArithOpKind::Or, wide, constant)
+                    } else {
+                        constant
+                    };
+                    let window = e.bit_range(operand, offset, width);
+                    vec![e.cast_to(CastTarget::Int(64), window)]
+                },
+            );
             let what = format!(
                 "bits {offset}..{} of an int300, witnessed: {witnessed}",
                 offset + width
             );
-            let compiled = Compiled::new(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+            let compiled =
+                Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
             let want = IntBits::from_biguint(
                 64,
                 &((&value >> offset as u32) % (BigUint::from(1u8) << width.min(64) as u32)),
             );
-            let inputs = |answer: &IntBits| input_block(&[&IntBits::zero(64), answer]);
+            let inputs = |answer: &IntBits| input_block::<Bn254>(&[&IntBits::zero(64), answer]);
             let verdict = compiled.run(&inputs(&want));
             assert!(verdict.is_accepted(), "{what}: {verdict:?}");
             let verdict = compiled
@@ -7864,7 +8334,7 @@ fn a_bit_window_of_a_wide_integer_is_cut_from_it() {
 /// a global `H: [int64; 1]` after it, whose slot moves when `G` takes one per limb.
 fn reading_a_wide_global() -> HLSSA {
     let elements = pure_wide_elements();
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let init = ssa.add_function("globals_init".to_string());
     let deinit = ssa.add_function("globals_deinit".to_string());
@@ -7918,7 +8388,8 @@ fn reading_a_wide_global() -> HLSSA {
 /// lanes; the global after it is read from where its slot moved to.
 #[test]
 fn a_global_holding_wide_integers_is_read_at_a_witness_index() {
-    let compiled = Compiled::new(reading_a_wide_global()).expect("a wide global compiles");
+    let compiled =
+        Compiled::<Bn254>::compile(reading_a_wide_global()).expect("a wide global compiles");
     let elements = pure_wide_elements();
     for index in 0..3u128 {
         let want = elements[index as usize].cast(64);
@@ -7928,10 +8399,10 @@ fn a_global_holding_wide_integers_is_read_at_a_witness_index() {
             IntBits::from_u128(64, 77),
         ];
         let inputs: Vec<&IntBits> = inputs.iter().collect();
-        let verdict = compiled.run(&input_block(&inputs));
+        let verdict = compiled.run(&input_block::<Bn254>(&inputs));
         assert!(verdict.is_accepted(), "element {index}: {verdict:?}");
         let verdict = compiled
-            .run_wasm(&input_block(&inputs))
+            .run_wasm(&input_block::<Bn254>(&inputs))
             .expect("the WASM lane builds");
         assert!(
             verdict.is_accepted(),
@@ -7945,24 +8416,29 @@ fn a_global_holding_wide_integers_is_read_at_a_witness_index() {
 #[test]
 fn an_access_past_the_end_known_when_the_circuit_is_built_is_refused() {
     for write in [false, true] {
-        let ssa = main_program(&[Type::int(8)], &[Type::int(8)], move |e, params| {
-            let zero = e.int_const(IntBits::zero(32));
-            let count = loop_count(e);
-            let five = e.int_const(IntBits::from_u128(32, 5));
-            let past = e.bin(BinaryArithOpKind::UAdd, count, five);
-            let elements: Vec<ValueId> = (0..3)
-                .map(|k| e.int_const(IntBits::from_u128(8, k)))
-                .collect();
-            let array = e.mk_seq(elements, SequenceTargetType::Array(3), Type::int(8));
-            let array = if write {
-                e.array_set(array, past, params[0])
-            } else {
-                array
-            };
-            let index = if write { zero } else { past };
-            vec![e.array_get(array, index)]
-        });
-        let Err(error) = Compiled::new(ssa) else {
+        let ssa = main_program(
+            FieldConfig::bn254(),
+            &[Type::int(8)],
+            &[Type::int(8)],
+            move |e, params| {
+                let zero = e.int_const(IntBits::zero(32));
+                let count = loop_count(e);
+                let five = e.int_const(IntBits::from_u128(32, 5));
+                let past = e.bin(BinaryArithOpKind::UAdd, count, five);
+                let elements: Vec<ValueId> = (0..3)
+                    .map(|k| e.int_const(IntBits::from_u128(8, k)))
+                    .collect();
+                let array = e.mk_seq(elements, SequenceTargetType::Array(3), Type::int(8));
+                let array = if write {
+                    e.array_set(array, past, params[0])
+                } else {
+                    array
+                };
+                let index = if write { zero } else { past };
+                vec![e.array_get(array, index)]
+            },
+        );
+        let Err(error) = Compiled::<Bn254>::compile(ssa) else {
             panic!("write: {write}: a program that always reads past the end compiled");
         };
         assert!(
@@ -7986,6 +8462,7 @@ fn an_access_past_the_end_known_when_the_circuit_is_built_is_refused() {
 fn limbed_operation(kind: BinaryArithOpKind, bits: usize, big: &IntBits) -> HLSSA {
     let big = big.clone();
     main_program(
+        FieldConfig::bn254(),
         &[Type::int(64), Type::int(1)],
         &[Type::int(64), Type::int(64)],
         move |e, params| {
@@ -8048,7 +8525,7 @@ fn every_column_of_a_limbed_operation_is_pinned_at_ragged_and_far_widths() {
                 })
                 .unwrap_or_else(|| panic!("{what}: the model rejects every candidate"))
                 .clone();
-            let compiled = Compiled::new(limbed_operation(kind, bits, &big))
+            let compiled = Compiled::<Bn254>::compile(limbed_operation(kind, bits, &big))
                 .unwrap_or_else(|error| panic!("{what}: {error}"));
             let inputs = limbed_inputs(kind, bits, &big, 3);
             let inputs: Vec<&IntBits> = inputs.iter().collect();
@@ -8070,13 +8547,18 @@ fn every_column_of_the_wide_shape_lowerings_is_pinned() {
 
     // A bit window straddling two limbs of a witnessed int300.
     let window_value = wide_value.clone();
-    let window = main_program(&[Type::int(64)], &[Type::int(64)], move |e, params| {
-        let wide = e.cast_to(CastTarget::Int(300), params[0]);
-        let constant = e.int_const(IntBits::from_biguint(300, &window_value));
-        let operand = e.bin(BinaryArithOpKind::Or, wide, constant);
-        let window = e.bit_range(operand, 40, 100);
-        vec![e.cast_to(CastTarget::Int(64), window)]
-    });
+    let window = main_program(
+        FieldConfig::bn254(),
+        &[Type::int(64)],
+        &[Type::int(64)],
+        move |e, params| {
+            let wide = e.cast_to(CastTarget::Int(300), params[0]);
+            let constant = e.int_const(IntBits::from_biguint(300, &window_value));
+            let operand = e.bin(BinaryArithOpKind::Or, wide, constant);
+            let window = e.bit_range(operand, 40, 100);
+            vec![e.cast_to(CastTarget::Int(64), window)]
+        },
+    );
     let window_answer = IntBits::from_biguint(
         64,
         &(((&wide_value | BigUint::from(5u8)) >> 40u32) % (BigUint::from(1u8) << 64u32)),
@@ -8087,6 +8569,7 @@ fn every_column_of_the_wide_shape_lowerings_is_pinned() {
         .into_iter()
         .map(|bits| {
             let ssa = main_program(
+                FieldConfig::bn254(),
                 &[Type::field()],
                 &[Type::int(64), Type::int(64)],
                 move |e, params| {
@@ -8108,7 +8591,7 @@ fn every_column_of_the_wide_shape_lowerings_is_pinned() {
     let element_high = IntBits::from_u128(64, 1 << 10);
 
     // A wide answer from an unconstrained function, tied back to its input.
-    let mut unconstrained = HLSSA::with_main("main".to_string());
+    let mut unconstrained = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = unconstrained.get_unique_entrypoint_id();
     let mut builder = HLSSABuilder::new(&mut unconstrained);
     let (hint, ()) = builder.add_function("hint".to_string(), |b| {
@@ -8140,18 +8623,23 @@ fn every_column_of_the_wide_shape_lowerings_is_pinned() {
     // An integer's digits: an int64 as one field image, and an int300 in chunks.
     let digits = |bits: usize, count: usize, read: usize| {
         let high = wide_value.clone();
-        main_program(&[Type::int(64)], &[Type::int(1)], move |e, params| {
-            let operand = e.cast_to(CastTarget::Int(bits), params[0]);
-            let operand = if bits > 64 {
-                let constant = e.int_const(IntBits::from_biguint(bits, &high));
-                e.bin(BinaryArithOpKind::Or, operand, constant)
-            } else {
-                operand
-            };
-            let decomposed = e.to_bits(operand, Endianness::Little, count);
-            let index = e.int_const(IntBits::from_u128(32, read as u128));
-            vec![e.array_get(decomposed, index)]
-        })
+        main_program(
+            FieldConfig::bn254(),
+            &[Type::int(64)],
+            &[Type::int(1)],
+            move |e, params| {
+                let operand = e.cast_to(CastTarget::Int(bits), params[0]);
+                let operand = if bits > 64 {
+                    let constant = e.int_const(IntBits::from_biguint(bits, &high));
+                    e.bin(BinaryArithOpKind::Or, operand, constant)
+                } else {
+                    operand
+                };
+                let decomposed = e.to_bits(operand, Endianness::Little, count);
+                let index = e.int_const(IntBits::from_u128(32, read as u128));
+                vec![e.array_get(decomposed, index)]
+            },
+        )
     };
 
     let mut cases: Vec<(String, HLSSA, Vec<IntBits>)> = vec![
@@ -8188,7 +8676,8 @@ fn every_column_of_the_wide_shape_lowerings_is_pinned() {
         ));
     }
     for (what, ssa, inputs) in cases {
-        let compiled = Compiled::new(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
+        let compiled =
+            Compiled::<Bn254>::compile(ssa).unwrap_or_else(|error| panic!("{what}: {error}"));
         let inputs: Vec<&IntBits> = inputs.iter().collect();
         assert_every_column_is_pinned(&what, &compiled, &inputs);
         assert_no_two_columns_trade_a_limb(&what, &compiled, &inputs);
@@ -8207,7 +8696,7 @@ fn every_column_of_the_wide_shape_lowerings_is_pinned() {
 #[ignore = "a 16384-bit value entering the representation; several minutes in a debug build"]
 fn the_widest_unconstrained_answer_runs_on_both_lanes() {
     let bits = 16384;
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let mut builder = HLSSABuilder::new(&mut ssa);
     let (hint, ()) = builder.add_function("hint".to_string(), move |b| {
@@ -8235,14 +8724,14 @@ fn the_widest_unconstrained_answer_runs_on_both_lanes() {
         let back = e.cast_to(CastTarget::Int(64), back);
         e.terminate_return(vec![back]);
     });
-    let compiled = Compiled::new(ssa).expect("compiles");
+    let compiled = Compiled::<Bn254>::compile(ssa).expect("compiles");
     let input = IntBits::from_u128(64, 9);
-    let inputs = input_block(&[&input, &input]);
+    let inputs = input_block::<Bn254>(&[&input, &input]);
     let verdict = compiled.run(&inputs);
     assert!(verdict.is_accepted(), "{verdict:?}");
     let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
     assert!(verdict.is_accepted(), "on WASM: {verdict:?}");
-    let wrong = input_block(&[&input, &IntBits::from_u128(64, 8)]);
+    let wrong = input_block::<Bn254>(&[&input, &IntBits::from_u128(64, 8)]);
     assert!(
         !compiled.run(&wrong).is_accepted(),
         "a wrong answer was accepted"
@@ -8266,7 +8755,7 @@ enum CallResults {
 /// Every argument is read through a sequence at witnessed positions, so none is dropped as unused,
 /// and the callee builds no value per argument, which would overflow the unoptimized wasm stack.
 fn program_calling_with_many_arguments(count: usize, results: CallResults) -> HLSSA {
-    let mut ssa = HLSSA::with_main("main".to_string());
+    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
     let main_id = ssa.get_unique_entrypoint_id();
     let mut builder = HLSSABuilder::new(&mut ssa);
     let (callee, ()) = builder.add_function("callee".to_string(), move |b| {
@@ -8334,8 +8823,8 @@ fn program_calling_with_many_arguments(count: usize, results: CallResults) -> HL
 /// Runs [`program_calling_with_many_arguments`] on both lanes at a few positions, and requires a
 /// wrong answer to be refused.
 fn assert_a_call_with_many_arguments_runs(count: usize, results: CallResults) {
-    let compiled =
-        Compiled::new(program_calling_with_many_arguments(count, results)).expect("compiles");
+    let compiled = Compiled::<Bn254>::compile(program_calling_with_many_arguments(count, results))
+        .expect("compiles");
     let int32 = |value: u128| IntBits::from_u128(32, value);
     let input = 3u128;
     let last = count as u128 - 1;
@@ -8345,13 +8834,14 @@ fn assert_a_call_with_many_arguments_runs(count: usize, results: CallResults) {
             CallResults::One | CallResults::Wide => sum,
             CallResults::Two => 2 * sum,
         };
-        let inputs = input_block(&[&int32(input), &int32(first), &int32(second), &int32(want)]);
+        let inputs =
+            input_block::<Bn254>(&[&int32(input), &int32(first), &int32(second), &int32(want)]);
         let what = format!("{count} arguments, positions {first} and {second}");
         let verdict = compiled.run(&inputs);
         assert!(verdict.is_accepted(), "{what}: {verdict:?}");
         let verdict = compiled.run_wasm(&inputs).expect("the WASM lane builds");
         assert!(verdict.is_accepted(), "{what} on WASM: {verdict:?}");
-        let wrong = input_block(&[
+        let wrong = input_block::<Bn254>(&[
             &int32(input),
             &int32(first),
             &int32(second),

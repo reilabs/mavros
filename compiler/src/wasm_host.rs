@@ -639,12 +639,12 @@ pub fn run_ad_loaded<F: MavrosField>(
 
 #[cfg(test)]
 mod tests {
-    use mavros_artifacts::{ConstraintsLayout, Field, WitnessLayout};
+    use mavros_artifacts::{Bn254, ConstraintsLayout, WitnessLayout};
 
     use super::*;
 
     /// An empty module and system: both checks run before the module is instantiated.
-    fn empty_module_and_system() -> (LoadedModule, R1CS) {
+    fn empty_module_and_system() -> (LoadedModule, R1CS<Bn254>) {
         let engine = wasm_engine().unwrap();
         let module = wasmtime::Module::new(&engine, b"\0asm\x01\0\0\0").unwrap();
         let r1cs = R1CS {
@@ -670,14 +670,14 @@ mod tests {
     #[should_panic(expected = "the AD run reads one coefficient per constraint")]
     fn an_ad_run_needs_one_coefficient_per_constraint() {
         let (loaded, r1cs) = empty_module_and_system();
-        let _ = run_ad_loaded(&loaded, &r1cs, &[Field::from(1u64)]);
+        let _ = run_ad_loaded(&loaded, &r1cs, &[Bn254::from(1u64)]);
     }
 
     #[test]
     #[should_panic(expected = "1 flattened input fields supplied but the entry has 2")]
     fn a_witgen_run_needs_the_entry_blob_field_count() {
         let (loaded, r1cs) = empty_module_and_system();
-        let inputs = [interpreter::InputValueOrdered::Field(Field::from(1u64))];
+        let inputs = [interpreter::InputValueOrdered::Field(Bn254::from(1u64))];
         let _ = run_witgen_loaded(&loaded, &r1cs, &inputs, 2);
     }
 }

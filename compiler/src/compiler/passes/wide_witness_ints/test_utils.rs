@@ -56,19 +56,15 @@ pub(super) fn emitted(ssa: &HLSSA) -> Vec<OpCode> {
         .collect()
 }
 
-/// `main(lhs: WitnessOf<int(bits)>, rhs: rhs_type) -> WitnessOf<int(bits)> { lhs op rhs }`.
-pub(super) fn operation_with(kind: BinaryArithOpKind, bits: usize, rhs_type: Type) -> HLSSA {
-    operation_with_in(bn254(), kind, bits, rhs_type)
-}
-
-/// [`operation_with`] over `field`.
-pub(super) fn operation_with_in(
+/// `main(lhs: WitnessOf<int(bits)>, rhs: rhs_type) -> WitnessOf<int(bits)> { lhs op rhs }` over
+/// `field`.
+pub(super) fn operation_with(
     field: FieldConfig,
     kind: BinaryArithOpKind,
     bits: usize,
     rhs_type: Type,
 ) -> HLSSA {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let (lhs, rhs, result) = (ssa.fresh_value(), ssa.fresh_value(), ssa.fresh_value());
     let mut builder = HLSSABuilder::new(&mut ssa);
@@ -125,7 +121,7 @@ pub(super) fn operation_accepts<F: MavrosField>(
     guard: Option<bool>,
     forge: impl FnOnce(&mut HLSSA),
 ) -> bool {
-    let mut ssa = HLSSA::with_main_in(field, "main".to_string());
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
     let main = ssa.get_unique_entrypoint_id();
     let location = || SourceLocation::synthetic("operation_accepts");
 

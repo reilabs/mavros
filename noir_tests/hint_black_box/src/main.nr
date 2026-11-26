@@ -60,7 +60,9 @@ unconstrained fn check_unconstrained(x: Field) -> Field {
     check_shapes(x)
 }
 
-fn main(x: Field) {
+fn main(x: u8) {
+    let x = x as Field;
+
     assert_eq(check_shapes(x), x);
     // Safety: the returned identity value is checked against the input below.
     let result = unsafe { check_unconstrained(x) };

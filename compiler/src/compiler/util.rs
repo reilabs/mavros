@@ -119,6 +119,12 @@ pub fn ice_non_elided_tuple() -> ! {
     ice!("Tuple encountered after ElideTuples pass")
 }
 
+/// `WideWitnessInts` rewrites every `IntFromLimbs`; reaching one downstream is a compiler bug.
+#[track_caller]
+pub fn ice_int_from_limbs_after_wide_witness_ints() -> ! {
+    ice!("IntFromLimbs encountered after WideWitnessInts")
+}
+
 /// Panic if an `AssertConstant` marker survives its dedicated validation phase.
 #[track_caller]
 pub fn ice_unvalidated_assert_constant() -> ! {
@@ -135,8 +141,8 @@ pub mod test {
         ssa::{ValueId, hlssa::builder::HLEmitter},
     };
 
-    /// Convert the provided `n` into a field value.
-    pub fn fr(n: u64) -> Field {
+    /// `n` as a bn254 element.
+    pub fn bn254_const(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
     }
 
@@ -190,7 +196,7 @@ pub mod test {
     /// `op_counts`; tests that care about the contents `store` to the cell afterward (the store
     /// overwrites the seed).
     pub fn falloc(e: &mut impl HLEmitter) -> ValueId {
-        let init = e.field_const(fr(0));
+        let init = e.field_const(bn254_const(0));
         e.alloc(init)
     }
 }

@@ -38,7 +38,7 @@ fn source_checks_survive_unused_results_and_respect_inactive_branches() {
             .and_then(|_| driver.spill_witness())
             .and_then(|_| {
                 driver
-                    .generate_r1cs::<mavros_artifacts::Field>()
+                    .generate_r1cs::<mavros_artifacts::Bn254>()
                     .map(|_| ())
             });
         assert_eq!(result.is_ok(), accepted, "{body}: {result:?}");

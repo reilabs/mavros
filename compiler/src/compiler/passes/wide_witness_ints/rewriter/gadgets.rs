@@ -1,10 +1,10 @@
-use super::{
-    super::{types::limb_widths, utils::multi_cell_int_bits},
-    Rewriter,
-};
-use crate::compiler::ssa::{
-    ValueId,
-    hlssa::{BinaryArithOpKind, CastTarget, OpCode, builder::HLEmitter},
+use super::{super::types::limb_widths, Rewriter};
+use crate::compiler::{
+    passes::shared::limbs::multi_cell_int_bits,
+    ssa::{
+        ValueId,
+        hlssa::{BinaryArithOpKind, CastTarget, OpCode, builder::HLEmitter},
+    },
 };
 use mavros_int_semantics::IntBits;
 

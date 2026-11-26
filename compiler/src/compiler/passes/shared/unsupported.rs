@@ -1,8 +1,18 @@
 //! Refusal for the widths the configured field cannot carry.
 //!
 //! Witness lowerings pack values into field elements, so each has a precondition on the field's
-//! width. All hold on bn254; routing them through one check registers what a narrower field would
-//! need.
+//! width. A lowering whose precondition the configured field fails, with no limb-wise lowering to
+//! fall back on, refuses through [`unsupported_on_this_field`], so its callers are the complete
+//! list of such preconditions. An internal invariant that no field choice can violate is not
+//! refused here.
+//!
+//! The only callers a program's input can trigger are `witness_field`'s `to_bits` and `to_radix`,
+//! which refuse a decomposition wider than an element on any field. The driver asks their question
+//! first (`DecompositionWidthValidation`), so such a program gets `Error::LoweringRefused` with a
+//! diagnostic, and these refusals back that check up. The other callers cannot fire on bn254 or
+//! Goldilocks and stay as backstops: an earlier lowering routes every operation past the
+//! single-cell ones, and both fields leave the schoolbook room for one partial product and the
+//! carry it is reduced into.
 
 use std::fmt;
 
@@ -24,7 +34,7 @@ pub fn field_offers(field: FieldConfig) -> String {
 pub fn unsupported_on_this_field(attempted: fmt::Arguments<'_>, field: FieldConfig) -> ! {
     ice_usr!(
         "{attempted}. {} This is a limit of the lowering on this field rather than an internal \
-         invariant — see docs/field-agnosticism.md, Layer 6.",
+         invariant.",
         field_offers(field),
     )
 }

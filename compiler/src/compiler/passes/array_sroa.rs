@@ -517,7 +517,7 @@ mod tests {
     };
     use mavros_int_semantics::IntBits;
 
-    fn fr(n: u64) -> Field {
+    fn bn254_const(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
     }
 
@@ -525,7 +525,7 @@ mod tests {
     /// The constant is interned (never a block instruction), so the seed never shows up in the
     /// opcode `Counts` these tests assert on.
     fn falloc(e: &mut impl HLEmitter) -> ValueId {
-        let init = e.field_const(fr(0));
+        let init = e.field_const(bn254_const(0));
         e.alloc(init)
     }
 
@@ -598,7 +598,7 @@ mod tests {
     /// go.
     #[test]
     fn scalar_array_peels() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -606,8 +606,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let x = e.field_const(fr(7));
-                let y = e.field_const(fr(9));
+                let x = e.field_const(bn254_const(7));
+                let y = e.field_const(bn254_const(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let i0 = e.int_const(IntBits::zero(32));
                 let i1 = e.int_const(IntBits::one(32));
@@ -626,7 +626,7 @@ mod tests {
     /// ArraySet peel: a functional update of one cell, then both cells read — no array ops remain.
     #[test]
     fn array_set_peels() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -634,9 +634,9 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let x = e.field_const(fr(1));
-                let y = e.field_const(fr(2));
-                let z = e.field_const(fr(3));
+                let x = e.field_const(bn254_const(1));
+                let y = e.field_const(bn254_const(2));
+                let z = e.field_const(bn254_const(3));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let i0 = e.int_const(IntBits::zero(32));
                 let i1 = e.int_const(IntBits::one(32));
@@ -658,7 +658,7 @@ mod tests {
     /// param splits into per-cell params and all array traffic is removed.
     #[test]
     fn array_phi_splits() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -667,10 +667,10 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
-                let a = e.field_const(fr(1));
-                let bb = e.field_const(fr(2));
-                let cc = e.field_const(fr(3));
-                let d = e.field_const(fr(4));
+                let a = e.field_const(bn254_const(1));
+                let bb = e.field_const(bn254_const(2));
+                let cc = e.field_const(bn254_const(3));
+                let d = e.field_const(bn254_const(4));
                 let arr_t = e.mk_seq(vec![a, bb], SequenceTargetType::Array(2), Type::field());
                 let arr_f = e.mk_seq(vec![cc, d], SequenceTargetType::Array(2), Type::field());
                 let merged = e.build_if_else(
@@ -700,7 +700,7 @@ mod tests {
     /// Negative — a single dynamic index collapses the group, so the array is retained untouched.
     #[test]
     fn dynamic_index_is_not_peeled() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -709,8 +709,8 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let n = e.add_parameter(Type::int(32)); // dynamic index
-                let x = e.field_const(fr(7));
-                let y = e.field_const(fr(9));
+                let x = e.field_const(bn254_const(7));
+                let y = e.field_const(bn254_const(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let got = e.array_get(arr, n);
                 e.terminate_return(vec![got]);
@@ -727,16 +727,16 @@ mod tests {
     /// would index a nonexistent cell and crash the compiler).
     #[test]
     fn out_of_bounds_constant_index_is_not_peeled() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let x = e.field_const(fr(1));
-                let y = e.field_const(fr(2));
-                let z = e.field_const(fr(3));
+                let x = e.field_const(bn254_const(1));
+                let y = e.field_const(bn254_const(2));
+                let z = e.field_const(bn254_const(3));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let oob = e.int_const(IntBits::from_u128(32, 5)); // index 5 into a length-2 array
                 let _ = e.array_set(arr, oob, z);
@@ -752,7 +752,7 @@ mod tests {
     /// Negative — an array that crosses a boundary (passed to a `Call`) collapses and is retained.
     #[test]
     fn boundary_array_is_not_peeled() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -772,8 +772,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let x = e.field_const(fr(7));
-                let y = e.field_const(fr(9));
+                let x = e.field_const(bn254_const(7));
+                let y = e.field_const(bn254_const(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let r = e.call(sink, vec![arr], 1)[0];
                 e.terminate_return(vec![r]);
@@ -790,7 +790,7 @@ mod tests {
     /// A constant blob array, constant-indexed, peels into per-cell constants.
     #[test]
     fn blob_array_peels_to_constants() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -801,9 +801,9 @@ mod tests {
                 let blob = e.emit_constant(Constant::Blob(Blob {
                     elem_type: Type::field(),
                     elements: vec![
-                        Constant::Field(fr(1)),
-                        Constant::Field(fr(2)),
-                        Constant::Field(fr(3)),
+                        Constant::Field(bn254_const(1)),
+                        Constant::Field(bn254_const(2)),
+                        Constant::Field(bn254_const(3)),
                     ],
                 }));
                 let arr = e.mk_seq_of_blob(Type::field(), blob);
@@ -822,7 +822,7 @@ mod tests {
     /// and the follow-up Mem2Reg then promotes the underlying allocs.
     #[test]
     fn ref_array_peels_then_mem2reg_promotes() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -832,8 +832,8 @@ mod tests {
                 let mut e = b.test_block(entry);
                 let ra = falloc(&mut e);
                 let rb = falloc(&mut e);
-                let c1 = e.field_const(fr(3));
-                let c2 = e.field_const(fr(4));
+                let c1 = e.field_const(bn254_const(3));
+                let c2 = e.field_const(bn254_const(4));
                 e.store(ra, c1);
                 e.store(rb, c2);
                 let arr = e.mk_seq(
@@ -867,7 +867,7 @@ mod tests {
     /// promotes it to an array value, ArraySroa peels that — the result is fully scalarized.
     #[test]
     fn ref_to_array_local_fully_scalarizes() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -875,8 +875,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let x = e.field_const(fr(5));
-                let y = e.field_const(fr(6));
+                let x = e.field_const(bn254_const(5));
+                let y = e.field_const(bn254_const(6));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let p = e.alloc(arr); // Ref<Array<Field,2>>, seeded with arr (store folded into the alloc)
                 let loaded = e.load(p); // Array<Field,2>
@@ -900,7 +900,7 @@ mod tests {
     /// read at constant indices, peels fully — no `MkRepeated`/`ArraySet`/`ArrayGet` remains.
     #[test]
     fn repeated_scalar_array_peels() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -908,9 +908,9 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let zero = e.field_const(fr(0));
+                let zero = e.field_const(bn254_const(0));
                 let arr = e.mk_repeated(zero, SequenceTargetType::Array(4), 4, Type::field()); // [0;4]
-                let x = e.field_const(fr(7));
+                let x = e.field_const(bn254_const(7));
                 let i1 = e.int_const(IntBits::one(32));
                 let updated = e.array_set(arr, i1, x); // [0, 7, 0, 0]
                 let i0 = e.int_const(IntBits::zero(32));
@@ -931,7 +931,7 @@ mod tests {
     /// peeling is pointless) — the `MkRepeated` and its `ArrayGet` are retained.
     #[test]
     fn repeated_ref_array_is_not_peeled() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -940,7 +940,7 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let r = falloc(&mut e);
-                let c = e.field_const(fr(5));
+                let c = e.field_const(bn254_const(5));
                 e.store(r, c);
                 let arr = e.mk_repeated(r, SequenceTargetType::Array(3), 3, Type::field().ref_of()); // [r;3]
                 let i0 = e.int_const(IntBits::zero(32));
@@ -963,7 +963,7 @@ mod tests {
     /// pass does not crash.
     #[test]
     fn slice_phi_is_not_peeled() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -971,8 +971,8 @@ mod tests {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
                 let cond = e.add_parameter(Type::bool());
-                let a = e.field_const(fr(1));
-                let bb = e.field_const(fr(2));
+                let a = e.field_const(bn254_const(1));
+                let bb = e.field_const(bn254_const(2));
                 let slice_t = e.mk_seq(vec![a], SequenceTargetType::Slice, Type::field());
                 let slice_f = e.mk_seq(vec![bb], SequenceTargetType::Slice, Type::field());
                 let _merged = e.build_if_else(
@@ -997,7 +997,7 @@ mod tests {
     /// aggregate / index a slice). The pass must not crash.
     #[test]
     fn array_to_slice_cast_is_not_peeled() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         {
             let mut sb = HLSSABuilder::new(&mut ssa);
@@ -1005,8 +1005,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let x = e.field_const(fr(7));
-                let y = e.field_const(fr(9));
+                let x = e.field_const(bn254_const(7));
+                let y = e.field_const(bn254_const(9));
                 let arr = e.mk_seq(vec![x, y], SequenceTargetType::Array(2), Type::field());
                 let _slice = e.cast_to(CastTarget::ArrayToSlice, arr); // unioned into arr's group
                 let i0 = e.int_const(IntBits::zero(32));

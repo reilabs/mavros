@@ -135,10 +135,12 @@ mod tests {
     use super::*;
     use crate::compiler::{
         analysis::types::Types,
-        passes::shared::limbs::witness_limb_bits,
-        passes::wide_witness_ints::{
-            rewriter::EuclideanDivision,
-            test_utils::{fields, limbed_widths, operation_with_in, run_pass},
+        passes::{
+            shared::limbs::witness_limb_bits,
+            wide_witness_ints::{
+                rewriter::EuclideanDivision,
+                test_utils::{fields, limbed_widths, operation_with, run_pass},
+            },
         },
         ssa::hlssa::{BinaryArithOpKind, Type},
     };
@@ -181,7 +183,7 @@ mod tests {
                     BinaryArithOpKind::SDiv,
                 ] {
                     let mut ssa =
-                        operation_with_in(field, kind, bits, Type::witness_of(Type::int(bits)));
+                        operation_with(field, kind, bits, Type::witness_of(Type::int(bits)));
                     let flow = FlowAnalysis::run(&ssa);
                     let types = Types::new().run(&ssa, &flow);
                     assert_eq!(

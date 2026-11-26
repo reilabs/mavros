@@ -1,5 +1,5 @@
 use super::{
-    super::{types::limb_widths, utils::multi_cell_int_bits},
+    super::types::limb_widths,
     Operands, Rewriter,
     lower::{unguarded, witnessed_width},
     sign::Sign,
@@ -8,7 +8,7 @@ use super::{
 use crate::compiler::{
     analysis::types::FunctionTypeInfo,
     passes::shared::{
-        limbs::{ceil_log2, max_pow2_table_size, single_cell_shift_fits},
+        limbs::{ceil_log2, max_pow2_table_size, multi_cell_int_bits, single_cell_shift_fits},
         shift_guard::emit_pure_shift_amount_check,
     },
     ssa::{

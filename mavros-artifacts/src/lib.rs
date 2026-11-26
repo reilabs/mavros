@@ -8,15 +8,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 use tracing::error;
 
-pub use field::{FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField};
+pub use field::{
+    Bn254, FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField,
+};
 pub use manifest::{
     ARTIFACT_DIGEST_DOMAIN, ARTIFACT_FORMAT_VERSION, ARTIFACT_MAGIC, Artifact, ArtifactError,
     ArtifactParts, ArtifactPreamble, CIRCUIT_DIGEST_DOMAIN, ManifestParam, ParamVisibility,
     ReturnSlot, WitnessManifest,
 };
-
-// FIELD-ASSUMPTION: L1-alias
-pub type Field = ark_bn254::Fr;
 
 const MAX_TIMELINE_SAMPLES: usize = 100_000;
 
@@ -323,7 +322,7 @@ mod flamegraph_profile_tests {
 // Linear constraint helpers
 // ---------------------------------------------------------------------------
 
-pub type LC<F = Field> = Vec<(usize, F)>;
+pub type LC<F> = Vec<(usize, F)>;
 
 // A coefficient is written as its `F::CANONICAL_LIMBS` canonical limbs, a fixed-size array, so the
 // encoding carries no length: four limbs for bn254, pinned by
@@ -367,7 +366,7 @@ mod lc_serde {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "F: MavrosField")]
-pub struct R1C<F = Field> {
+pub struct R1C<F> {
     #[serde(with = "lc_serde")]
     pub a: LC<F>,
     #[serde(with = "lc_serde")]
@@ -680,7 +679,7 @@ impl ConstraintsLayout {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "F: MavrosField")]
-pub struct R1CS<F = Field> {
+pub struct R1CS<F> {
     pub witness_layout: WitnessLayout,
     pub constraints_layout: ConstraintsLayout,
     pub constraints: Vec<R1C<F>>,
@@ -717,7 +716,7 @@ impl<F: MavrosField> R1CS<F> {
 
 /// An immutable constraint system; derefs to the [`R1CS`]. Its digest is computed on first use.
 #[derive(Clone, Debug)]
-pub struct SealedR1CS<F: MavrosField = Field> {
+pub struct SealedR1CS<F: MavrosField> {
     system: R1CS<F>,
     digest: OnceCell<[u8; 32]>,
 }
@@ -887,28 +886,10 @@ impl<F: MavrosField> R1CS<F> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputValueOrdered<F = Field> {
+pub enum InputValueOrdered<F> {
     Field(F),
-    String(String),
     Vec(Vec<InputValueOrdered<F>>),
     Struct(Vec<(String, InputValueOrdered<F>)>),
-}
-
-impl<F: MavrosField> InputValueOrdered<F> {
-    pub fn field_sizes(&self) -> Vec<usize> {
-        match self {
-            InputValueOrdered::Field(_) => vec![F::STORAGE_CELLS],
-            InputValueOrdered::String(_) => panic!("Strings are not supported in element_size"),
-            InputValueOrdered::Vec(_) => vec![1],
-            InputValueOrdered::Struct(fields) => {
-                let mut total_size = vec![];
-                for (_field_name, field_value) in fields {
-                    total_size.extend(field_value.field_sizes());
-                }
-                total_size
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -928,11 +909,11 @@ mod r1c_tests {
             .to_string()
         }
         let expected = "(-1 * v1) * (5 * v2) - (-2 * v3) = 0";
-        let bn254 = |n: i64| -> Field {
+        let bn254 = |n: i64| -> Bn254 {
             if n < 0 {
-                -Field::from(n.unsigned_abs())
+                -Bn254::from(n.unsigned_abs())
             } else {
-                Field::from(n as u64)
+                Bn254::from(n as u64)
             }
         };
         assert_eq!(shown([bn254(-1), bn254(5), bn254(-2)]), expected);

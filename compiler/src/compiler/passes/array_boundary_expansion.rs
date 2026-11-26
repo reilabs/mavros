@@ -808,7 +808,7 @@ mod tests {
     };
     use mavros_int_semantics::IntBits;
 
-    fn fr(n: u64) -> Field {
+    fn bn254_const(n: u64) -> Field {
         FieldConfig::bn254().constant(n)
     }
 
@@ -878,7 +878,7 @@ mod tests {
     /// per-cell formals, and the follow-up ArraySroa peels the reconstruction on both sides.
     #[test]
     fn param_array_expands_and_peels() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let sink;
         {
@@ -902,8 +902,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c3 = e.field_const(fr(3));
-                let c4 = e.field_const(fr(4));
+                let c3 = e.field_const(bn254_const(3));
+                let c4 = e.field_const(bn254_const(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
                 let r = e.call(sink, vec![arr], 1)[0];
                 e.terminate_return(vec![r]);
@@ -938,7 +938,7 @@ mod tests {
     /// returns, and ArraySroa peels both sides.
     #[test]
     fn return_array_expands_and_peels() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let make;
         {
@@ -949,8 +949,8 @@ mod tests {
                 b.function.add_return_type(Type::field().array_of(2));
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c7 = e.field_const(fr(7));
-                let c9 = e.field_const(fr(9));
+                let c7 = e.field_const(bn254_const(7));
+                let c9 = e.field_const(bn254_const(9));
                 let arr = e.mk_seq(vec![c7, c9], SequenceTargetType::Array(2), Type::field());
                 e.terminate_return(vec![arr]);
             });
@@ -992,7 +992,7 @@ mod tests {
     /// entry-point return, is itself pruned at this stage).
     #[test]
     fn unused_cell_is_eliminated() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field()]);
         let main_id = ssa.get_unique_entrypoint_id();
         let sink;
@@ -1013,8 +1013,8 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c3 = e.field_const(fr(3));
-                let c4 = e.field_const(fr(4));
+                let c3 = e.field_const(bn254_const(3));
+                let c4 = e.field_const(bn254_const(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
                 let r = e.call(sink, vec![arr], 1)[0];
                 e.init_global(0, r);
@@ -1042,7 +1042,7 @@ mod tests {
     /// expanded.
     #[test]
     fn dynamic_index_param_is_retained() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let main_id = ssa.get_unique_entrypoint_id();
         let sink;
         {
@@ -1063,8 +1063,8 @@ mod tests {
                 b.function.add_return_type(Type::field());
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c3 = e.field_const(fr(3));
-                let c4 = e.field_const(fr(4));
+                let c3 = e.field_const(bn254_const(3));
+                let c4 = e.field_const(bn254_const(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
                 let i0 = e.int_const(IntBits::zero(32));
                 let r = e.call(sink, vec![arr, i0], 1)[0];
@@ -1082,7 +1082,7 @@ mod tests {
     /// the group, so the parameter is not expanded (composition deferred).
     #[test]
     fn onward_passed_param_is_retained() {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         ssa.set_global_types(vec![Type::field().array_of(2)]);
         let main_id = ssa.get_unique_entrypoint_id();
         let (g, sink);
@@ -1110,8 +1110,8 @@ mod tests {
             sb.modify_function(main_id, |b| {
                 let entry = b.function.get_entry_id();
                 let mut e = b.test_block(entry);
-                let c3 = e.field_const(fr(3));
-                let c4 = e.field_const(fr(4));
+                let c3 = e.field_const(bn254_const(3));
+                let c4 = e.field_const(bn254_const(4));
                 let arr = e.mk_seq(vec![c3, c4], SequenceTargetType::Array(2), Type::field());
                 e.call(g, vec![arr], 0);
                 e.terminate_return(vec![]);

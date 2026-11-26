@@ -250,10 +250,11 @@ fn emit_merge_select(
 mod tests {
     use super::*;
     use crate::compiler::analysis::types::Types;
+    use mavros_artifacts::FieldConfig;
 
     #[test]
     fn sparse_array_merge_emits_nested_replay() {
-        let mut ssa = HLSSA::with_main("nested_replay".into());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "nested_replay".into());
         let id = ssa.get_unique_entrypoint_id();
         let mut function = ssa.take_function(id);
         let entry = function.get_entry_id();
@@ -334,7 +335,7 @@ mod tests {
                 accepted
             );
             for identical in [false, true] {
-                let mut ssa = HLSSA::with_main("conversion".into());
+                let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "conversion".into());
                 let mut function = ssa.take_function(ssa.get_unique_entrypoint_id());
                 let lhs = ssa.fresh_value();
                 let rhs = ssa.fresh_value();
@@ -365,7 +366,7 @@ mod tests {
     #[test]
     fn identical_arms_reuse_the_value_and_keep_required_conversion() {
         for pure in [false, true] {
-            let mut ssa = HLSSA::with_main("merge".into());
+            let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "merge".into());
             let fid = ssa.get_unique_entrypoint_id();
             let mut function = ssa.take_function(fid);
             let entry = function.get_entry_id();

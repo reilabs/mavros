@@ -5,7 +5,10 @@ fn step(acc: &mut Field, x: Field) {
     *acc = *acc * 2 + x;
 }
 
-fn main(x: Field, expected: pub Field) {
+fn main(x: u8, expected: pub u8) {
+    let x = x as Field;
+    let expected = expected as Field;
+
     let mut acc = 0;
     for _ in 0..5 {
         step(&mut acc, x);

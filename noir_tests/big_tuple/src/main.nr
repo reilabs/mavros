@@ -22,7 +22,10 @@ pub struct Big {
     a19: Field,
 }
 
-fn main(x: Field, expected_sum: pub Field) {
+fn main(x: u8, expected_sum: pub u16) {
+    let x = x as Field;
+    let expected_sum = expected_sum as Field;
+
     let big = Big {
         a0: x,
         a1: x + 1,

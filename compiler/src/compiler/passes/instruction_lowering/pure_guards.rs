@@ -980,6 +980,7 @@ mod tests {
             hlssa::{Constant, HLSSA, type_system::MAX_SUPPORTED_INT_BITS},
         },
     };
+    use mavros_artifacts::FieldConfig;
     use mavros_int_semantics::int_bits::HOST_WORD_BITS;
 
     /// `main(lhs: int(bits), rhs: int(bits)) -> int(bits) { lhs op rhs }`, lowered by this pass.
@@ -992,7 +993,7 @@ mod tests {
     /// `UntaintControlFlow` leaves behind and the second of the two paths that reach
     /// [`mul_overflows_nonzero`].
     fn lowered_pure_op(kind: BinaryArithOpKind, bits: usize, guarded: bool) -> HLSSA {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let lhs = ssa.fresh_value();
         let rhs = ssa.fresh_value();
         let condition = guarded.then(|| ssa.fresh_value());
@@ -1035,7 +1036,7 @@ mod tests {
         lhs_type: Type,
         rhs_type: Type,
     ) -> bool {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let lhs = ssa.fresh_value();
         let rhs = ssa.fresh_value();
         let result = ssa.fresh_value();
@@ -1113,7 +1114,7 @@ mod tests {
         lhs_type: Type,
         rhs_type: Type,
     ) -> (bool, bool) {
-        let mut ssa = HLSSA::with_main("main".to_string());
+        let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
         let lhs = ssa.fresh_value();
         let rhs = ssa.fresh_value();
         let condition = ssa.fresh_value();

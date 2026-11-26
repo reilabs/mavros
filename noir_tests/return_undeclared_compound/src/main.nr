@@ -6,11 +6,11 @@ struct Out {
     flag: bool,
 }
 
-fn main(x: u8) -> pub (Out, Field) {
+fn main(x: u8) -> pub (Out, u8) {
     let out = Out {
         tag: "abc",
         vals: [x, x + 1],
         flag: true,
     };
-    (out, x as Field + 100)
+    (out, x + 100)
 }

@@ -7,9 +7,15 @@ use mavros_artifacts::{InputValueOrdered, MavrosField};
 
 use crate::{
     api,
+    collections::HashMap,
     compiler::{
+        Field,
         codegen::CodeGenOptions,
-        ssa::hlssa::{HLSSA, OpCode},
+        located::synthetic_file,
+        ssa::{
+            Located,
+            hlssa::{CastTarget, Constant, HLSSA, OpCode, SequenceTargetType, Type},
+        },
     },
     driver::Driver,
     vm::interpreter::TrapError,
@@ -26,7 +32,7 @@ pub fn accepts_the_forgery<F: MavrosField>(
     inputs: &[InputValueOrdered<F>],
     forge: impl FnOnce(&mut HLSSA),
 ) -> bool {
-    accepts_the_forgery_with(ssa, inputs, |_| {}, forge)
+    accepts_the_forgery_with_checked_at(ssa, inputs, |_| {}, None, forge)
 }
 
 /// [`accepts_the_forgery`], with the driver set up by `configure` before it compiles.
@@ -34,6 +40,30 @@ pub fn accepts_the_forgery_with<F: MavrosField>(
     ssa: HLSSA,
     inputs: &[InputValueOrdered<F>],
     configure: impl FnOnce(&mut Driver),
+    forge: impl FnOnce(&mut HLSSA),
+) -> bool {
+    accepts_the_forgery_with_checked_at(ssa, inputs, configure, None, forge)
+}
+
+pub fn accepts_the_forgery_checked_at<F: MavrosField>(
+    ssa: HLSSA,
+    inputs: &[InputValueOrdered<F>],
+    checks: Option<&str>,
+    forge: impl FnOnce(&mut HLSSA),
+) -> bool {
+    accepts_the_forgery_with_checked_at(ssa, inputs, |_| {}, checks, forge)
+}
+
+/// [`accepts_the_forgery`], where a trap located at the synthetic `checks` refuses the forgery too.
+///
+/// A range check narrow enough to stay in its function traps where it stands on a value with no
+/// table row. A test that forges the hints such checks read names their location, and must hold
+/// nothing else at that location that can trap.
+pub fn accepts_the_forgery_with_checked_at<F: MavrosField>(
+    ssa: HLSSA,
+    inputs: &[InputValueOrdered<F>],
+    configure: impl FnOnce(&mut Driver),
+    checks: Option<&str>,
     forge: impl FnOnce(&mut HLSSA),
 ) -> bool {
     let dumps = tempfile::TempDir::new().unwrap();
@@ -56,6 +86,15 @@ pub fn accepts_the_forgery_with<F: MavrosField>(
     {
         Ok(witness) => witness,
         Err(trap) if trapped_in_a_range_check(&trap) => return false,
+        Err(trap)
+            if checks.is_some_and(|origin| {
+                trap.stack_trace()
+                    .first()
+                    .is_some_and(|frame| frame.location.file == synthetic_file(origin))
+            }) =>
+        {
+            return false;
+        }
         Err(trap) => panic!("the forgery trapped outside a range check: {trap}"),
     };
     r1cs.unsatisfied_constraint(
@@ -99,4 +138,106 @@ pub fn replace_hints(ssa: &mut HLSSA, mut replace: impl FnMut(&OpCode) -> Option
         }
     }
     replaced
+}
+
+/// Writes each byte hint of every `ToRadix` decomposition in `ssa` from `table`, read at the index
+/// the hint reads, in place of that byte. A run of bytes a lowering loops over is one hint read at
+/// a moving index, so each iteration reads the entry at its index.
+///
+/// A byte hint is a read of a decomposition's result, cast to `Field` and written as a witness; a
+/// read through a copy of the array, such as a block parameter, is not found.
+///
+/// # Panics
+///
+/// If `ssa` has no byte hint.
+pub fn forge_radix_byte_hints(ssa: &mut HLSSA, table: &[Field]) {
+    let table: Vec<_> = table
+        .iter()
+        .map(|&entry| ssa.add_const(Constant::Field(entry)))
+        .collect();
+    let radix: Vec<_> = all_ops(ssa)
+        .filter_map(|op| match op {
+            OpCode::ToRadix { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect();
+    let index_of_read: HashMap<_, _> = all_ops(ssa)
+        .filter_map(|op| match op {
+            OpCode::ArrayGet {
+                result,
+                array,
+                index,
+            } if radix.contains(&array) => Some((result, index)),
+            _ => None,
+        })
+        .collect();
+    let index_of_hint: HashMap<_, _> = all_ops(ssa)
+        .filter_map(|op| match op {
+            OpCode::Cast {
+                result,
+                value,
+                target: CastTarget::Field,
+            } => index_of_read.get(&value).map(|&index| (result, index)),
+            _ => None,
+        })
+        .collect();
+    let hints = all_ops(ssa)
+        .filter(|op| {
+            matches!(op, OpCode::WriteWitness { value, .. } if index_of_hint.contains_key(value))
+        })
+        .count();
+
+    assert!(hints > 0, "the decomposition hints its bytes");
+
+    let mut fresh = ssa.fresh_values(2 * hints).into_iter();
+
+    for (_, function) in ssa.iter_functions_mut() {
+        for (_, block) in function.get_blocks_mut() {
+            let mut forged = Vec::new();
+
+            for instruction in block.take_instructions() {
+                let OpCode::WriteWitness {
+                    result,
+                    value,
+                    pinned,
+                } = *instruction
+                else {
+                    forged.push(instruction);
+                    continue;
+                };
+
+                let Some(&index) = index_of_hint.get(&value) else {
+                    forged.push(instruction);
+                    continue;
+                };
+
+                let location = instruction.location().clone();
+                let (array, read) = (fresh.next().unwrap(), fresh.next().unwrap());
+
+                forged.extend(
+                    [
+                        OpCode::MkSeq {
+                            result: array,
+                            elems: table.clone(),
+                            seq_type: SequenceTargetType::Array(table.len()),
+                            elem_type: Type::field(),
+                        },
+                        OpCode::ArrayGet {
+                            result: read,
+                            array,
+                            index,
+                        },
+                        OpCode::WriteWitness {
+                            result,
+                            value: read,
+                            pinned,
+                        },
+                    ]
+                    .map(|op| Located::new(op, location.clone())),
+                );
+            }
+
+            block.put_instructions(forged);
+        }
+    }
 }

@@ -21,7 +21,10 @@ fn same(b: bool) -> u8 {
     }
 }
 
-fn main(b: bool, x: Field, y: Field) {
+fn main(b: bool, x: u8, y: u8) {
+    let x = x as Field;
+    let y = y as Field;
+
     assert_eq(pick(b, x, y), x);
     assert_eq(pick(!b, x, y), y);
     assert_eq(only_true(b), 1);

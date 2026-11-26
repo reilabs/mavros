@@ -957,9 +957,7 @@ pub fn run_profiled<F: mavros_artifacts::MavrosField>(
 
 /// The three matrix contractions used by a Spartan verifier. These values do not
 /// indicate whether a witness satisfies the circuit.
-// FIELD-ASSUMPTION: L1-alias
-// The default result type is the compiler's BN254 field.
-pub struct VerifierResult<F = crate::Field> {
+pub struct VerifierResult<F> {
     pub r_aw: F,
     pub r_bw: F,
     pub r_cw: F,
@@ -1252,7 +1250,6 @@ fn param_field_count<F>(value: &InputValueOrdered<F>) -> usize {
             .iter()
             .map(|(_field_name, field_value)| param_field_count(field_value))
             .sum(),
-        _ => panic!("Unsupported input value type."),
     }
 }
 
@@ -1271,9 +1268,6 @@ fn flatten_params<F: Copy>(value: &InputValueOrdered<F>) -> Vec<F> {
                 encoded_value.extend(flatten_params(field_value));
             }
         }
-        _ => panic!(
-            "Unsupported input value type. We only support Field, Vecs, and Structs for now."
-        ),
     }
     encoded_value
 }
@@ -1281,7 +1275,7 @@ fn flatten_params<F: Copy>(value: &InputValueOrdered<F>) -> Vec<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Field;
+    use mavros_artifacts::{Bn254, Goldilocks};
     use mavros_int_semantics::IntBits;
 
     #[test]
@@ -1374,8 +1368,8 @@ mod tests {
             assert_eq!([result.r_aw, result.r_bw, result.r_cw], expected);
             assert_eq!(result.instrumenter.final_memory_usage(), 0);
         }
-        check::<Field>(Op::bn254);
-        check::<mavros_artifacts::Goldilocks>(Op::goldilocks);
+        check::<Bn254>(Op::bn254);
+        check::<Goldilocks>(Op::goldilocks);
     }
 
     /// The frame's cell count and the compiler's are the same.
@@ -1623,10 +1617,9 @@ mod tests {
     /// slots, its batch inversion and its challenges, and the AD entry's dA tape.
     #[test]
     fn the_entry_points_run_a_goldilocks_program() {
-        use mavros_artifacts::Goldilocks;
         use mavros_artifacts::MavrosField;
 
-        let bn254 = run_every_table_program::<Field>(bytecode::FieldOpCode::bn254);
+        let bn254 = run_every_table_program::<Bn254>(bytecode::FieldOpCode::bn254);
         let goldilocks = run_every_table_program::<Goldilocks>(bytecode::FieldOpCode::goldilocks);
         // The algebraic witnesses, then the multiplicities of the rangecheck, spread, powers-of-two
         // and array tables, in that order.
@@ -1720,21 +1713,21 @@ mod tests {
                 assert_eq!(post[lookups..lookups + 9], single.out_wit_post_comm[16..25]);
             }
         }
-        check::<Field>(bytecode::FieldOpCode::bn254);
-        check::<mavros_artifacts::Goldilocks>(bytecode::FieldOpCode::goldilocks);
+        check::<Bn254>(bytecode::FieldOpCode::bn254);
+        check::<Goldilocks>(bytecode::FieldOpCode::goldilocks);
     }
 
     /// Phase 1's tables locate their multiplicities by offset, so a clone completes after the
     /// original is gone.
     #[test]
     fn a_cloned_phase_one_result_completes_on_its_own() {
-        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254, 1);
+        let binary = every_table_program::<Bn254>(bytecode::FieldOpCode::bn254, 1);
         let (witness_layout, constraints_layout) = every_table_layouts(1);
         let phase1 = run_phase1(
             &binary,
             witness_layout,
             constraints_layout,
-            &every_table_inputs::<Field>(),
+            &every_table_inputs::<Bn254>(),
             None,
         )
         .expect("every flagged lookup is in range");
@@ -1750,19 +1743,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "phase 2 takes one challenge per challenge witness")]
     fn phase_two_refuses_a_challenge_count_off_the_layout() {
-        let binary = every_table_program::<Field>(bytecode::FieldOpCode::bn254, 1);
+        let binary = every_table_program::<Bn254>(bytecode::FieldOpCode::bn254, 1);
         let (witness_layout, constraints_layout) = every_table_layouts(1);
         let phase1 = run_phase1(
             &binary,
             witness_layout,
             constraints_layout,
-            &every_table_inputs::<Field>(),
+            &every_table_inputs::<Bn254>(),
             None,
         )
         .expect("every flagged lookup is in range");
         run_phase2(
             phase1,
-            &[Field::from(7u64)],
+            &[Bn254::from(7u64)],
             witness_layout,
             constraints_layout,
         );
@@ -1814,7 +1807,7 @@ mod tests {
     fn an_entry_frame_may_be_exactly_its_inputs() {
         // Two bn254 inputs fill cells 2 to 9.
         let (witness_layout, constraints_layout) = empty_layouts(0);
-        let inputs = [1u64, 2].map(Field::from);
+        let inputs = [1u64, 2].map(Bn254::from);
         let result = run(
             &empty_program(10, 2, 0),
             witness_layout,
@@ -1829,7 +1822,7 @@ mod tests {
     #[should_panic(expected = "the entry's 9-cell frame cannot hold 2 inputs")]
     fn an_entry_frame_too_small_for_its_inputs_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
-        let inputs = [1u64, 2].map(Field::from);
+        let inputs = [1u64, 2].map(Bn254::from);
         let _ = run(
             &empty_program(9, 2, 0),
             witness_layout,
@@ -1845,7 +1838,7 @@ mod tests {
     #[should_panic(expected = "a VM program over bn254 cannot run over goldilocks")]
     fn a_witgen_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
-        let _ = run::<mavros_artifacts::Goldilocks>(
+        let _ = run::<Goldilocks>(
             &empty_program(2, 0, 0),
             witness_layout,
             constraints_layout,
@@ -1858,7 +1851,7 @@ mod tests {
     #[should_panic(expected = "a VM program over bn254 cannot run over goldilocks")]
     fn an_ad_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
-        let _ = run_ad::<mavros_artifacts::Goldilocks>(
+        let _ = run_ad::<Goldilocks>(
             &empty_program(2, 0, 0),
             &[],
             witness_layout,
@@ -1871,7 +1864,7 @@ mod tests {
     #[should_panic(expected = "a VM program over bn254 cannot run over goldilocks")]
     fn a_verifier_run_over_another_field_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(0);
-        let _ = run_verifier::<mavros_artifacts::Goldilocks>(
+        let _ = run_verifier::<Goldilocks>(
             &empty_program(2, 0, 0),
             &[],
             &[],
@@ -1884,7 +1877,7 @@ mod tests {
     #[test]
     fn an_ad_run_takes_a_coefficient_per_constraint() {
         let (witness_layout, constraints_layout) = empty_layouts(2);
-        let coeffs = [1u64, 2].map(Field::from);
+        let coeffs = [1u64, 2].map(Bn254::from);
         let result = run_ad(
             &empty_program(2, 0, 2),
             &coeffs,
@@ -1898,7 +1891,7 @@ mod tests {
     #[test]
     fn an_ad_run_with_a_coefficient_past_its_constraints_is_refused() {
         let (witness_layout, constraints_layout) = empty_layouts(2);
-        let coeffs = [1u64, 2, 3].map(Field::from);
+        let coeffs = [1u64, 2, 3].map(Bn254::from);
         let error = run_ad(
             &empty_program(2, 0, 2),
             &coeffs,
@@ -1919,7 +1912,7 @@ mod tests {
         let (witness_layout, constraints_layout) = empty_layouts(2);
         let error = run_ad(
             &empty_program(2, 0, 2),
-            &[Field::from(1u64)],
+            &[Bn254::from(1u64)],
             witness_layout,
             constraints_layout,
             None,
