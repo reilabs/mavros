@@ -9,7 +9,7 @@ use crate::compiler::{
     passes::{
         shared::{
             limbs::{limb_bits_for_modulus, widest_injective_int_bits_for_modulus},
-            unsupported::unsupported_on_this_field,
+            unreachable::unreachable_on_this_field,
         },
         wide_witness_ints::{
             rewriter::{IdentityShape, lowered_identity},
@@ -63,7 +63,7 @@ impl LimbConfig {
         let modulus = field_modulus(field);
         let limb_bits = choose_limb_bits_for_modulus(&modulus, required, max_limb_bits)
             .unwrap_or_else(|(narrowest, (bits, shape))| {
-                unsupported_on_this_field(
+                unreachable_on_this_field(
                     format_args!(
                         "a {bits}-bit {shape:?} identity over witness limbs needs each of its \
                          columns and the carries it is grouped with to fit a field element, at \

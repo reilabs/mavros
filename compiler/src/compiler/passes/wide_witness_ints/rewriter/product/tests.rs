@@ -34,7 +34,7 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::{One, Zero};
 
 /// bn254 plans a schoolbook product, and the `q·d + r` of a division, at every width class it
-/// has, so neither ever reaches [`unsupported_on_this_field`].
+/// has, so neither ever reaches [`unreachable_on_this_field`].].
 #[test]
 fn bn254_holds_a_product_at_every_width() {
     let injective = widest_injective_int_bits(bn254());

@@ -12,7 +12,7 @@
 
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     passes::shared::rewrite_asserts::rewrite_asserts,
     ssa::hlssa::{CmpKind, HLSSA, OpCode},
 };
@@ -31,8 +31,9 @@ impl Pass for NormalizeAsserts {
         vec![TypeInfo::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         self.do_run(ssa, store.get::<TypeInfo>());
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

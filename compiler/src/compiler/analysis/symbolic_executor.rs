@@ -37,6 +37,8 @@ use crate::{
 pub struct AssertionFailure {
     pub message: String,
     pub location: Option<SourceLocation>,
+    /// The calls the failure propagated out of, innermost first.
+    pub call_sites: Vec<SourceLocation>,
 }
 
 impl AssertionFailure {
@@ -44,12 +46,23 @@ impl AssertionFailure {
         Self {
             message: message.into(),
             location: None,
+            call_sites: Vec::new(),
         }
     }
 
     fn at(mut self, location: &SourceLocation) -> Self {
         self.location.get_or_insert_with(|| location.clone());
         self
+    }
+
+    fn called_from(mut self, location: &SourceLocation) -> Self {
+        self.call_sites.push(location.clone());
+        self
+    }
+
+    /// The failing instruction, then each call site, innermost first.
+    pub fn frames(&self) -> impl Iterator<Item = &SourceLocation> {
+        self.location.iter().chain(&self.call_sites)
     }
 }
 
@@ -456,7 +469,8 @@ impl SymbolicExecutor {
                             .expect("ICE: on_call must return Some for unconstrained calls")
                         } else {
                             // For constrained calls, run_fn handles on_call internally
-                            self.run_fn(ssa, type_info, *function_id, params, globals, consts, ctx)?
+                            self.run_fn(ssa, type_info, *function_id, params, globals, consts, ctx)
+                                .map_err(|error| error.called_from(location))?
                         };
                         for (i, val) in returns.iter().enumerate() {
                             scope.insert(*val, outputs[i].clone());

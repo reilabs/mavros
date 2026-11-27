@@ -25,7 +25,7 @@ use crate::{
     Project,
     compiler::{
         analysis::{
-            flow_analysis::FlowAnalysis, types::Types,
+            flow_analysis::FlowAnalysis, symbolic_executor::AssertionFailure, types::Types,
             witness_taint_inference::WitnessTaintInference,
         },
         codegen::{
@@ -36,7 +36,7 @@ use crate::{
         },
         diagnostic::{self, Diagnostic},
         located::synthetic_file,
-        pass_manager::PassManager,
+        pass_manager::{PassFailure, PassManager},
         passes::{
             arg_promotion::ArgPromotion,
             array_boundary_expansion::ArrayBoundaryExpansion,
@@ -44,7 +44,6 @@ use crate::{
             assert_constant::AssertConstantValidation,
             common_subexpression_elimination::CSE,
             dead_code_elimination::{self, DCE},
-            decomposition_width::DecompositionWidthValidation,
             deduplicate_phis::DeduplicatePhis,
             defunctionalize::Defunctionalize,
             elide_tuples::ElideTuples,
@@ -151,9 +150,9 @@ pub enum Error {
     },
 
     /// The program has no returning entry path (checked before optimization), or contains an
-    /// impossible assertion/range/equality constraint found during R1CS generation. Static return
-    /// validation carries source locations; R1CS failures use a synthetic location because symbolic
-    /// assertion failures do not retain their spans.
+    /// impossible assertion/range/equality constraint found during R1CS generation. An R1CS failure
+    /// is located at the innermost call frame in the program's source, with the failing site as a
+    /// note where that lies in the standard library.
     UnsatisfiableProgram(Vec<Diagnostic>),
 
     /// The program uses a Noir feature Mavros cannot lower, or a value that does not fit the field.
@@ -481,29 +480,18 @@ impl Driver {
     pub fn make_struct_access_static(&mut self) -> Result<(), Error> {
         let mut ssa = self.initial_ssa.clone().unwrap();
 
-        let failures = Rc::new(RefCell::new(None));
         let mut validation = PassManager::new(
             "validate_return_reachability".to_string(),
             self.draw_cfg,
             vec![
                 Box::new(Defunctionalize::new()),
-                Box::new(ReturnReachabilityValidation::new(Rc::clone(&failures))),
+                Box::new(ReturnReachabilityValidation::new()),
             ],
         );
         validation.set_debug_output_dir(self.get_debug_output_dir().clone());
-        validation.run(&mut ssa);
-        let failures = failures
-            .borrow_mut()
-            .take()
-            .expect("return reachability validation did not record a result");
-        if !failures.is_empty() {
-            return Err(Error::UnsatisfiableProgram(
-                failures
-                    .into_iter()
-                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
-                    .collect(),
-            ));
-        }
+        validation
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         let entry_blob_layout = Rc::new(RefCell::new(None));
         let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained)
@@ -558,7 +546,9 @@ impl Driver {
         );
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
+        pass_manager
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
         self.entry_blob_layout = Some(
             entry_blob_layout
                 .borrow_mut()
@@ -567,6 +557,40 @@ impl Driver {
         );
         self.static_struct_access_ssa = Some(ssa);
         Ok(())
+    }
+
+    /// The [`Error`] for what a pass reported, with compiled sources attached to its diagnostics.
+    fn pass_failed(&self, failure: PassFailure) -> Error {
+        match failure {
+            PassFailure::Unsatisfiable(diagnostics) => Error::UnsatisfiableProgram(
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
+                    .collect(),
+            ),
+            PassFailure::AssertConstantFailed(locations) => Error::AssertConstantFailed(locations),
+        }
+    }
+
+    /// The diagnostic for an assertion that fails on every input, at the innermost frame in the
+    /// program's source. The failing instruction itself may be in the standard library, where the
+    /// user can change nothing, so it becomes a note. Generated code has no source to point at, so
+    /// a failing site there gets no note.
+    fn failing_assertion(&self, failure: AssertionFailure) -> Diagnostic {
+        let location = failure
+            .frames()
+            .find(|frame| frame.is_program_source())
+            .or(failure.location.as_ref())
+            .cloned()
+            .unwrap_or_else(|| SourceLocation::synthetic("r1cs_generation"));
+        let mut diagnostic = Diagnostic::error(failure.message, location.clone());
+        if let Some(failing) = failure
+            .location
+            .filter(|failing| *failing != location && !failing.is_synthetic())
+        {
+            diagnostic = diagnostic.with_note(format!("the failing assertion is at {failing}"));
+        }
+        self.attach_compiled_source(diagnostic)
     }
 
     /// Attach the source text the compiler read for `diagnostic`'s file, where there is one, so the
@@ -679,7 +703,8 @@ impl Driver {
                 Box::new(RemoveUnreachableFunctions::new()),
             ],
         )
-        .run(&mut ssa);
+        .run(&mut ssa)
+        .map_err(|failures| self.pass_failed(failures))?;
 
         let flow_analysis = FlowAnalysis::run(&ssa);
 
@@ -694,23 +719,15 @@ impl Driver {
         let mut witness_inference = WitnessTaintInference::new();
         witness_inference.run(&mut ssa, &flow_analysis);
         let witness_inference = Rc::new(witness_inference);
-        let failures = Rc::new(RefCell::new(None));
         PassManager::new(
             "assert_constant_validation".to_string(),
             self.draw_cfg,
-            vec![Box::new(AssertConstantValidation::new(
-                Rc::clone(&witness_inference),
-                Rc::clone(&failures),
-            ))],
+            vec![Box::new(AssertConstantValidation::new(Rc::clone(
+                &witness_inference,
+            )))],
         )
-        .run(&mut ssa);
-        let failures = failures
-            .borrow_mut()
-            .take()
-            .expect("assert_constant validation pass did not record a result");
-        if !failures.is_empty() {
-            return Err(Error::AssertConstantFailed(failures));
-        }
+        .run(&mut ssa)
+        .map_err(|failures| self.pass_failed(failures))?;
 
         self.write_debug_text(
             self.get_debug_output_dir().join("monomorphized_ssa.txt"),
@@ -738,9 +755,6 @@ impl Driver {
             .max_limb_bits
             .unwrap_or_else(|| witness_limb_bits(ssa.field()));
 
-        // Two phases, so that a witnessed decomposition the field cannot carry is reported as an
-        // error between them rather than refused by its lowering at the start of the second.
-        let refusals = Rc::new(RefCell::new(None));
         let mut pass_manager = PassManager::new(
             "witness_spilling".to_string(),
             self.draw_cfg,
@@ -786,28 +800,6 @@ impl Driver {
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.
                 Box::new(InstructionLowering::witness_narrowing_casts()),
-                Box::new(DecompositionWidthValidation::new(Rc::clone(&refusals))),
-            ],
-        );
-        pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
-        let refusals = refusals
-            .borrow_mut()
-            .take()
-            .expect("decomposition width validation did not record a result");
-        if !refusals.is_empty() {
-            return Err(Error::LoweringRefused(
-                refusals
-                    .into_iter()
-                    .map(|diagnostic| self.attach_compiled_source(diagnostic))
-                    .collect(),
-            ));
-        }
-
-        let mut pass_manager = PassManager::new(
-            "witness_lowering".to_string(),
-            self.draw_cfg,
-            vec![
                 // Both rewrite windows of witnessed elements, so they run before
                 // `witness_integer_ops`, which lowers them, and after `witness_narrowing_casts`,
                 // past which the prefix's `Int` cast is a relabel. Sharing goes first so that
@@ -840,7 +832,9 @@ impl Driver {
         );
 
         pass_manager.set_debug_output_dir(self.get_debug_output_dir().clone());
-        pass_manager.run(&mut ssa);
+        pass_manager
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
         self.witness_spilled_ssa = Some(ssa);
         Ok(())
     }
@@ -878,7 +872,9 @@ impl Driver {
             ],
         );
         r1cs_phase_1.set_debug_output_dir(self.get_debug_output_dir().clone());
-        r1cs_phase_1.run(&mut r1cs_ssa);
+        r1cs_phase_1
+            .run(&mut r1cs_ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         let flow_analysis = FlowAnalysis::run(&r1cs_ssa);
         let type_info = Types::new().run(&r1cs_ssa, &flow_analysis);
@@ -888,14 +884,8 @@ impl Driver {
             r1cs_gen.enable_profile();
         }
 
-        r1cs_gen.run(&r1cs_ssa, &type_info).map_err(|e| {
-            Error::UnsatisfiableProgram(vec![
-                self.attach_compiled_source(Diagnostic::error(
-                    e.message,
-                    e.location
-                        .unwrap_or_else(|| SourceLocation::synthetic("r1cs_generation")),
-                )),
-            ])
+        r1cs_gen.run(&r1cs_ssa, &type_info).map_err(|failure| {
+            Error::UnsatisfiableProgram(vec![self.failing_assertion(failure)])
         })?;
 
         let logup_repetitions = if r1cs_gen.has_lookup_tables() {
@@ -1074,7 +1064,7 @@ impl Driver {
         options: CodeGenOptions,
         mode: WitnessMode,
     ) -> Result<CompiledBytecode, Error> {
-        self.prepare_program_ssa();
+        self.prepare_program_ssa()?;
         let ssa = self.program_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);
@@ -1256,9 +1246,9 @@ impl Driver {
     /// everything downstream (refcounting, codegen, every artifact) compiles the whole program
     /// together.
     #[tracing::instrument(skip_all)]
-    fn prepare_program_ssa(&mut self) {
+    fn prepare_program_ssa(&mut self) -> Result<(), Error> {
         if self.program_ssa.is_some() {
-            return;
+            return Ok(());
         }
 
         let mut ssa = self.witness_spilled_ssa.clone().unwrap();
@@ -1274,7 +1264,9 @@ impl Driver {
             ],
         );
         witgen_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        witgen_pm.run(&mut ssa);
+        witgen_pm
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         let mut ad_ssa = self.r1cs_ssa.clone().unwrap();
         let mut ad_pm = PassManager::new(
@@ -1294,7 +1286,9 @@ impl Driver {
             ],
         );
         ad_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        ad_pm.run(&mut ad_ssa);
+        ad_pm
+            .run(&mut ad_ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         // `SSA::merge` re-interns constants by value, which would silently conflate function
         // pointers across the two halves; by this point defunctionalization must have removed
@@ -1327,7 +1321,9 @@ impl Driver {
             ],
         );
         tail_pm.set_debug_output_dir(self.get_debug_output_dir().clone());
-        tail_pm.run(&mut ssa);
+        tail_pm
+            .run(&mut ssa)
+            .map_err(|failures| self.pass_failed(failures))?;
 
         self.write_debug_text(
             self.get_debug_output_dir().join("program_ssa.txt"),
@@ -1335,6 +1331,7 @@ impl Driver {
         );
 
         self.program_ssa = Some(ssa);
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -1360,7 +1357,7 @@ impl Driver {
         LogupStrides::try_new(&r1cs.witness_layout, &r1cs.constraints_layout)
             .map_err(Error::R1csLayoutInvalid)?;
 
-        self.prepare_program_ssa();
+        self.prepare_program_ssa()?;
         let ssa = self.program_ssa.as_ref().unwrap();
 
         let flow_analysis = FlowAnalysis::run(ssa);
@@ -1607,17 +1604,54 @@ mod tests {
     /// an `Error` and nothing asks it for a renderer.
     #[test]
     fn an_unsatisfiable_program_displays_as_its_rendered_diagnostics() {
-        let refusal = Error::UnsatisfiableProgram(vec![
-            Diagnostic::error("first refusal", SourceLocation::synthetic("a_pass"))
+        let error = Error::UnsatisfiableProgram(vec![
+            Diagnostic::error("first failure", SourceLocation::synthetic("a_pass"))
                 .with_note("a standing fact"),
-            Diagnostic::error("second refusal", SourceLocation::synthetic("a_pass")),
+            Diagnostic::error("second failure", SourceLocation::synthetic("a_pass")),
         ]);
 
         assert_eq!(
-            refusal.to_string(),
-            "error: first refusal\n  --> <a_pass>:1:1\n  = note: a standing fact\n\n\
-             error: second refusal\n  --> <a_pass>:1:1\n"
+            error.to_string(),
+            "error: first failure\n  --> <a_pass>:1:1\n  = note: a standing fact\n\n\
+             error: second failure\n  --> <a_pass>:1:1\n"
         );
+    }
+
+    /// A failing assertion is reported at the program's innermost frame. Its own site is a note
+    /// where it is a source file, and left out where generated code has none.
+    #[test]
+    fn a_failing_assertion_notes_its_site_only_where_that_is_a_source_file() {
+        use super::Driver;
+        use crate::compiler::{
+            analysis::symbolic_executor::AssertionFailure,
+            ssa::{SourcePosition, hlssa::HLSSA},
+        };
+
+        let at = |file: &str| {
+            SourceLocation::new(file, SourcePosition::new(3, 5), SourcePosition::new(3, 9))
+        };
+        let program = at("/project/src/main.nr");
+        let scratch = tempfile::TempDir::new().unwrap();
+        let driver = Driver::from_ssa(
+            HLSSA::with_main(FieldConfig::bn254(), "main".to_string()),
+            scratch.path().to_path_buf(),
+            false,
+        );
+        let failing_at = |site: SourceLocation| {
+            driver.failing_assertion(AssertionFailure {
+                message: "assert failed".to_string(),
+                location: Some(site),
+                call_sites: vec![at("std/field/mod.nr"), program.clone()],
+            })
+        };
+
+        let in_stdlib = failing_at(at("std/hash/mod.nr"));
+        assert_eq!(in_stdlib.location(), &program);
+        assert!(in_stdlib.says("the failing assertion is at std/hash/mod.nr:3:5"));
+
+        let generated = failing_at(SourceLocation::synthetic("helper"));
+        assert_eq!(generated.location(), &program);
+        assert!(!generated.says("the failing assertion"), "{generated:?}");
     }
 
     /// A pipeline over the empty Goldilocks `main`, up to its R1CS, with the directory holding its

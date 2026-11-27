@@ -9,7 +9,7 @@ use crate::{
     collections::HashMap,
     compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::Types},
-        pass_manager::{AnalysisId, AnalysisStore, Pass},
+        pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
         passes::shared::field_windows::FieldWindow,
         ssa::{
             FunctionId, SourceLocation,
@@ -37,7 +37,7 @@ impl Pass for OutlineFieldBitRanges {
         "outline_field_bit_ranges"
     }
 
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         let flow = FlowAnalysis::run(ssa);
         let types = Types::new().run(ssa, &flow);
         let functions: Vec<FunctionId> = ssa.get_function_ids().collect();
@@ -81,7 +81,7 @@ impl Pass for OutlineFieldBitRanges {
             })
             .collect();
         if helpers.is_empty() {
-            return;
+            return Ok(());
         }
 
         for &function in &functions {
@@ -104,6 +104,7 @@ impl Pass for OutlineFieldBitRanges {
                 }
             });
         }
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {
@@ -160,7 +161,9 @@ mod tests {
     #[test]
     fn a_window_read_twice_is_read_through_one_helper() {
         let mut ssa = windows_of_a_witness(&[(0, 8), (0, 8), (8, 16)]);
-        OutlineFieldBitRanges::new().run(&mut ssa, &AnalysisStore::new());
+        OutlineFieldBitRanges::new()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
 
         let helpers: Vec<_> = ssa
             .iter_functions()
@@ -217,7 +220,9 @@ mod tests {
             let _ = e.call(other, vec![x], 1);
             e.terminate_return(vec![guarded]);
         });
-        OutlineFieldBitRanges::new().run(&mut ssa, &AnalysisStore::new());
+        OutlineFieldBitRanges::new()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
 
         assert!(!all_ops(&ssa).any(|op| matches!(op, OpCode::Guard { .. })));
         let helper = ssa
@@ -268,7 +273,9 @@ mod tests {
                 .collect();
             e.terminate_return(selected);
         });
-        OutlineFieldBitRanges::new().run(&mut ssa, &AnalysisStore::new());
+        OutlineFieldBitRanges::new()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
 
         assert_eq!(calls(&ssa), 0);
         assert_eq!(bit_ranges(&ssa), 4);

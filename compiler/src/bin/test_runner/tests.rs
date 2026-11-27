@@ -574,13 +574,13 @@ fn a_mavros_refusal_is_expected_only_as_its_fixture_says() {
             SourceLocation::synthetic("fixture"),
         )])
     };
-    let refused = refusal("a witnessed decomposition into 32 bytes a field element occupies");
+    let refused = refusal("the `Field` literal 2^64 does not fit the field");
     let assertion = DriverError::AssertConstantFailed(vec![SourceLocation::synthetic("fixture")]);
 
     assert!(!mavros_rejection_expected(&refused, None));
     assert!(mavros_rejection_expected(
         &refused,
-        Some("bytes a field element occupies")
+        Some("does not fit the field")
     ));
     assert!(!mavros_rejection_expected(&refused, Some("something else")));
     assert!(mavros_rejection_expected(&assertion, None));

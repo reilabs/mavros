@@ -3,7 +3,7 @@ use super::{
 };
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+    pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
     passes::wide_witness_ints::rewriter::lowers_a_gadget,
     ssa::{
         BlockId, FunctionId,
@@ -31,7 +31,7 @@ impl Pass for WideWitnessInts {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let type_info = store.get::<TypeInfo>();
         let cfg = store.get::<FlowAnalysis>();
         let limb_config = &LimbConfig::of(ssa, type_info, cfg, self.max_limb_bits);
@@ -95,6 +95,7 @@ impl Pass for WideWitnessInts {
                 &globals,
             );
         }
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

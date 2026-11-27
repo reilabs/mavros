@@ -1,13 +1,13 @@
 use crate::compiler::{
     passes::{
         instruction_lowering::{InstructionLoweringRule, LoweringContext},
-        shared::{MIN_LOOPED_RUN, unsupported::unsupported_on_this_field},
+        shared::MIN_LOOPED_RUN,
     },
     ssa::{
         ValueId,
         hlssa::{
-            ArithGroup, BinaryArithOpKind, CastTarget, Endianness, LookupTarget, OpCode, Radix,
-            SequenceTargetType, Type, TypeExpr,
+            ArithGroup, BinaryArithOpKind, CastTarget, CmpKind, Endianness, LookupTarget, OpCode,
+            Radix, SequenceTargetType, Type, TypeExpr,
             builder::{HLBlockEmitter, HLEmitter},
         },
     },
@@ -15,30 +15,18 @@ use crate::compiler::{
 use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 
-/// Why a witnessed `to_bits` of `count` bits is refused on `field`, or `None` where it lowers.
-///
-/// This refuses rather than pads: a wider decomposition needs a decision on how its leading zeroes
-/// fit the field-agnostic lowering contract. `DecompositionWidthValidation` asks it before the
-/// lowering runs, so the driver reports the refusal as an error.
-pub(crate) fn witness_to_bits_refusal(count: usize, field: FieldConfig) -> Option<String> {
-    (count > field.field_bit_size() as usize).then(|| {
-        format!("a witness `to_bits` of {count} bits asks for more bits than a field element has")
-    })
+/// Whether a witnessed `to_bits` of `count` bits asks for more bits than a `field` element has.
+fn witness_to_bits_too_wide(count: usize, field: FieldConfig) -> bool {
+    count > field.field_bit_size() as usize
 }
 
-/// Why a witnessed `to_radix` of `count` bytes is refused on `field`, or `None` where it lowers.
+/// Whether a witnessed `to_radix` of `count` bytes asks for more bytes than a `field` element
+/// occupies.
 ///
 /// Unlike bits, the top byte may be only partially occupied (BN254 needs 32 bytes). Wider
-/// zero-padded decompositions need an explicit field-agnostic contract. Asked first as
-/// [`witness_to_bits_refusal`] is.
-pub(crate) fn witness_to_radix_refusal(count: usize, field: FieldConfig) -> Option<String> {
-    let max_bytes = (field.field_bit_size() as usize).div_ceil(8);
-    (count > max_bytes).then(|| {
-        format!(
-            "a witness `to_radix` of {count} bytes asks for more than the {max_bytes} bytes a \
-             field element occupies"
-        )
-    })
+/// zero-padded decompositions need an explicit field-agnostic contract.
+fn witness_to_radix_too_wide(count: usize, field: FieldConfig) -> bool {
+    count > (field.field_bit_size() as usize).div_ceil(8)
 }
 
 pub struct LowerWitnessFieldOps {}
@@ -301,6 +289,37 @@ impl LowerWitnessFieldOps {
         }
     }
 
+    /// Lower a decomposition into more digits than a field element has to a false assert and a
+    /// dummy value.
+    ///
+    /// Decomposition fails rather than pads: a wider one needs a decision on how its leading
+    /// zeroes fit the field-agnostic lowering contract.
+    fn wider_than_the_field(
+        b: &mut HLBlockEmitter<'_>,
+        guard: Option<ValueId>,
+        result: ValueId,
+        count: usize,
+        digit_bits: usize,
+    ) {
+        let lhs = b.field_const(b.field().zero());
+        let rhs = b.field_const(b.field().one());
+        b.emit_guarded(
+            guard,
+            OpCode::AssertCmp {
+                kind: CmpKind::Eq,
+                lhs,
+                rhs,
+            },
+        );
+        let digits = Type::witness_of(Type::int(digit_bits)).array_of(count);
+        let default = b.default_value(&digits);
+        b.emit(OpCode::Cast {
+            result,
+            value: default,
+            target: CastTarget::Nop,
+        });
+    }
+
     /// Lower the bit-decomposition builtin. The builtin is designed to provide a raw decomposition,
     /// so this intentionally adds no canonicity check. That check is provided in unconstrained Noir
     /// code by the user-facing `to_le_bits`/`to_be_bits` wrappers.
@@ -317,8 +336,9 @@ impl LowerWitnessFieldOps {
         if !context.types().get_value_type(value).is_witness_of() {
             return false;
         }
-        if let Some(refusal) = witness_to_bits_refusal(count, b.field()) {
-            unsupported_on_this_field(format_args!("{refusal}"), b.field());
+        if witness_to_bits_too_wide(count, b.field()) {
+            Self::wider_than_the_field(b, guard, result, count, 1);
+            return true;
         }
 
         // Compute the decomposition in witgen, then bind each hinted bit to a fresh circuit
@@ -396,7 +416,7 @@ impl LowerWitnessFieldOps {
                     b.emit(OpCode::Guard {
                         condition,
                         inner: Box::new(OpCode::AssertCmp {
-                            kind: crate::compiler::ssa::hlssa::CmpKind::Eq,
+                            kind: CmpKind::Eq,
                             lhs: rv,
                             rhs: const_256,
                         }),
@@ -440,8 +460,9 @@ impl LowerWitnessFieldOps {
             return true;
         }
 
-        if let Some(refusal) = witness_to_radix_refusal(count, b.field()) {
-            unsupported_on_this_field(format_args!("{refusal}"), b.field());
+        if witness_to_radix_too_wide(count, b.field()) {
+            Self::wider_than_the_field(b, guard, result, count, 8);
+            return true;
         }
 
         let pure_value = b.value_of(value);
@@ -751,7 +772,9 @@ mod tests {
         });
         entry.set_terminator(Terminator::Return(vec![result]));
 
-        InstructionLowering::witness_integer_ops().run(&mut ssa, &AnalysisStore::new());
+        InstructionLowering::witness_integer_ops()
+            .run(&mut ssa, &AnalysisStore::new())
+            .unwrap();
         (ssa, result)
     }
 

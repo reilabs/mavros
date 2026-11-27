@@ -39,7 +39,7 @@ use crate::{
     collections::{HashMap, HashSet},
     compiler::{
         analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
-        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass},
+        pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
         ssa::{
             BlockId, FunctionId, Instruction, Located, Terminator, ValueId,
             hlssa::{HLSSA, OpCode, Type, TypeExpr},
@@ -64,7 +64,7 @@ impl Pass for ElideTuples {
         vec![TypeInfo::id(), FlowAnalysis::id()]
     }
 
-    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let old_global_types: Vec<Type> = ssa.get_global_types().to_vec();
         let mut global_offsets: Vec<usize> = Vec::with_capacity(old_global_types.len());
         let mut acc = 0usize;
@@ -98,6 +98,7 @@ impl Pass for ElideTuples {
         // Verify the tuple-free invariant on every build: one linear pass, and the
         // guarantee it enforces is relied on by every subsequent pass.
         verify_tuple_free(ssa);
+        Ok(())
     }
 
     fn preserves(&self) -> Vec<AnalysisId> {

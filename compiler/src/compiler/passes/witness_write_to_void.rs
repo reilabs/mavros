@@ -7,7 +7,7 @@
 
 use crate::compiler::{
     analysis::flow_analysis::FlowAnalysis,
-    pass_manager::{AnalysisId, AnalysisStore, Pass},
+    pass_manager::{AnalysisId, AnalysisStore, Pass, PassResult},
     passes::shared::value_replacements::ValueReplacements,
     ssa::hlssa::{HLSSA, OpCode},
 };
@@ -18,8 +18,9 @@ impl Pass for WitnessWriteToVoid {
     fn name(&self) -> &'static str {
         "witness_write_to_void"
     }
-    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) {
+    fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
         self.do_run(ssa);
+        Ok(())
     }
     fn preserves(&self) -> Vec<AnalysisId> {
         vec![FlowAnalysis::id()]
