@@ -390,8 +390,7 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
         for (input, accepted) in [(valid, true), (invalid, false)] {
             std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
             let (params, declared_return) =
-                api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits())
-                    .unwrap();
+                api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits()).unwrap();
             // Require witness generation to finish with honest-prover checks disabled:
             // a VM trap would not demonstrate that the constraints reject the witness.
             let result = api::run_witgen_from_binary(&mut binary.clone(), &r1cs, &params, None)
@@ -479,8 +478,7 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
     )
     .unwrap();
     assert!(
-        api::read_prover_inputs::<Bn254>(dir.path(), driver.abi(), driver.limb_bits())
-            .is_err()
+        api::read_prover_inputs::<Bn254>(dir.path(), driver.abi(), driver.limb_bits()).is_err()
     );
 }
 

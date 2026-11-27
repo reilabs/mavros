@@ -80,8 +80,7 @@ fn empty_function_calls_only_fail_when_their_branch_is_taken() {
             )
             .unwrap();
             let (params, _) =
-                api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits())
-                    .unwrap();
+                api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits()).unwrap();
             let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None);
             assert_eq!(result.is_ok(), !take, "{mode}take = {take}");
             if let Ok(result) = result {

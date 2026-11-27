@@ -564,11 +564,8 @@ fn run_package_over<F: MavrosField>(
         return Ok(ExitCode::SUCCESS);
     }
 
-    let (params, declared_return) = api::read_prover_inputs(
-        driver.package_root(),
-        driver.abi(),
-        driver.limb_bits(),
-    )?;
+    let (params, declared_return) =
+        api::read_prover_inputs(driver.package_root(), driver.abi(), driver.limb_bits())?;
 
     let witgen_execution = if args.profile {
         api::run_witgen_profiled_from_binary(&mut binary, &r1cs, &params, vm_debug_info.clone())

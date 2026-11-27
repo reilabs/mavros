@@ -235,12 +235,9 @@ pub(crate) fn run_single_vm<F: MavrosField>(
     let source_path_root = driver.package_root().to_path_buf();
 
     // Load inputs (needed for witgen run)
-    let inputs = api::read_prover_inputs::<F>(
-        driver.package_root(),
-        driver.abi(),
-        driver.limb_bits(),
-    )
-    .map_err(|e| e.to_string());
+    let inputs =
+        api::read_prover_inputs::<F>(driver.package_root(), driver.abi(), driver.limb_bits())
+            .map_err(|e| e.to_string());
     let ordered_params = inputs.as_ref().map(|(params, _)| params.clone());
 
     let manifest = r1cs.as_ref().map(|r1cs| {
