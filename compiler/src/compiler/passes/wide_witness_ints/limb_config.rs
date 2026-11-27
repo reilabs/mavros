@@ -1,14 +1,15 @@
 //! The witness limb width a program is cut at.
-use std::iter::successors;
-
-use mavros_artifacts::FieldConfig;
-use num_bigint::BigInt;
+use mavros_artifacts::{FieldConfig, LimbBits};
 
 use crate::compiler::{
-    analysis::{flow_analysis::FlowAnalysis, types::TypeInfo, value_range_analysis::field_modulus},
+    analysis::{
+        flow_analysis::FlowAnalysis,
+        types::{TypeInfo, Types},
+        value_range_analysis::field_modulus,
+    },
     passes::{
         shared::{
-            limbs::{limb_bits_for_modulus, widest_injective_int_bits_for_modulus},
+            limbs::{widest_injective_int_bits_for_modulus, witness_limb_bits},
             unreachable::unreachable_on_this_field,
         },
         wide_witness_ints::{
@@ -31,19 +32,16 @@ pub(super) struct LimbConfig {
 
 impl LimbConfig {
     /// The limb `ssa` is cut at.
-    ///
-    /// The widest size up to `max_limb_bits` at which every lowered-to identity is sound.
-    pub(super) fn of(
-        ssa: &HLSSA,
-        type_info: &TypeInfo,
-        cfg: &FlowAnalysis,
-        max_limb_bits: usize,
-    ) -> Self {
-        Self::admitting(
-            ssa.field(),
-            &required_identities(ssa, type_info, cfg),
-            max_limb_bits,
-        )
+    pub(super) fn of(ssa: &HLSSA) -> Self {
+        Self::cut_at(ssa.field(), ssa.limb_bits())
+    }
+
+    fn cut_at(field: FieldConfig, limb_bits: LimbBits) -> Self {
+        Self {
+            field,
+            limb_bits: limb_bits.bits(),
+            injective_bits: widest_injective_int_bits_for_modulus(&field_modulus(field)),
+        }
     }
 
     pub(super) fn field(&self) -> FieldConfig {
@@ -57,33 +55,44 @@ impl LimbConfig {
     pub(super) fn injective_bits(&self) -> usize {
         self.injective_bits
     }
+}
 
-    /// The widest limb of `field`, up to `max_limb_bits`, at which every identity is sound.
-    fn admitting(field: FieldConfig, required: &[Identity], max_limb_bits: usize) -> Self {
-        let modulus = field_modulus(field);
-        let limb_bits = choose_limb_bits_for_modulus(&modulus, required, max_limb_bits)
-            .unwrap_or_else(|(narrowest, (bits, shape))| {
-                unreachable_on_this_field(
-                    format_args!(
-                        "a {bits}-bit {shape:?} identity over witness limbs needs each of its \
-                         columns and the carries it is grouped with to fit a field element, at \
-                         some limb down to {narrowest} bits"
-                    ),
-                    field,
-                )
-            });
-        Self {
-            field,
-            limb_bits,
-            injective_bits: widest_injective_int_bits_for_modulus(&modulus),
-        }
-    }
+/// The widest limb of `field`, up to `max_limb_bits`, at which every identity is sound.
+fn admitted_limb_bits(field: FieldConfig, required: &[Identity], max_limb_bits: usize) -> LimbBits {
+    let candidates = LimbBits::candidates(field).filter(|limb| limb.bits() <= max_limb_bits);
+    let injective = widest_injective_int_bits_for_modulus(&field_modulus(field));
+    choose_limb_bits(candidates, injective, required).unwrap_or_else(
+        |(narrowest, (bits, shape))| {
+            unreachable_on_this_field(
+                format_args!(
+                    "a {bits}-bit {shape:?} identity over witness limbs needs each of its columns \
+                     and the carries it is grouped with to fit a field element, at some limb \
+                     down to {} bits",
+                    narrowest.bits()
+                ),
+                field,
+            )
+        },
+    )
+}
+
+/// The limb `ssa` is cut at: the widest, up to `max_limb_bits` or else the field's default, at
+/// which every product and division in it could lower to a sound identity.
+pub(crate) fn scanned_limb_bits(ssa: &HLSSA, max_limb_bits: Option<usize>) -> LimbBits {
+    let field = ssa.field();
+    let flow = FlowAnalysis::run(ssa);
+    let types = Types::new().run(ssa, &flow);
+    admitted_limb_bits(
+        field,
+        &required_identities(ssa, &types, &flow),
+        max_limb_bits.unwrap_or_else(|| witness_limb_bits(field)),
+    )
 }
 
 /// An identity the program lowers to, with the width of its operands.
 type Identity = (usize, &'static dyn IdentityShape);
 
-/// Every identity the program's products and divisions lower to.
+/// Every identity the program's products and divisions could lower to.
 fn required_identities(ssa: &HLSSA, type_info: &TypeInfo, cfg: &FlowAnalysis) -> Vec<Identity> {
     let field = ssa.field();
     let mut required = Vec::new();
@@ -102,45 +111,37 @@ fn required_identities(ssa: &HLSSA, type_info: &TypeInfo, cfg: &FlowAnalysis) ->
     required
 }
 
-/// The widest candidate limb up to `max_limb_bits` at which every one of the identities holds, or
-/// the narrowest candidate with an identity it refuses.
-fn choose_limb_bits_for_modulus(
-    modulus: &BigInt,
+/// The first of `candidates`, widest first, at which every one of `required` is sound for an
+/// element `injective` bits wide; or the narrowest candidate with an identity it refuses.
+
+fn choose_limb_bits<L: Copy + Into<usize>>(
+    candidates: impl IntoIterator<Item = L>,
+    injective: usize,
     required: &[Identity],
-    max_limb_bits: usize,
-) -> Result<usize, (usize, Identity)> {
-    let injective = widest_injective_int_bits_for_modulus(modulus);
+) -> Result<L, (L, Identity)> {
     let mut refused = None;
-    for limb_bits in limb_candidates(modulus, max_limb_bits) {
+    for limb in candidates {
+        let limb_bits = limb.into();
         let is_unsound =
             |(bits, shape): &&Identity| !shape.admits(&limb_widths(*bits, limb_bits), injective);
         match required.iter().find(is_unsound) {
-            None => return Ok(limb_bits),
-            Some(identity) => refused = Some((limb_bits, *identity)),
+            None => return Ok(limb),
+            Some(identity) => refused = Some((limb, *identity)),
         }
     }
     Err(refused.expect("a field has a limb"))
 }
 
-/// Candidate limb widths up to `max_limb_bits`; widest to narrowest.
-fn limb_candidates(modulus: &BigInt, max_limb_bits: usize) -> impl Iterator<Item = usize> {
-    successors(Some(limb_bits_for_modulus(modulus)), |bits| {
-        (bits / 2 >= 2).then_some(bits / 2)
-    })
-    .filter(move |bits| *bits <= max_limb_bits)
-}
-
 #[cfg(test)]
 mod tests {
+    use mavros_artifacts::field::limb_bits::{candidates_for_widest, widest_for_modulus_bits};
+    use num_bigint::BigInt;
+
     use super::*;
     use crate::compiler::{
-        analysis::types::Types,
-        passes::{
-            shared::limbs::witness_limb_bits,
-            wide_witness_ints::{
-                rewriter::EuclideanDivision,
-                test_utils::{fields, limbed_widths, operation_with, run_pass},
-            },
+        passes::wide_witness_ints::{
+            rewriter::EuclideanDivision,
+            test_utils::{fields, limbed_widths, operation_with, run_pass},
         },
         ssa::hlssa::{BinaryArithOpKind, Type},
     };
@@ -153,7 +154,9 @@ mod tests {
                 .map(|bits| (bits, &EuclideanDivision as &'static dyn IdentityShape))
                 .collect();
             let modulus = BigInt::from(1) << (modulus_bits - 1);
-            choose_limb_bits_for_modulus(&modulus, &required, limb_bits_for_modulus(&modulus)).ok()
+            let candidates = candidates_for_widest(widest_for_modulus_bits(modulus_bits)?);
+            let injective = widest_injective_int_bits_for_modulus(&modulus);
+            choose_limb_bits(candidates, injective, &required).ok()
         };
 
         assert_eq!(get_limb_width(131, None), Some(64));
@@ -166,7 +169,7 @@ mod tests {
 
         assert_eq!(get_limb_width(129, Some(128)), Some(32));
 
-        assert_eq!(get_limb_width(3, Some(8)), None);
+        assert_eq!(get_limb_width(5, Some(8)), None);
     }
 
     /// Every product and division on a configured field keeps the default limb, and lowers at it.
@@ -184,13 +187,13 @@ mod tests {
                 ] {
                     let mut ssa =
                         operation_with(field, kind, bits, Type::witness_of(Type::int(bits)));
-                    let flow = FlowAnalysis::run(&ssa);
-                    let types = Types::new().run(&ssa, &flow);
+                    let limb_bits = scanned_limb_bits(&ssa, None);
                     assert_eq!(
-                        LimbConfig::of(&ssa, &types, &flow, default.limb_bits()),
-                        default,
+                        limb_bits.bits(),
+                        default.limb_bits(),
                         "{field:?} int{bits} {kind:?}"
                     );
+                    ssa.set_limb_bits(limb_bits);
                     run_pass(&mut ssa);
                 }
             }
@@ -198,6 +201,9 @@ mod tests {
     }
 
     pub(in super::super) fn default_limb_config(field: FieldConfig) -> LimbConfig {
-        LimbConfig::admitting(field, &[], witness_limb_bits(field))
+        LimbConfig::cut_at(
+            field,
+            admitted_limb_bits(field, &[], witness_limb_bits(field)),
+        )
     }
 }

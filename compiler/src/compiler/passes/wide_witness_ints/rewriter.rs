@@ -12,7 +12,10 @@ use crate::compiler::{
         value_range_analysis::field_modulus,
     },
     located::synthetic_file,
-    passes::prepare_entry_point::ENTRY_RETURN_ORIGIN,
+    passes::{
+        prepare_entry_point::ENTRY_RETURN_ORIGIN,
+        shared::limbs::{single_cell_product_fits, single_cell_signed_product_fits},
+    },
     ssa::{
         BlockId, FunctionId, Located, Terminator, ValueId,
         hlssa::{
@@ -618,18 +621,18 @@ pub(super) fn lowers_a_gadget(op: &OpCode, fti: &FunctionTypeInfo, field: FieldC
         || shifted(op, fti, field).is_some()
 }
 
-/// The identity `op` lowers to, if it lowers to one, at the width of its operands.
+/// The identity `op` lowers to if an operand is witnessed, at the width of its operands.
 ///
-/// A signed division divides the magnitudes, so it is the unsigned division's identity.
+/// For a scan before witness inference, which cannot tell a witnessed operand from one that turns
+/// out to be a compile-time constant: every product and division the single cell cannot hold
+/// counts. A signed division divides the magnitudes, so it is the unsigned division's identity.
 pub(super) fn lowered_identity(
     op: &OpCode,
     types: &FunctionTypeInfo,
     field: FieldConfig,
 ) -> Option<(usize, &'static dyn IdentityShape)> {
-    let Operands { bits, .. } =
-        multiplied(op, types, field).or_else(|| divided(op, types, field))?;
-    let OpCode::BinaryArithOp { kind, .. } = unguarded(op) else {
-        ice_unreachable!("`multiplied` and `divided` match only a binary operation");
+    let OpCode::BinaryArithOp { kind, lhs, .. } = unguarded(op) else {
+        return None;
     };
     let shape: &'static dyn IdentityShape = match kind {
         BinaryArithOpKind::UMul => &UnsignedProduct,
@@ -638,7 +641,13 @@ pub(super) fn lowered_identity(
         | BinaryArithOpKind::URem
         | BinaryArithOpKind::SDiv
         | BinaryArithOpKind::SRem => &EuclideanDivision,
-        _ => ice_unreachable!("`multiplied` and `divided` match only products and divisions"),
+        _ => return None,
     };
-    Some((bits, shape))
+    let bits = types.get_value_type(*lhs).int_width()?;
+    let fits = if kind.is_signed() {
+        single_cell_signed_product_fits(field, bits)
+    } else {
+        single_cell_product_fits(field, bits)
+    };
+    (!fits).then_some((bits, shape))
 }

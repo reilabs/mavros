@@ -393,13 +393,13 @@ impl<F: HarnessField> Compiled<F> {
         let param_widths: Vec<usize> = entry
             .get_param_types()
             .iter()
-            .map(|typ| PrepareEntryPoint::flattened_field_count(typ, ssa.field()))
+            .map(|typ| PrepareEntryPoint::flattened_field_count(typ, ssa.field(), ssa.limb_bits()))
             .collect();
         let param_width = param_widths.iter().sum::<usize>();
         let return_width = entry
             .get_returns()
             .iter()
-            .map(|typ| PrepareEntryPoint::flattened_field_count(typ, ssa.field()))
+            .map(|typ| PrepareEntryPoint::flattened_field_count(typ, ssa.field(), ssa.limb_bits()))
             .sum::<usize>();
 
         let mut driver = Driver::from_ssa(ssa, debug_output_dir.clone(), false);

@@ -17,8 +17,8 @@ use noirc_frontend::{
 use tracing::info;
 
 use mavros_artifacts::{
-    Artifact, ArtifactError, FieldConfig, FieldId, LogupStrides, ManifestParam, MavrosField,
-    ParamVisibility, ReturnSlot, WitnessManifest,
+    Artifact, ArtifactError, FieldConfig, FieldId, LimbBits, LogupStrides, ManifestParam,
+    MavrosField, ParamVisibility, ReturnSlot, WitnessManifest,
 };
 
 use crate::{
@@ -67,14 +67,13 @@ use crate::{
             remove_unreachable_functions::RemoveUnreachableFunctions,
             return_reachability::ReturnReachabilityValidation,
             share_field_decompositions::ShareFieldDecompositions,
-            shared::limbs::witness_limb_bits,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
             sparse_conditional_simplification::SCS,
             specializer::Specializer,
             strip_witness_of::StripWitnessOf,
             trivial_phi_elimination::TrivialPhiElimination,
-            wide_witness_ints::WideWitnessInts,
+            wide_witness_ints::{WideWitnessInts, scanned_limb_bits},
             witness_lowering::WitnessLowering,
             witness_write_to_fresh::WitnessWriteToFresh,
             witness_write_to_void::WitnessWriteToVoid,
@@ -350,6 +349,20 @@ impl Driver {
         self.max_limb_bits = Some(bits);
     }
 
+    /// The limb the program's wide witnessed integers are cut at, as
+    /// [`Self::make_struct_access_static`] fixed it. Inputs are encoded at it, and
+    /// [`Self::witness_manifest`] records it.
+    ///
+    /// # Panics
+    ///
+    /// Before [`Self::make_struct_access_static`].
+    pub fn limb_bits(&self) -> LimbBits {
+        self.static_struct_access_ssa
+            .as_ref()
+            .expect("the limb is fixed by make_struct_access_static")
+            .limb_bits()
+    }
+
     pub fn enable_r1cs_profile(&mut self) {
         self.r1cs_profiling = true;
     }
@@ -493,8 +506,9 @@ impl Driver {
             .run(&mut ssa)
             .map_err(|failures| self.pass_failed(failures))?;
 
+        let limb_bits = scanned_limb_bits(&ssa, self.max_limb_bits);
         let entry_blob_layout = Rc::new(RefCell::new(None));
-        let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained)
+        let mut prepare_entry_point = PrepareEntryPoint::new(self.main_is_unconstrained, limb_bits)
             .with_layout_sink(Rc::clone(&entry_blob_layout));
         if let Some(abi) = &self.abi {
             prepare_entry_point = prepare_entry_point
@@ -751,9 +765,6 @@ impl Driver {
     #[tracing::instrument(skip_all)]
     pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
-        let max_limb_bits = self
-            .max_limb_bits
-            .unwrap_or_else(|| witness_limb_bits(ssa.field()));
 
         let mut pass_manager = PassManager::new(
             "witness_spilling".to_string(),
@@ -796,7 +807,7 @@ impl Driver {
                 // Immediately before the lowerings that read an integer's width: a witnessed value
                 // too wide for one field element becomes its limbs here, and every lowering below
                 // this sees limbs it can work with.
-                Box::new(WideWitnessInts::new(max_limb_bits)),
+                Box::new(WideWitnessInts::new()),
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.
                 Box::new(InstructionLowering::witness_narrowing_casts()),
@@ -1135,7 +1146,8 @@ impl Driver {
             )));
         }
         for (param, slot) in abi.parameters.iter().zip(&blob.params) {
-            let elements = crate::abi_helpers::abi_type_elements(&param.typ, self.field());
+            let elements =
+                crate::abi_helpers::abi_type_elements(&param.typ, self.field(), self.limb_bits());
             if slot.width != elements {
                 return Err(Error::WitnessManifest(format!(
                     "parameter `{}` flattens to {elements} elements but the entry point gives \
@@ -1146,7 +1158,11 @@ impl Driver {
         }
         let returns = match (blob.return_width, abi.return_type.as_ref()) {
             (Some(len), Some(ret)) => {
-                let elements = crate::abi_helpers::abi_type_elements(&ret.abi_type, self.field());
+                let elements = crate::abi_helpers::abi_type_elements(
+                    &ret.abi_type,
+                    self.field(),
+                    self.limb_bits(),
+                );
                 if len != elements {
                     return Err(Error::WitnessManifest(format!(
                         "the return flattens to {elements} elements but the entry point gives it \
@@ -1180,6 +1196,7 @@ impl Driver {
                 })
                 .collect(),
             returns,
+            limb_bits: self.limb_bits(),
         };
         manifest.validate(r1cs).map_err(Error::WitnessManifest)?;
         Ok(manifest)
@@ -1202,7 +1219,7 @@ impl Driver {
 
     /// The parameters only; the return is computed, not an input.
     pub fn entry_blob_field_count(&self) -> usize {
-        crate::abi_helpers::abi_param_elements(self.abi(), self.field())
+        crate::abi_helpers::abi_param_elements(self.abi(), self.field(), self.limb_bits())
     }
 
     /// The field every stage's SSA takes from the initial one.
@@ -1439,7 +1456,8 @@ impl Driver {
         // Build parameter info
         let mut parameters = Vec::new();
         for param in &abi.parameters {
-            let element_count = crate::abi_helpers::abi_type_elements(&param.typ, self.field());
+            let element_count =
+                crate::abi_helpers::abi_type_elements(&param.typ, self.field(), self.limb_bits());
             parameters.push(serde_json::json!({
                 "name": param.name,
                 "elementCount": element_count
@@ -1447,7 +1465,7 @@ impl Driver {
         }
 
         let return_element_count = abi.return_type.as_ref().map_or(0, |ret| {
-            crate::abi_helpers::abi_type_elements(&ret.abi_type, self.field())
+            crate::abi_helpers::abi_type_elements(&ret.abi_type, self.field(), self.limb_bits())
         });
 
         let manifest = serde_json::to_value(self.witness_manifest(r1cs)?).unwrap();
@@ -1505,7 +1523,7 @@ fn compiled_source(file_manager: &fm::FileManager, path: &str) -> Option<Arc<str
 mod tests {
     use noirc_abi::{AbiType, Sign};
 
-    use super::{Diagnostic, Error, FieldConfig, SourceLocation};
+    use super::{Diagnostic, Error, FieldConfig, LimbBits, SourceLocation};
     use crate::compiler::{passes::prepare_entry_point::PrepareEntryPoint, ssa::hlssa::Type};
 
     /// ABI and HLSSA flattening must agree on the VM entry blob's width, on every field.
@@ -1569,10 +1587,11 @@ mod tests {
             }
         }
         for field in [FieldConfig::bn254(), FieldConfig::goldilocks()] {
+            let limb_bits = LimbBits::widest(field);
             for (abi, hlssa) in &cases {
                 assert_eq!(
-                    crate::abi_helpers::abi_type_elements(abi, field),
-                    PrepareEntryPoint::flattened_field_count(hlssa, field),
+                    crate::abi_helpers::abi_type_elements(abi, field, limb_bits),
+                    PrepareEntryPoint::flattened_field_count(hlssa, field, limb_bits),
                     "flattening mismatch for ABI type {abi:?} vs HLSSA type {hlssa:?} on {field:?}",
                 );
             }

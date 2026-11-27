@@ -20,11 +20,12 @@
 //! the body.
 //!
 //! The manifest records only what the R1CS cannot say: each parameter's name, visibility, width and
-//! witness columns, and the return's. Witness and constraint counts come from the R1CS layouts, and
-//! LogUp challenge `i` sits at `witness_layout.challenges_start() + i`, which is offset `i` into
-//! the post-commitment witness. The argument repeats `logup_repetitions` times: repetition `k`
-//! reads challenges `k·c` to `k·c + c − 1`, where `c = challenges_size / logup_repetitions` is 2
-//! when a table has a value column and 1 otherwise. The prover draws every challenge independently.
+//! witness columns, the return's, and the width wide integers are cut at. Witness and constraint
+//! counts come from the R1CS layouts, and LogUp challenge `i` sits at
+//! `witness_layout.challenges_start() + i`, which is offset `i` into the post-commitment witness.
+//! The argument repeats `logup_repetitions` times: repetition `k` reads challenges `k·c` to
+//! `k·c + c − 1`, where `c = challenges_size / logup_repetitions` is 2 when a table has a value
+//! column and 1 otherwise. The prover draws every challenge independently.
 //!
 //! The entry blob holds the parameters only, in ABI order. Witness columns follow the wrapper's
 //! write order instead: column 0 is the constant one, then the public parameters in ABI order,
@@ -40,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    FieldId, LogupStrides, MavrosField, R1CS, SealedR1CS, field_tag,
+    FieldId, LimbBits, LogupStrides, MavrosField, R1CS, SealedR1CS, field_tag,
     program_header::{ENTRY_AD, ENTRY_WITGEN, NO_ENTRY_POINT, ProgramHeader},
 };
 
@@ -89,6 +90,8 @@ pub struct WitnessManifest {
     pub parameters: Vec<ManifestParam>,
     /// Present exactly when the ABI declares a return.
     pub returns: Option<ReturnSlot>,
+    /// The width of the limbs an integer too wide for one element is cut into.
+    pub limb_bits: LimbBits,
 }
 
 impl WitnessManifest {
@@ -109,6 +112,8 @@ impl WitnessManifest {
 
     /// Checks the parameter and return columns against `r1cs`'s witness layout.
     pub fn validate<F: MavrosField>(&self, r1cs: &R1CS<F>) -> Result<(), String> {
+        LimbBits::new(F::CONFIG, self.limb_bits.bits())
+            .map_err(|error| format!("witness manifest limb: {error}"))?;
         let layout = r1cs.witness_layout;
         let check = |ok: bool, what: &str| {
             ok.then_some(())
@@ -166,13 +171,12 @@ impl WitnessManifest {
 
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"MAVR1CS\0";
 /// Format version this crate writes and the only one it reads.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 4;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 5;
 /// The first format version with a compiler field.
 const COMPILER_SINCE_VERSION: u32 = 3;
 
-/// Domain separator of [`Artifact::circuit_digest`], the one `r1cs.bin`'s digest used, so that a
-/// circuit keeps its digest. Bump when its preimage encoding changes.
-pub const CIRCUIT_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-artifact-v1\0";
+/// Domain separator of [`Artifact::circuit_digest`]. Bump when its preimage encoding changes.
+pub const CIRCUIT_DIGEST_DOMAIN: &[u8] = b"mavros-r1cs-artifact-v2\0";
 
 /// Domain separator of [`Artifact::digest`]. Bump when its preimage encoding changes.
 pub const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mavros-artifact-v1\0";
@@ -586,6 +590,7 @@ mod tests {
                 len: 1,
                 visibility: ParamVisibility::Public,
             }),
+            limb_bits: LimbBits(64),
         }
     }
 
@@ -811,7 +816,12 @@ mod tests {
 
     #[test]
     fn artifact_rejects_inconsistent_entry_slots() {
-        let cases: [fn(&mut WitnessManifest, &mut R1CS<Bn254>); 8] = [
+        let cases: [fn(&mut WitnessManifest, &mut R1CS<Bn254>); 12] = [
+            // A limb no decomposition halves, or whose product the field cannot hold.
+            |m, _| m.limb_bits = LimbBits(0),
+            |m, _| m.limb_bits = LimbBits(1),
+            |m, _| m.limb_bits = LimbBits(48),
+            |m, _| m.limb_bits = LimbBits(128),
             // A public parameter always has columns, and they come first.
             |m, _| m.parameters[1].column_start = None,
             |m, _| m.parameters[1].column_start = Some(2),
@@ -1046,14 +1056,13 @@ mod tests {
             "19a818fdfde1381d0a34923b663aeb61e431643eaf0cc3d8e435cd944a7289f4"
         );
         let pinned = artifact(manifest(), r1cs());
-        // The digest the r1cs.bin artifact carried for this circuit.
         assert_eq!(
             pinned.circuit_digest_hex(),
-            "2192560a2e938f3ae252363dad5eedb0f1c5de48c88201be9d5f51bd2c19229e"
+            "db575bfd316e5350a941affdb8af7fb59cc831a66266753af22925236fd83327"
         );
         assert_eq!(
             hex(&pinned.digest()),
-            "102d64fce93fcfd06a24434db0568142ea92ec39e04078c99cc47e6274b08545"
+            "181e18c57954d495337247579067a3eb16dc0e77e022d4eec21b9bb5f849d6ac"
         );
 
         // The compiler version stays outside both digests.

@@ -6,6 +6,7 @@ pub mod type_system;
 use itertools::Itertools;
 use std::fmt::Display;
 
+use mavros_artifacts::LimbBits;
 use mavros_int_semantics::IntBits;
 
 use crate::compiler::ssa::{
@@ -37,6 +38,16 @@ impl HLSSA {
 
     pub(crate) fn mark_witness_slices_purified(&mut self) {
         self.witness_slices_purified = true;
+    }
+
+    /// The limb the program's wide witnessed integers are cut at.
+    pub fn limb_bits(&self) -> LimbBits {
+        self.limb_bits
+    }
+
+    /// Cut the program's wide integers at `limb_bits`.
+    pub(crate) fn set_limb_bits(&mut self, limb_bits: LimbBits) {
+        self.limb_bits = limb_bits;
     }
 }
 

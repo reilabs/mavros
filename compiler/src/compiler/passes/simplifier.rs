@@ -98,6 +98,7 @@ impl Simplifier {
                         &constant_types,
                         cfg,
                         fb.field(),
+                        fb.ssa.limb_bits(),
                     );
                     if !self.run_function(fb, &fti) {
                         break;

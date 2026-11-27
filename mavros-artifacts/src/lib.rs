@@ -9,7 +9,7 @@ use sha2::{Digest as _, Sha256};
 use tracing::error;
 
 pub use field::{
-    Bn254, FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, MavrosField,
+    Bn254, FieldConfig, FieldElement, FieldId, Goldilocks, IntoFieldElement, LimbBits, MavrosField,
 };
 pub use manifest::{
     ARTIFACT_DIGEST_DOMAIN, ARTIFACT_FORMAT_VERSION, ARTIFACT_MAGIC, Artifact, ArtifactError,

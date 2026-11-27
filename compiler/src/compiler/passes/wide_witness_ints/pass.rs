@@ -10,15 +10,18 @@ use crate::compiler::{
         hlssa::{HLSSA, OpCode},
     },
 };
-pub struct WideWitnessInts {
-    /// The widest limb a value may be cut at.
-    max_limb_bits: usize,
-}
+/// Cuts every wide witnessed integer at the program's limb, `HLSSA::limb_bits`.
+pub struct WideWitnessInts {}
 
 impl WideWitnessInts {
-    /// The pass, cutting no limb wider than `max_limb_bits`.
-    pub fn new(max_limb_bits: usize) -> Self {
-        WideWitnessInts { max_limb_bits }
+    pub fn new() -> Self {
+        WideWitnessInts {}
+    }
+}
+
+impl Default for WideWitnessInts {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -34,7 +37,7 @@ impl Pass for WideWitnessInts {
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
         let type_info = store.get::<TypeInfo>();
         let cfg = store.get::<FlowAnalysis>();
-        let limb_config = &LimbConfig::of(ssa, type_info, cfg, self.max_limb_bits);
+        let limb_config = &LimbConfig::of(ssa);
         let field = limb_config.field();
         let globals = Globals::split(ssa, limb_config);
 

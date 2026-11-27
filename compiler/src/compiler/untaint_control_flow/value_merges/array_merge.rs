@@ -441,6 +441,7 @@ impl<'a> SparseArrayMerge<'a> {
             &Types::constant_types(ssa, &signatures),
             &cfg,
             ssa.field(),
+            ssa.limb_bits(),
         );
         self.ranges =
             Some(ValueRangeAnalysis::new().run_on_function(function, &cfg, &types, ssa, unknown));

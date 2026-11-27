@@ -27,7 +27,8 @@ fn check(source: &str, inputs: &str) {
     )
     .unwrap();
     std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
-    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let (params, declared_return) =
+        api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits()).unwrap();
     let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
     assert!(api::check_witgen(&r1cs, &result));
     abi_helpers::check_witness_manifest(
@@ -263,7 +264,8 @@ fn assert_cast_refused(lane: CastLane, source: &str, inputs: &str) {
     )
     .unwrap();
     std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
-    let (params, _) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let (params, _) =
+        api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits()).unwrap();
     let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None);
     assert!(
         result.is_err() || !api::check_witgen(&r1cs, &result.unwrap()),
@@ -388,7 +390,7 @@ fn wide_arithmetic_still_rejects_overflow_and_zero_divisors() {
         for (input, accepted) in [(valid, true), (invalid, false)] {
             std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
             let (params, declared_return) =
-                api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+                api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits()).unwrap();
             // Require witness generation to finish with honest-prover checks disabled:
             // a VM trap would not demonstrate that the constraints reject the witness.
             let result = api::run_witgen_from_binary(&mut binary.clone(), &r1cs, &params, None)
@@ -440,7 +442,8 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         format!("a = [16, '{correct_high}']\nb = [0, 0]\nreturn = [16, '{wrong_high}']"),
     )
     .unwrap();
-    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let (params, declared_return) =
+        api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits()).unwrap();
     let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None)
         .expect("unchecked witness generation must complete");
     assert!(api::check_witgen(&r1cs, &result));
@@ -474,7 +477,9 @@ fn wide_abi_checks_input_ranges_and_declared_returns() {
         format!("a = ['{out_of_range}', 0]\nb = [0, 0]\nreturn = [0, 0]"),
     )
     .unwrap();
-    assert!(api::read_prover_inputs::<Bn254>(dir.path(), driver.abi()).is_err());
+    assert!(
+        api::read_prover_inputs::<Bn254>(dir.path(), driver.abi(), driver.limb_bits()).is_err()
+    );
 }
 
 /// Each refusal is matched by the diagnostic the rule under test emits, so that a program that

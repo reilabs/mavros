@@ -47,8 +47,11 @@ use crate::{
     compiler::{
         pass_manager::{AnalysisStore, Pass, PassResult},
         passes::{
-            shared::MIN_LOOPED_RUN,
-            wide_witness_ints::{int_limb_widths, multi_cell_int_bits},
+            shared::{
+                MIN_LOOPED_RUN,
+                limbs::{int_elements, int_limbs},
+            },
+            wide_witness_ints::multi_cell_int_bits,
         },
         ssa::{
             BlockId, FunctionId, Located, SourceLocation, ValueId,
@@ -59,7 +62,7 @@ use crate::{
         },
     },
 };
-use mavros_artifacts::FieldConfig;
+use mavros_artifacts::{FieldConfig, LimbBits};
 use mavros_int_semantics::IntBits;
 
 pub const ENTRY_ORIGIN_PREFIX: &str = "entry point: ";
@@ -88,6 +91,8 @@ pub struct EntryBlobLayout {
 
 pub struct PrepareEntryPoint {
     main_is_unconstrained: bool,
+    /// The limb the program's wide integers are cut at.
+    limb_bits: LimbBits,
     abi_has_return: Option<bool>,
     /// `None` treats every parameter as public, which keeps hand-built SSA on fixed columns.
     param_is_public: Option<Vec<bool>>,
@@ -156,6 +161,7 @@ impl Pass for PrepareEntryPoint {
     }
 
     fn run(&self, ssa: &mut HLSSA, _store: &AnalysisStore) -> PassResult {
+        ssa.set_limb_bits(self.limb_bits);
         let layout = Self::wrap_main(
             ssa,
             self.main_is_unconstrained,
@@ -171,12 +177,15 @@ impl Pass for PrepareEntryPoint {
 }
 
 impl PrepareEntryPoint {
+    /// Cuts the program's wide integers at `limb_bits`.
+    ///
     /// Defaults to signature-based return presence for hand-built SSA only.
     /// Noir lowering materializes unit as one result, so callers compiling Noir
     /// must also supply `with_abi_return` (as `Driver` does).
-    pub fn new(main_is_unconstrained: bool) -> Self {
+    pub fn new(main_is_unconstrained: bool, limb_bits: LimbBits) -> Self {
         Self {
             main_is_unconstrained,
+            limb_bits,
             abi_has_return: None,
             param_is_public: None,
             layout_sink: None,
@@ -239,13 +248,14 @@ impl PrepareEntryPoint {
             Self::get_or_create_reconstruct_fn(typ, ssa, &mut reconstruct_fns);
         }
 
-        let field = ssa.field();
+        let (field, limb_bits) = (ssa.field(), ssa.limb_bits());
         let layout = Self::entry_blob_layout(
             &param_types,
             &return_types,
             has_return,
             &param_is_public,
             field,
+            limb_bits,
         );
         let total_fields = layout.total;
 
@@ -322,7 +332,10 @@ impl PrepareEntryPoint {
             for ((typ, slot), witness_array) in
                 param_types.iter().zip(&layout.params).zip(&witness_arrays)
             {
-                debug_assert_eq!(slot.width, Self::flattened_field_count(typ, field));
+                debug_assert_eq!(
+                    slot.width,
+                    Self::flattened_field_count(typ, field, limb_bits)
+                );
                 let witness_array =
                     witness_array.expect("every parameter has its witness array emitted");
                 let value = if slot.width == 0 {
@@ -588,6 +601,7 @@ impl PrepareEntryPoint {
         has_return: bool,
         param_is_public: &[bool],
         field: FieldConfig,
+        limb_bits: LimbBits,
     ) -> EntryBlobLayout {
         let mut offset = 0usize;
         let mut slot = |width: usize, public: bool| {
@@ -602,12 +616,12 @@ impl PrepareEntryPoint {
         let params = param_types
             .iter()
             .zip(param_is_public)
-            .map(|(typ, public)| slot(Self::flattened_field_count(typ, field), *public))
+            .map(|(typ, public)| slot(Self::flattened_field_count(typ, field, limb_bits), *public))
             .collect();
         let return_width = has_return.then(|| {
             return_types
                 .iter()
-                .map(|typ| Self::flattened_field_count(typ, field))
+                .map(|typ| Self::flattened_field_count(typ, field, limb_bits))
                 .sum()
         });
         EntryBlobLayout {
@@ -618,25 +632,20 @@ impl PrepareEntryPoint {
     }
 
     /// How many elements of the entry point's input blob, or columns of its return, a value of
-    /// `typ` occupies on `field`.
+    /// `typ` occupies on `field`, cut at `limb_bits`.
     ///
     /// An integer up to [`multi_cell_int_bits`] takes one: a parameter is written to a single
-    /// witness column and bounded to its width there. A wider one takes one per `WideWitnessInts`
-    /// limb, little-endian: a parameter's limbs are each bounded to the limb's width, and a
+    /// witness column and bounded to its width there. A wider one takes one per limb of
+    /// `limb_bits`, little-endian: a parameter's limbs are each bounded to the limb's width, and a
     /// return's are bound limb by limb to the returned value.
-    pub fn flattened_field_count(typ: &Type, field: FieldConfig) -> usize {
+    pub fn flattened_field_count(typ: &Type, field: FieldConfig, limb_bits: LimbBits) -> usize {
+        let count = |typ| Self::flattened_field_count(typ, field, limb_bits);
         match &typ.expr {
             TypeExpr::Field => 1,
-            TypeExpr::Int(size) if *size > multi_cell_int_bits(field) => {
-                int_limb_widths(*size, field).len()
-            }
-            TypeExpr::Int(_) => 1,
-            TypeExpr::Array(inner, size) => Self::flattened_field_count(inner, field) * size,
-            TypeExpr::Tuple(element_types) => element_types
-                .iter()
-                .map(|typ| Self::flattened_field_count(typ, field))
-                .sum(),
-            TypeExpr::WitnessOf(inner) => Self::flattened_field_count(inner, field),
+            TypeExpr::Int(size) => int_elements(field, limb_bits, *size),
+            TypeExpr::Array(inner, size) => count(inner) * size,
+            TypeExpr::Tuple(element_types) => element_types.iter().map(count).sum(),
+            TypeExpr::WitnessOf(inner) => count(inner),
             _ => todo!("Not implemented yet"),
         }
     }
@@ -783,6 +792,7 @@ impl PrepareEntryPoint {
             fn_id,
         });
 
+        let limb_bits = ssa.limb_bits();
         let mut sb = HLSSABuilder::new(ssa);
         sb.modify_function(fn_id, |b| {
             b.function.add_return_type(typ.clone());
@@ -790,9 +800,10 @@ impl PrepareEntryPoint {
             let location = SourceLocation::synthetic(b.function.get_name());
             let mut e = b.block(entry_block).with_source_location(location);
 
-            let input_len = Self::flattened_field_count(typ, e.field());
+            let input_len = Self::flattened_field_count(typ, e.field(), limb_bits);
             let input_array = e.add_parameter(Type::field().array_of(input_len));
-            let result = Self::emit_reconstruct_body(&mut e, typ, input_array, reconstruct_fns);
+            let result =
+                Self::emit_reconstruct_body(&mut e, typ, input_array, reconstruct_fns, limb_bits);
             e.terminate_return(vec![result]);
         });
 
@@ -804,6 +815,7 @@ impl PrepareEntryPoint {
         typ: &Type,
         input_array: ValueId,
         reconstruct_fns: &[ReconstructFnEntry],
+        limb_bits: LimbBits,
     ) -> ValueId {
         match &typ.expr {
             TypeExpr::Field => {
@@ -812,24 +824,25 @@ impl PrepareEntryPoint {
             }
             // Limbs from the start: each element is one limb, bounded at its width, and none holds
             // the whole value.
-            TypeExpr::Int(size) if *size > multi_cell_int_bits(e.field()) => {
-                let widths = int_limb_widths(*size, e.field());
-                let mut limbs = Vec::with_capacity(widths.len());
-                for (index, width) in widths.into_iter().enumerate() {
-                    let index = e.int_const(IntBits::from_u128(32, index as u128));
-                    let element = e.array_get(input_array, index);
-                    limbs.push(Self::emit_bounded_int(e, element, width));
+            TypeExpr::Int(size) => match int_limbs(e.field(), limb_bits, *size) {
+                Some(widths) => {
+                    let mut limbs = Vec::with_capacity(widths.len());
+                    for (index, width) in widths.into_iter().enumerate() {
+                        let index = e.int_const(IntBits::from_u128(32, index as u128));
+                        let element = e.array_get(input_array, index);
+                        limbs.push(Self::emit_bounded_int(e, element, width));
+                    }
+                    e.int_from_limbs(limbs, *size)
                 }
-                e.int_from_limbs(limbs, *size)
-            }
-            TypeExpr::Int(size) => {
-                let zero = e.int_const(IntBits::zero(32));
-                let element = e.array_get(input_array, zero);
-                Self::emit_bounded_int(e, element, *size)
-            }
+                None => {
+                    let zero = e.int_const(IntBits::zero(32));
+                    let element = e.array_get(input_array, zero);
+                    Self::emit_bounded_int(e, element, *size)
+                }
+            },
             TypeExpr::Array(inner, size) => {
                 let child_fn = Self::find_reconstruct_fn(inner, reconstruct_fns);
-                let child_width = Self::flattened_field_count(inner, e.field());
+                let child_width = Self::flattened_field_count(inner, e.field(), limb_bits);
                 let initial_array = Self::emit_default_witness_array(e, inner, *size);
                 let reconstructed_array = e.build_counted_loop(
                     *size,
@@ -854,7 +867,7 @@ impl PrepareEntryPoint {
                 let mut field_offset = 0;
                 for elem_type in element_types {
                     let child_fn = Self::find_reconstruct_fn(elem_type, reconstruct_fns);
-                    let child_width = Self::flattened_field_count(elem_type, e.field());
+                    let child_width = Self::flattened_field_count(elem_type, e.field(), limb_bits);
                     let child_input = Self::emit_reconstruct_child_input_array(
                         e,
                         input_array,
