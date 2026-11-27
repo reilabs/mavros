@@ -2,10 +2,10 @@
 //! group of limbs.
 //!
 //! A `WitnessOf(Int(N))` with `N > multi_cell_int_bits` becomes `k = ceil(N/h)` little-endian
-//! values, where `h` is the widest limb at which every product and division in the program is
-//! sound, chosen once per program by [`limb_config::LimbConfig`]. Limbs `0..k-1` are
-//! `WitnessOf(Int(h))` and the top one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared
-//! width is correct.
+//! values, where `h` is the program's limb, `HLSSA::limb_bits`. The driver fixes it before the
+//! entry point is prepared, at which every product and division in the program is sound, counting
+//! each as witnessed ([`limb_config::scanned_limb_bits`]). Limbs `0..k-1` are `WitnessOf(Int(h))` and
+//! the top one is `WitnessOf(Int(N - (k-1)h))`, so each limb's declared width is correct.
 //!
 //! A **pure** `Int(N)` **scalar** is untouched: it lives in the hint domain, where both backends
 //! compute at any width.
@@ -169,6 +169,7 @@ mod rewriter;
 mod types;
 
 pub use crate::compiler::passes::shared::limbs::{int_limb_widths, multi_cell_int_bits};
+pub(crate) use limb_config::scanned_limb_bits;
 pub use pass::WideWitnessInts;
 
 #[cfg(test)]

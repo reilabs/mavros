@@ -2312,6 +2312,7 @@ dependencies = [
  "ark-ff",
  "ark-std",
  "bincode",
+ "mavros-int-semantics",
  "mavros-limb-arith",
  "num-traits",
  "rand 0.8.6",

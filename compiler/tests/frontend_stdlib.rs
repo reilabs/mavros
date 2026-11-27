@@ -90,7 +90,9 @@ fn check_program<F: MavrosField>(source: &str, inputs: &[String], unconstrained:
         .unwrap();
     for input in inputs {
         std::fs::write(dir.path().join("Prover.toml"), input).unwrap();
-        let (params, expected) = api::read_prover_inputs::<F>(dir.path(), driver.abi()).unwrap();
+        let (params, expected) =
+            api::read_prover_inputs::<F>(dir.path(), driver.abi(), driver.limb_bits())
+                .unwrap();
         let expected = expected.expect("each vector declares its expected digest");
         let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None).unwrap();
         assert!(api::check_witgen(&r1cs, &result));
@@ -295,7 +297,9 @@ fn to_le_bytes_past_the_element_compiles_and_fails_at_its_bound() {
             })
             .unwrap();
         let mut binary = artifact.binary;
-        let (params, _) = api::read_prover_inputs::<F>(dir.path(), driver.abi()).unwrap();
+        let (params, _) =
+            api::read_prover_inputs::<F>(dir.path(), driver.abi(), driver.limb_bits())
+                .unwrap();
         let Err(error) =
             api::run_witgen_from_binary(&mut binary, &r1cs, &params, artifact.debug_info)
         else {

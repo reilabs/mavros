@@ -12,7 +12,10 @@
 use num_bigint::BigInt;
 use num_traits::One;
 
-use mavros_artifacts::FieldConfig;
+use mavros_artifacts::{
+    FieldConfig, LimbBits,
+    field::limb_bits::{self, NARROWEST_LIMB_BITS},
+};
 use mavros_int_semantics::int_bits::{HOST_LIMB_BITS, HOST_WORD_BITS};
 
 use crate::compiler::{
@@ -103,19 +106,6 @@ fn widest_pow2_row(size: usize) -> BigInt {
 // THE WITNESS LIMB WIDTH
 // ================================================================================================
 
-/// The narrowest admissible limb width, and the fallback that keeps [`narrow_int_bits_for_modulus`]
-/// total.
-const NARROWEST_LIMB_BITS: usize = 1;
-
-/// The admissible limb widths, widest first: the powers of two from [`NARROWEST_LIMB_BITS`] up to
-/// [`HOST_LIMB_BITS`], since a limb lives in a host word.
-fn candidate_widths() -> Vec<usize> {
-    (NARROWEST_LIMB_BITS..=HOST_LIMB_BITS)
-        .rev()
-        .filter(|w| w.is_power_of_two())
-        .collect()
-}
-
 /// The witness limb width `h` for `field`.
 ///
 /// The width a value is cut into before its pieces are packed into field elements; see
@@ -128,7 +118,7 @@ fn candidate_widths() -> Vec<usize> {
 /// - that the limbs recombine into one cell, which [`combine_limbs_of_value`] asks of the width of
 ///   the value they came from.
 pub fn witness_limb_bits(field: FieldConfig) -> usize {
-    limb_bits_for_modulus(&field_modulus(field))
+    LimbBits::widest(field).bits()
 }
 
 /// The widest witnessed integer carried as a single field element.
@@ -162,6 +152,18 @@ pub fn int_limb_widths(bits: usize, field: FieldConfig) -> Vec<usize> {
     limb_widths(bits, witness_limb_bits(field))
 }
 
+/// The limb widths of a witnessed `int(bits)` over `field` cut at `limb_bits`, little-endian; or
+/// [`None`] up to [`multi_cell_int_bits`], where one element holds it.
+pub fn int_limbs(field: FieldConfig, limb_bits: LimbBits, bits: usize) -> Option<Vec<usize>> {
+    (bits > multi_cell_int_bits(field)).then(|| limb_widths(bits, limb_bits.bits()))
+}
+
+/// The elements a witnessed `int(bits)` over `field` cut at `limb_bits` takes: one, or one per
+/// limb.
+pub fn int_elements(field: FieldConfig, limb_bits: LimbBits, bits: usize) -> usize {
+    int_limbs(field, limb_bits, bits).map_or(1, |limbs| limbs.len())
+}
+
 /// The widest admissible `h` with `2h <= widest_injective_int_bits`: every product of two limbs is
 /// then a distinct element of `modulus`.
 ///
@@ -173,12 +175,10 @@ pub fn int_limb_widths(bits: usize, field: FieldConfig) -> Vec<usize> {
 ///
 /// # Panics
 ///
-/// If `modulus` is below 4, where two bits are not injective.
+/// If `modulus` is below 16, where no two-bit limb's product is injective.
 pub fn limb_bits_for_modulus(modulus: &BigInt) -> usize {
-    let widest = widest_injective_int_bits_for_modulus(modulus);
-    candidate_widths()
-        .into_iter()
-        .find(|&limb_bits| 2 * limb_bits <= widest)
+    let modulus_bits = usize::try_from(modulus.bits()).unwrap_or(usize::MAX);
+    limb_bits::widest_for_modulus_bits(modulus_bits)
         .unwrap_or_else(|| panic!("a field of modulus {modulus} has no witness limb"))
 }
 
@@ -679,7 +679,7 @@ mod tests {
     fn a_limb_product_is_injective_on_every_modulus() {
         // The defining property, checked across every modulus width a field could plausibly have.
         let widths = candidate_widths();
-        for field_bits in 3..=256usize {
+        for field_bits in 5..=256usize {
             // The smallest modulus a `field_bits`-wide field could have, the hardest case.
             let p = (BigInt::one() << (field_bits - 1)) + BigInt::one();
             let h = limb_bits_for_modulus(&p);
@@ -890,6 +890,13 @@ mod tests {
         );
     }
 
+    /// The admissible limb widths, widest first.
+    fn candidate_widths() -> Vec<usize> {
+        (NARROWEST_LIMB_BITS..=HOST_LIMB_BITS)
+            .rev()
+            .filter(|w| w.is_power_of_two())
+            .collect()
+    }
     /// The canonical integer behind a field element, as a `BigInt`.
     fn field_to_bigint_via_bytes(f: &crate::compiler::Field) -> BigInt {
         use num_bigint::Sign;

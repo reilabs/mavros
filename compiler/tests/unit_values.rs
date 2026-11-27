@@ -183,7 +183,8 @@ fn run(source: &str, inputs: &str, expected_fields: usize, accepted: bool) {
     std::fs::write(dir.path().join("Prover.toml"), inputs).unwrap();
     let (mut driver, r1cs) =
         api::compile_to_r1cs::<Bn254>(dir.path().to_path_buf(), false).unwrap();
-    let (params, declared_return) = api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+    let (params, declared_return) =
+        api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits()).unwrap();
     let mut artifact = driver
         .compile_bytecode_artifact(CodeGenOptions {
             check_constraints: true,

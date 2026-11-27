@@ -36,7 +36,8 @@ fn check(body: &str, expected: &[u64]) {
             )
             .unwrap();
             let (params, declared_return) =
-                api::read_prover_inputs(dir.path(), driver.abi()).unwrap();
+                api::read_prover_inputs(dir.path(), driver.abi(), driver.limb_bits())
+                    .unwrap();
             let result = api::run_witgen_from_binary(&mut binary, &r1cs, &params, None)
                 .unwrap_or_else(|error| panic!("{source}, index {index}: {error}"));
             assert!(api::check_witgen(&r1cs, &result));

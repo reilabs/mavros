@@ -1,7 +1,7 @@
 //! An analysis pass that gathers (extrinsic) type information wherever needed, avoiding the need to
 //! perform detailed bookkeeping of type information whenever transforming the IR.
 
-use mavros_artifacts::FieldConfig;
+use mavros_artifacts::{FieldConfig, LimbBits};
 use tracing::{Level, instrument};
 
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     compiler::{
         analysis::flow_analysis::{CFG, FlowAnalysis},
         pass_manager::{Analysis, AnalysisId, AnalysisStore},
-        passes::shared::limbs::{int_limb_widths, multi_cell_int_bits},
+        passes::shared::limbs::int_limbs,
         ssa::{
             FunctionId, SSAConstantsSnapshot, ValueId,
             hlssa::{
@@ -146,14 +146,20 @@ impl Types {
         let function_types = Self::function_types(ssa);
         let constant_types = Self::constant_types(ssa, &function_types);
 
-        // The configured field, threaded through calls so that the width of a `Field` can be read
-        // from it rather than a static.
-        let field = ssa.field();
+        // The configured field and limb, threaded through calls so that the width of a `Field` and
+        // the limbs of a wide integer are read from them rather than a static.
+        let (field, limb_bits) = (ssa.field(), ssa.limb_bits());
 
         for (function_id, function) in ssa.iter_functions() {
             let cfg = cfg.get_function_cfg(*function_id);
-            let function_info =
-                self.run_function(function, &function_types, &constant_types, cfg, field);
+            let function_info = self.run_function(
+                function,
+                &function_types,
+                &constant_types,
+                cfg,
+                field,
+                limb_bits,
+            );
             type_info.functions.insert(*function_id, function_info);
         }
         type_info
@@ -244,6 +250,7 @@ impl Types {
         constant_types: &HashMap<ValueId, Type>,
         cfg: &CFG,
         field: FieldConfig,
+        limb_bits: LimbBits,
     ) -> FunctionTypeInfo {
         let mut function_info = FunctionTypeInfo {
             values: constant_types.clone(),
@@ -257,8 +264,14 @@ impl Types {
             }
 
             for instruction in block.get_instructions() {
-                self.run_opcode(instruction, &mut function_info, function_types, field)
-                    .unwrap_or_else(|e| ice!("Error running opcode {instruction:?}: {e}"));
+                self.run_opcode(
+                    instruction,
+                    &mut function_info,
+                    function_types,
+                    field,
+                    limb_bits,
+                )
+                .unwrap_or_else(|e| ice!("Error running opcode {instruction:?}: {e}"));
             }
         }
 
@@ -271,6 +284,7 @@ impl Types {
         function_info: &mut FunctionTypeInfo,
         function_types: &HashMap<FunctionId, (Vec<Type>, &[Type])>,
         field: FieldConfig,
+        limb_bits: LimbBits,
     ) -> Result<(), String> {
         match opcode {
             OpCode::Cmp {
@@ -919,10 +933,8 @@ impl Types {
                 limbs,
                 bits,
             } => {
-                if *bits <= multi_cell_int_bits(field) {
-                    return Err(format!("an int{bits} is not held as limbs"));
-                }
-                let widths = int_limb_widths(*bits, field);
+                let widths = int_limbs(field, limb_bits, *bits)
+                    .ok_or_else(|| format!("an int{bits} is not held as limbs"))?;
                 if widths.len() != limbs.len() {
                     return Err(format!(
                         "an int{bits} is {} limbs, not {}",
@@ -1002,7 +1014,7 @@ impl Types {
                 Ok(())
             }
             OpCode::Guard { inner, .. } => {
-                self.run_opcode(inner, function_info, function_types, field)
+                self.run_opcode(inner, function_info, function_types, field, limb_bits)
             }
         }
     }
@@ -1029,6 +1041,7 @@ mod tests {
         MAX_SUPPORTED_INT_BITS,
         builder::{HLBlockEmitter, HLEmitter, HLSSABuilder},
     };
+    use mavros_artifacts::FieldConfig;
     use mavros_int_semantics::IntBits;
 
     /// Type an `SExt` whose operand is an eight-bit constant but which declares `from_bits`.

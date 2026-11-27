@@ -10,7 +10,7 @@ pub mod traits;
 
 use bimap::BiHashMap;
 use itertools::Itertools;
-use mavros_artifacts::FieldConfig;
+use mavros_artifacts::{FieldConfig, LimbBits};
 use std::{
     fmt::Debug,
     hash::Hash,
@@ -103,6 +103,9 @@ pub struct SSA<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> {
     /// ([`SSA::with_field`]).
     field: FieldConfig,
 
+    /// The witness limb a wide integer is cut at.
+    limb_bits: LimbBits,
+
     /// Whether HLSSA slice lengths may represent physical capacity after purification.
     witness_slices_purified: bool,
 }
@@ -121,6 +124,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> Clone for SSA<O
             next_value_id: AtomicU64::new(self.next_value_id.load(Ordering::Relaxed)),
             constants: RwLock::new(self.constants.read().unwrap().clone()),
             field: self.field,
+            limb_bits: self.limb_bits,
             witness_slices_purified: self.witness_slices_purified,
         }
     }
@@ -141,6 +145,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
             next_value_id: AtomicU64::new(0),
             constants: RwLock::new(BiHashMap::default()),
             field,
+            limb_bits: LimbBits::widest(field),
             witness_slices_purified: false,
         }
     }
@@ -182,6 +187,7 @@ impl<Op: Instruction, Ty: SSAType, C: Clone + Debug + Eq + Hash> SSA<Op, Ty, C> 
                 next_value_id: self.next_value_id,
                 constants: self.constants,
                 field: self.field,
+                limb_bits: self.limb_bits,
                 witness_slices_purified: self.witness_slices_purified,
             },
             self.functions,

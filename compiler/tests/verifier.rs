@@ -220,7 +220,12 @@ fn check_at(
     .unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
     if prover_toml.is_some() {
-        let (inputs, _) = api::read_prover_inputs(project.path(), driver.abi()).unwrap();
+        let (inputs, _) = api::read_prover_inputs(
+            project.path(),
+            driver.abi(),
+            driver.limb_bits(),
+        )
+        .unwrap();
         let witness = api::run_witgen_from_binary(&mut prover, &r1cs, &inputs, None).unwrap();
         assert!(api::check_witgen(&r1cs, &witness));
     }
@@ -388,7 +393,12 @@ fn check_wasm_at(source: &str, logup_soundness: u32, prover_toml: &str) -> usize
     )
     .unwrap();
     let mut prover = api::compile_bytecode(&mut driver, CodeGenOptions::default()).unwrap();
-    let (inputs, _) = api::read_prover_inputs(project.path(), driver.abi()).unwrap();
+    let (inputs, _) = api::read_prover_inputs(
+        project.path(),
+        driver.abi(),
+        driver.limb_bits(),
+    )
+    .unwrap();
     let vm = api::run_witgen_from_binary(&mut prover, &r1cs, &inputs, None).unwrap();
 
     let scratch = tempfile::tempdir().unwrap();

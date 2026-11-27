@@ -180,7 +180,12 @@ impl<F: MavrosField> Compiled<F> {
         inputs: &str,
     ) -> (Vec<InputValueOrdered<F>>, Option<InputValueOrdered<F>>) {
         std::fs::write(self.dir.path().join("Prover.toml"), inputs).unwrap();
-        api::read_prover_inputs(self.dir.path(), self.driver.abi()).unwrap()
+        api::read_prover_inputs(
+            self.dir.path(),
+            self.driver.abi(),
+            self.driver.limb_bits(),
+        )
+        .unwrap()
     }
 
     /// Runs `params` and checks the witness against them and `declared_return`, or returns why the

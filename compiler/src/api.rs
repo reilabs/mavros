@@ -10,7 +10,9 @@ use crate::{
     driver::{DEFAULT_LOGUP_SOUNDNESS_BITS, Driver},
     vm::{bytecode::DebugInfo, interpreter},
 };
-use mavros_artifacts::{ConstraintsLayout, InputValueOrdered, MavrosField, WitnessLayout};
+use mavros_artifacts::{
+    ConstraintsLayout, InputValueOrdered, LimbBits, MavrosField, WitnessLayout,
+};
 use noirc_abi::{bytes, input_parser::Format};
 
 type Error = Box<dyn std::error::Error>;
@@ -85,6 +87,7 @@ pub fn compile_driver_to_r1cs<F: MavrosField>(driver: &mut Driver) -> Result<Sea
 pub fn read_prover_inputs<F: MavrosField>(
     root: &Path,
     abi: &noirc_abi::Abi,
+    limb_bits: LimbBits,
 ) -> Result<(Vec<InputValueOrdered<F>>, Option<InputValueOrdered<F>>), Error> {
     let file_path = root.join("Prover.toml");
 
@@ -103,30 +106,35 @@ pub fn read_prover_inputs<F: MavrosField>(
 
     let inputs = bytes::parse(&Format::Toml, &inputs_src, abi)
         .map_err(|e| format!("failed to parse inputs: {e}"))?;
-    let ordered_params = ordered_params(abi, &inputs.params)?;
-    let declared_return = declared_return(abi, inputs.ret.as_ref())?;
+    let ordered_params = ordered_params(abi, limb_bits, &inputs.params)?;
+    let declared_return = declared_return(abi, limb_bits, inputs.ret.as_ref())?;
 
     Ok((ordered_params, declared_return))
 }
 
-/// The parameters in ABI order from their byte encoding (`noirc_abi::bytes`), as elements of `F`.
+/// The parameters in ABI order from their byte encoding (`noirc_abi::bytes`), as elements of `F`,
+/// each wide integer cut at `limb_bits` as in [`read_prover_inputs`].
 pub fn decode_param_bytes<F: MavrosField>(
     abi: &noirc_abi::Abi,
+    limb_bits: LimbBits,
     blob: &[u8],
 ) -> Result<Vec<InputValueOrdered<F>>, Error> {
     let params =
         bytes::decode_params(abi, blob).map_err(|e| format!("failed to decode inputs: {e}"))?;
-    Ok(ordered_params(abi, &params)?)
+    Ok(ordered_params(abi, limb_bits, &params)?)
 }
 
-/// The expected return from its byte encoding (`noirc_abi::bytes`), as elements of `F`.
+/// The expected return from its byte encoding (`noirc_abi::bytes`), as elements of `F`, each wide
+/// integer cut at `limb_bits` as in [`read_prover_inputs`].
 pub fn decode_return_bytes<F: MavrosField>(
     abi: &noirc_abi::Abi,
+    limb_bits: LimbBits,
     blob: &[u8],
 ) -> Result<InputValueOrdered<F>, Error> {
     let ret =
         bytes::decode_return(abi, blob).map_err(|e| format!("failed to decode the return: {e}"))?;
-    Ok(declared_return(abi, Some(&ret))?.expect("`decode_return` refuses an ABI with no return"))
+    Ok(declared_return(abi, limb_bits, Some(&ret))?
+        .expect("`decode_return` refuses an ABI with no return"))
 }
 
 pub fn run_witgen_from_binary<F: MavrosField>(

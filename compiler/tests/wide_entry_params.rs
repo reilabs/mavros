@@ -1,12 +1,15 @@
 mod common;
 
-use mavros_artifacts::{Bn254, Goldilocks, InputValueOrdered, MavrosField};
+use mavros_artifacts::{Artifact, Bn254, Goldilocks, InputValueOrdered, LimbBits, MavrosField};
 use mavros_compiler::{
-    api,
+    Project, api,
     compiler::{
+        codegen::CodeGenOptions,
         passes::{shared::MIN_LOOPED_RUN, wide_witness_ints::int_limb_widths},
         util::biguint_of_limbs,
     },
+    driver::Driver,
+    vm::interpreter,
 };
 use num_bigint::{BigInt, BigUint};
 
@@ -76,6 +79,74 @@ fn the_manifest_gives_a_wide_integer_one_column_per_limb() {
     // 64-bit limbs on bn254, which holds a `u128` in one element; 16-bit limbs on Goldilocks.
     assert_eq!(widths::<Bn254>(), (vec![4, 2, 1], 5));
     assert_eq!(widths::<Goldilocks>(), (vec![16, 16, 1], 17));
+}
+
+/// A program cut at a narrower limb than its field's default carries its wide parameters and return
+/// at that limb. The manifest records it and survives the artifact, and inputs encoded at the limb
+/// the artifact names are accepted, as a consumer of the artifact would encode them. Encoded at the
+/// field's default they do not fill the entry blob.
+#[test]
+fn a_narrowed_program_crosses_its_entry_point_at_its_limb() {
+    fn check<F: MavrosField>(limb_bits: usize) {
+        let main = "fn main(a: u256, b: pub u256) -> pub u256 { a * b }";
+        let (a, b) = (pow2(100) + 3u8, pow2(120) + 5u8);
+        let inputs = format!("a = '{a}'\nb = '{b}'\nreturn = '{}'", &a * &b);
+        let limbs = 256 / limb_bits;
+        for source in common::in_both_modes(main) {
+            let what = format!("{:?} at a {limb_bits}-bit limb: {source}", F::ID);
+            let dir = common::noir_project(&source);
+            let mut driver = Driver::new(Project::new(dir.path().to_path_buf()).unwrap(), false);
+            driver.set_max_limb_bits(limb_bits);
+            driver.run_noir_compiler(F::CONFIG).unwrap();
+            let r1cs = api::compile_driver_to_r1cs::<F>(&mut driver).unwrap();
+            let binary = api::compile_bytecode(
+                &mut driver,
+                CodeGenOptions {
+                    check_constraints: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut compiled = common::Compiled {
+                dir,
+                driver,
+                r1cs,
+                binary,
+            };
+            let manifest = compiled.driver.witness_manifest(&compiled.r1cs).unwrap();
+            assert_eq!(manifest.limb_bits.bits(), limb_bits, "{what}");
+            let widths: Vec<usize> = manifest.parameters.iter().map(|p| p.width).collect();
+            assert_eq!(widths, vec![limbs, limbs], "{what}");
+            assert_eq!(manifest.returns.unwrap().len, limbs, "{what}");
+
+            let artifact = compiled
+                .driver
+                .artifact(compiled.r1cs.clone(), compiled.binary.clone())
+                .unwrap();
+            let artifact = Artifact::<F>::from_bytes(&artifact.to_bytes().unwrap()).unwrap();
+            let recorded = artifact.manifest().limb_bits;
+            assert_eq!(recorded.bits(), limb_bits, "{what}");
+
+            std::fs::write(compiled.dir.path().join("Prover.toml"), &inputs).unwrap();
+            let root = compiled.dir.path().to_path_buf();
+            let abi = compiled.driver.abi().clone();
+            let read = |limb_bits| api::read_prover_inputs::<F>(&root, &abi, limb_bits).unwrap();
+            let (params, declared_return) = read(recorded);
+            compiled
+                .run(&params, declared_return.as_ref())
+                .unwrap_or_else(|error| panic!("{what}: {error}"));
+
+            let (params, _) = read(LimbBits::widest(F::CONFIG));
+            assert_ne!(
+                interpreter::flattened_param_count(&params),
+                artifact.manifest().entry_blob_field_count(),
+                "{what}: inputs at the field's default limb fill the narrowed entry blob"
+            );
+        }
+    }
+    check::<Bn254>(32);
+    check::<Bn254>(16);
+    check::<Goldilocks>(8);
 }
 
 /// A wide return is published as its limbs, from a parameter, a constant or arithmetic, wherever

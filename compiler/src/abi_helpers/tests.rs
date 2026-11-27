@@ -2,6 +2,12 @@ use mavros_artifacts::Bn254;
 use noirc_abi::{Abi, AbiParameter, AbiReturnType, AbiType, AbiVisibility, Sign};
 
 use super::*;
+use crate::compiler::passes::shared::limbs::limb_widths;
+
+/// `F`'s default limb, which a program cuts its wide integers at unless the driver chooses another.
+fn limb<F: MavrosField>() -> LimbBits {
+    LimbBits::widest(F::CONFIG)
+}
 
 fn string_abi(param_names: &[&str], has_return: bool) -> Abi {
     let string = AbiType::String { length: 2 };
@@ -40,10 +46,12 @@ fn int_abi(sign: Sign, width: u32) -> Abi {
 fn missing_parameter_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let abi = string_abi(&["x"], false);
-    let error = crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi).unwrap_err();
+    let error =
+        crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi, limb::<Bn254>()).unwrap_err();
     assert!(error.to_string().contains("Prover.toml"), "{error}");
     std::fs::write(dir.path().join("Prover.toml"), "y = 'ab'\n").unwrap();
-    let error = crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi).unwrap_err();
+    let error =
+        crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi, limb::<Bn254>()).unwrap_err();
     assert!(
         error.to_string().contains("`x`"),
         "error does not name the parameter: {error}"
@@ -57,7 +65,7 @@ fn limb_elements<F: MavrosField>(value: u128, widths: &[usize]) -> InputValueOrd
         widths
             .iter()
             .map(|width| {
-                let limb = (value >> low) & ((1u128 << width) - 1);
+                let limb = value.checked_shr(low as u32).unwrap_or(0) & ((1u128 << width) - 1);
                 low += width;
                 InputValueOrdered::Field(F::from(limb))
             })
@@ -70,7 +78,11 @@ fn integers_cross_as_their_bit_pattern_and_never_reduce() {
     use mavros_artifacts::{Goldilocks, field::goldilocks::MODULUS};
 
     let elements = |sign, width, value: BigInt| {
-        ordered_params::<Goldilocks>(&int_abi(sign, width), &[Value::Int(value)])
+        ordered_params::<Goldilocks>(
+            &int_abi(sign, width),
+            limb::<Goldilocks>(),
+            &[Value::Int(value)],
+        )
     };
     let u63_max = (1u64 << 63) - 1;
     for value in [0, 1, u63_max] {
@@ -89,7 +101,7 @@ fn integers_cross_as_their_bit_pattern_and_never_reduce() {
     );
     // Wider than one element carries, the pattern crosses as its limbs, so the modulus, and `-1` as
     // an `i64` (pattern `2^64 - 1`), keep their patterns.
-    let widths = |bits| int_limb_widths(bits, Goldilocks::CONFIG);
+    let widths = |bits| limb_widths(bits, limb::<Goldilocks>().bits());
     for (sign, width, value, pattern) in [
         (Sign::Unsigned, 64, BigInt::from(MODULUS), MODULUS as u128),
         (Sign::Signed, 64, BigInt::from(-1), u64::MAX as u128),
@@ -150,6 +162,7 @@ fn structs_and_tuples_keep_declaration_order_and_name_nested_refusals() {
     let elements = |first, last| {
         ordered_params::<Goldilocks>(
             &abi,
+            limb::<Goldilocks>(),
             &[Value::Seq(vec![
                 element(true, 2, 3),
                 element(false, first, last),
@@ -185,7 +198,8 @@ fn booleans_and_strings_cross_one_element_per_scalar() {
 
     let mut abi = string_abi(&["x", "pub_y"], false);
     abi.parameters[1].typ = AbiType::Boolean;
-    let elements = ordered_params::<Goldilocks>(&abi, &[str_value("ab"), Value::Bool(true)]);
+    let limb = limb::<Goldilocks>();
+    let elements = ordered_params::<Goldilocks>(&abi, limb, &[str_value("ab"), Value::Bool(true)]);
     assert_eq!(
         elements.unwrap(),
         vec![
@@ -196,11 +210,12 @@ fn booleans_and_strings_cross_one_element_per_scalar() {
             InputValueOrdered::Field(Goldilocks::from(1u64)),
         ],
     );
-    assert!(ordered_params::<Goldilocks>(&abi, &[str_value("ab")]).is_err());
+    assert!(ordered_params::<Goldilocks>(&abi, limb, &[str_value("ab")]).is_err());
     let mut field_abi = abi.clone();
     field_abi.parameters[1].typ = AbiType::Field;
-    let error = ordered_params::<Goldilocks>(&field_abi, &[str_value("ab"), Value::Int(1.into())])
-        .unwrap_err();
+    let error =
+        ordered_params::<Goldilocks>(&field_abi, limb, &[str_value("ab"), Value::Int(1.into())])
+            .unwrap_err();
     assert!(
         error.contains("`pub_y`") && error.contains("Field"),
         "{error}"
@@ -216,16 +231,50 @@ fn a_u64_crosses_whole_on_bn254_and_as_limbs_on_goldilocks() {
     let dir = tempfile::tempdir().unwrap();
     let abi = int_abi(Sign::Unsigned, 64);
     std::fs::write(dir.path().join("Prover.toml"), format!("x = '{MODULUS}'\n")).unwrap();
-    let (params, _) = crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi).unwrap();
+    let (params, _) =
+        crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi, limb::<Bn254>()).unwrap();
     assert_eq!(params, vec![InputValueOrdered::Field(Bn254::from(MODULUS))]);
     let limbs = vec![limb_elements::<Goldilocks>(
         MODULUS as u128,
-        &int_limb_widths(64, Goldilocks::CONFIG),
+        &limb_widths(64, limb::<Goldilocks>().bits()),
     )];
-    let (params, _) = crate::api::read_prover_inputs::<Goldilocks>(dir.path(), &abi).unwrap();
+    let (params, _) =
+        crate::api::read_prover_inputs::<Goldilocks>(dir.path(), &abi, limb::<Goldilocks>())
+            .unwrap();
     assert_eq!(params, limbs);
-    let blob = crate::api::decode_param_bytes::<Goldilocks>(&abi, &MODULUS.to_le_bytes()).unwrap();
+    let blob = crate::api::decode_param_bytes::<Goldilocks>(
+        &abi,
+        limb::<Goldilocks>(),
+        &MODULUS.to_le_bytes(),
+    )
+    .unwrap();
     assert_eq!(blob, limbs);
+}
+
+/// A wide integer is cut at the limb the program records, not the field's default, and a limb of
+/// another field that this one cannot be cut at is refused.
+#[test]
+fn a_wide_integer_crosses_at_the_programs_limb() {
+    let abi = int_abi(Sign::Unsigned, 256);
+    let value = (1u128 << 100) + 7;
+    for bits in [64, 32, 16] {
+        let limb_bits = LimbBits::new(Bn254::CONFIG, bits).unwrap();
+        assert_eq!(
+            ordered_params::<Bn254>(&abi, limb_bits, &[Value::Int(value.into())]).unwrap(),
+            vec![limb_elements::<Bn254>(value, &limb_widths(256, bits))],
+            "a {bits}-bit limb"
+        );
+    }
+    for bits in [64, 32] {
+        let bn254_limb = LimbBits::new(Bn254::CONFIG, bits).unwrap();
+        let error = ordered_params::<mavros_artifacts::Goldilocks>(
+            &abi,
+            bn254_limb,
+            &[Value::Int(value.into())],
+        )
+        .unwrap_err();
+        assert!(error.contains("not a witness limb"), "{error}");
+    }
 }
 
 #[test]
@@ -244,25 +293,29 @@ fn byte_blobs_and_prover_toml_give_the_same_elements() {
         "x = 'ab'\npub_y = [-2, 2047]\nreturn = 'cd'\n",
     )
     .unwrap();
-    let (params, declared) = crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi).unwrap();
+    let (params, declared) =
+        crate::api::read_prover_inputs::<Bn254>(dir.path(), &abi, limb::<Bn254>()).unwrap();
     // `i12` takes two little-endian bytes: -2 is 0x0ffe, 2047 is 0x07ff.
     let blob = [b'a', b'b', 0xfe, 0x0f, 0xff, 0x07];
     assert_eq!(
-        crate::api::decode_param_bytes::<Bn254>(&abi, &blob).unwrap(),
+        crate::api::decode_param_bytes::<Bn254>(&abi, limb::<Bn254>(), &blob).unwrap(),
         params
     );
     assert_eq!(
-        Some(crate::api::decode_return_bytes::<Bn254>(&abi, b"cd").unwrap()),
+        Some(crate::api::decode_return_bytes::<Bn254>(&abi, limb::<Bn254>(), b"cd").unwrap()),
         declared
     );
     // A padding bit above the width is refused.
-    let error =
-        crate::api::decode_param_bytes::<Bn254>(&abi, &[b'a', b'b', 0xfe, 0x1f, 0xff, 0x07])
-            .unwrap_err();
+    let error = crate::api::decode_param_bytes::<Bn254>(
+        &abi,
+        limb::<Bn254>(),
+        &[b'a', b'b', 0xfe, 0x1f, 0xff, 0x07],
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("padding"), "{error}");
-    assert!(crate::api::decode_param_bytes::<Bn254>(&abi, &blob[..5]).is_err());
+    assert!(crate::api::decode_param_bytes::<Bn254>(&abi, limb::<Bn254>(), &blob[..5]).is_err());
     let no_return = string_abi(&["x"], false);
-    assert!(crate::api::decode_return_bytes::<Bn254>(&no_return, b"cd").is_err());
+    assert!(crate::api::decode_return_bytes::<Bn254>(&no_return, limb::<Bn254>(), b"cd").is_err());
 }
 
 #[test]
@@ -277,7 +330,7 @@ fn a_parameter_of_no_elements_takes_no_bytes() {
     };
     let empty = InputValueOrdered::Struct(vec![]);
     assert_eq!(
-        crate::api::decode_param_bytes::<Bn254>(&abi, &[]).unwrap(),
+        crate::api::decode_param_bytes::<Bn254>(&abi, limb::<Bn254>(), &[]).unwrap(),
         vec![InputValueOrdered::Vec(vec![empty.clone(), empty])]
     );
 }
@@ -285,10 +338,11 @@ fn a_parameter_of_no_elements_takes_no_bytes() {
 #[test]
 fn the_return_is_not_an_input() {
     let abi = string_abi(&[], true);
-    assert_eq!(ordered_params::<Bn254>(&abi, &[]).unwrap(), vec![]);
-    assert_eq!(declared_return::<Bn254>(&abi, None).unwrap(), None);
+    let limb = limb::<Bn254>();
+    assert_eq!(ordered_params::<Bn254>(&abi, limb, &[]).unwrap(), vec![]);
+    assert_eq!(declared_return::<Bn254>(&abi, limb, None).unwrap(), None);
     assert_eq!(
-        declared_return(&abi, Some(&str_value("ab"))).unwrap(),
+        declared_return(&abi, limb, Some(&str_value("ab"))).unwrap(),
         Some(InputValueOrdered::Vec(vec![
             InputValueOrdered::Field(Bn254::from(b'a' as u64)),
             InputValueOrdered::Field(Bn254::from(b'b' as u64)),
@@ -296,7 +350,7 @@ fn the_return_is_not_an_input() {
     );
     let no_return = string_abi(&[], false);
     assert_eq!(
-        declared_return::<Bn254>(&no_return, Some(&str_value("ab"))).unwrap(),
+        declared_return::<Bn254>(&no_return, limb, Some(&str_value("ab"))).unwrap(),
         None
     );
 }
@@ -329,14 +383,16 @@ fn string_manifest(abi: &Abi) -> WitnessManifest {
             len: 2,
             visibility: ParamVisibility::Public,
         }),
+        limb_bits: limb::<Bn254>(),
     }
 }
 
 #[test]
 fn witness_manifest_check_compares_every_named_column() {
     let abi = string_abi(&["x", "pub_y"], true);
-    let params = ordered_params(&abi, &[str_value("ab"), str_value("cd")]).unwrap();
-    let declared = declared_return(&abi, Some(&str_value("ef"))).unwrap();
+    let limb = limb::<Bn254>();
+    let params = ordered_params(&abi, limb, &[str_value("ab"), str_value("cd")]).unwrap();
+    let declared = declared_return(&abi, limb, Some(&str_value("ef"))).unwrap();
     let manifest = string_manifest(&abi);
     let field = |byte: u8| Bn254::from(byte as u64);
     // witness[0] = 1, then the public y, the private x, an internal column, the return.
