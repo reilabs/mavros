@@ -2,6 +2,7 @@ use mavros_artifacts::FieldConfig;
 use mavros_int_semantics::IntBits;
 
 use super::globals::Globals;
+use super::limb_config::LimbConfig;
 use super::types::{flat_limbs, limb_types, limb_widths, limbs_of, single, wide_witness_width};
 use crate::collections::HashMap;
 use crate::compiler::{
@@ -11,10 +12,7 @@ use crate::compiler::{
         value_range_analysis::field_modulus,
     },
     located::synthetic_file,
-    passes::{
-        prepare_entry_point::ENTRY_RETURN_ORIGIN,
-        shared::limbs::{widest_injective_int_bits, witness_limb_bits},
-    },
+    passes::prepare_entry_point::ENTRY_RETURN_ORIGIN,
     ssa::{
         BlockId, FunctionId, Located, Terminator, ValueId,
         hlssa::{
@@ -24,21 +22,31 @@ use crate::compiler::{
     },
     util::field_constant,
 };
+
 use chain::{CarryOut, chained};
-use division::{Answer, Division, divided};
-use product::multiplied;
+use division::{Answer, Division};
+use lower::unguarded;
+use product::UnsignedProduct;
 use shift::shifted;
+use sign::SignedProduct;
+
 mod cast;
 mod chain;
 mod division;
 mod gadgets;
+mod identity;
 mod lower;
 mod product;
 mod shift;
 mod sign;
 mod spread;
+
+pub(super) use division::EuclideanDivision;
+pub(super) use division::divided;
+pub(super) use identity::IdentityShape;
 #[cfg(test)]
 pub(super) use product::division_carries;
+pub(super) use product::multiplied;
 /// One instruction's worth of rewriting, plus the minting the gadgets need.
 ///
 /// `ssa` is borrowed immutably, which is enough to mint a value or intern a constant: the function
@@ -48,7 +56,7 @@ struct Rewriter<'a> {
     value_map: &'a HashMap<ValueId, Vec<ValueId>>,
     types: &'a FunctionTypeInfo,
 
-    field: FieldConfig,
+    limb_config: &'a LimbConfig,
 
     /// The decompositions already emitted in this block, by value and width.
     decomposed: &'a mut HashMap<(ValueId, usize), Vec<ValueId>>,
@@ -90,7 +98,7 @@ pub(super) fn rewrite_function(
     reachable: &[BlockId],
     value_map: &HashMap<ValueId, Vec<ValueId>>,
     type_info: &TypeInfo,
-    field: FieldConfig,
+    limb_config: &LimbConfig,
     globals: &Globals,
 ) {
     let mut function = ssa.take_function(fid);
@@ -98,7 +106,7 @@ pub(super) fn rewrite_function(
 
     let old_returns = function.take_returns();
     for ty in old_returns {
-        for limb in limb_types(&ty, field) {
+        for limb in limb_types(&ty, limb_config) {
             function.add_return_type(limb);
         }
     }
@@ -111,7 +119,7 @@ pub(super) fn rewrite_function(
         let mut new_params = Vec::new();
         for (pid, ty) in old_params {
             let ids = limbs_of(value_map, pid);
-            let types = limb_types(&ty, field);
+            let types = limb_types(&ty, limb_config);
             debug_assert_eq!(ids.len(), types.len());
             for (id, ty) in ids.into_iter().zip(types) {
                 new_params.push((id, ty));
@@ -132,7 +140,7 @@ pub(super) fn rewrite_function(
                 ssa,
                 value_map,
                 types: fti,
-                field,
+                limb_config,
                 decomposed: &mut decomposed,
                 signs: &mut signs,
                 divisions: &mut divisions,
@@ -163,9 +171,21 @@ pub(super) fn rewrite_function(
     ssa.put_function(fid, function);
 }
 
-impl Rewriter<'_> {
+impl<'a> Rewriter<'a> {
+    fn limb_config(&self) -> &'a LimbConfig {
+        self.limb_config
+    }
+
     fn limb_bits(&self) -> usize {
-        witness_limb_bits(self.field)
+        self.limb_config().limb_bits()
+    }
+
+    fn field(&self) -> FieldConfig {
+        self.limb_config().field()
+    }
+
+    fn injective_bits(&self) -> usize {
+        self.limb_config().injective_bits()
     }
 
     fn limbs(&self, value: ValueId) -> Vec<ValueId> {
@@ -245,7 +265,7 @@ impl Rewriter<'_> {
 
     /// The declared width of a witnessed integer this pass represents as limbs.
     fn wide_width(&self, value: ValueId) -> Option<usize> {
-        wide_witness_width(self.types.get_value_type(value), self.field)
+        wide_witness_width(self.types.get_value_type(value), self.field())
     }
 
     fn fresh(&self) -> ValueId {
@@ -311,7 +331,7 @@ impl Rewriter<'_> {
         if offset == 0 {
             return value;
         }
-        if bits > widest_injective_int_bits(self.field) {
+        if bits > self.injective_bits() {
             let amount = self.int_const(IntBits::from_u128(bits, offset as u128));
             return self.bin(BinaryArithOpKind::UShr, value, amount);
         }
@@ -341,14 +361,14 @@ impl Rewriter<'_> {
     /// A limb's pattern as a field constant.
     fn limb_const(&self, pattern: &IntBits) -> ValueId {
         self.field_const(
-            field_constant(self.field, pattern)
+            field_constant(self.field(), pattern)
                 .unwrap_or_else(|| ice!("a limb's pattern {pattern:?} is wider than the field")),
         )
     }
 
     /// `2^(index * h)` as a field element, the place value of limb `index`.
     fn place_value(&self, index: usize) -> ValueId {
-        self.field_const(self.field.two_pow(index * self.limb_bits()))
+        self.field_const(self.field().two_pow(index * self.limb_bits()))
     }
 
     /// A witnessed field element read as an integer of `to_bits` held as limbs, into `results`.
@@ -360,7 +380,7 @@ impl Rewriter<'_> {
     /// so `v` and `v + p` both satisfy it where `v + p` fits the limbs. The carry chain with its
     /// top borrow forced out holds the limbs below the modulus, leaving only the canonical value.
     fn lower_field_into_limbs(&mut self, value: ValueId, to_bits: usize, results: &[ValueId]) {
-        let field_bits = self.field.field_bit_size() as usize;
+        let field_bits = self.field().field_bit_size() as usize;
         let widths = limb_widths(field_bits, self.limb_bits());
         let shadow = self.cast(value, CastTarget::ValueOf);
         let pure = self.cast(shadow, CastTarget::Int(field_bits));
@@ -369,7 +389,7 @@ impl Rewriter<'_> {
 
         let modulus = IntBits::from_biguint(
             field_bits,
-            &field_modulus(self.field)
+            &field_modulus(self.field())
                 .to_biguint()
                 .expect("a modulus is positive"),
         );
@@ -533,6 +553,21 @@ impl Rewriter<'_> {
             })
             .collect()
     }
+
+    /// `lhs == rhs` as field elements, where `guard` holds.
+    fn constrain_equal(&mut self, lhs: ValueId, rhs: ValueId, guard: Option<ValueId>) {
+        let difference = self.bin(BinaryArithOpKind::USub, lhs, rhs);
+        let flag = match guard {
+            Some(condition) => self.cast(condition, CastTarget::Field),
+            None => self.field_const(self.field().one()),
+        };
+        let zero = self.field_const(self.field().zero());
+        self.push(OpCode::Constrain {
+            a: flag,
+            b: difference,
+            c: zero,
+        });
+    }
 }
 
 /// The rewriter is an emitter, so the shared lowering helpers can build into it. Everything it
@@ -556,15 +591,15 @@ impl HLEmitter for Rewriter<'_> {
     }
 
     fn field(&self) -> FieldConfig {
-        self.field
+        self.field()
     }
 }
 
 /// The operands of an operation one of the gadgets lowers, with the width it is lowered at.
-struct Operands {
+pub(super) struct Operands {
     /// The width of both operands, which `check_widths` makes the same, and so of every limb list
     /// the gadget splits them into.
-    bits: usize,
+    pub(super) bits: usize,
 
     /// The left operand as the program names it: the minuend of a difference, the side an ordering
     /// asks is the smaller, and the dividend of a division. One element or limbs, witnessed or
@@ -581,4 +616,29 @@ pub(super) fn lowers_a_gadget(op: &OpCode, fti: &FunctionTypeInfo, field: FieldC
         || multiplied(op, fti, field).is_some()
         || divided(op, fti, field).is_some()
         || shifted(op, fti, field).is_some()
+}
+
+/// The identity `op` lowers to, if it lowers to one, at the width of its operands.
+///
+/// A signed division divides the magnitudes, so it is the unsigned division's identity.
+pub(super) fn lowered_identity(
+    op: &OpCode,
+    types: &FunctionTypeInfo,
+    field: FieldConfig,
+) -> Option<(usize, &'static dyn IdentityShape)> {
+    let Operands { bits, .. } =
+        multiplied(op, types, field).or_else(|| divided(op, types, field))?;
+    let OpCode::BinaryArithOp { kind, .. } = unguarded(op) else {
+        ice_unreachable!("`multiplied` and `divided` match only a binary operation");
+    };
+    let shape: &'static dyn IdentityShape = match kind {
+        BinaryArithOpKind::UMul => &UnsignedProduct,
+        BinaryArithOpKind::SMul => &SignedProduct,
+        BinaryArithOpKind::UDiv
+        | BinaryArithOpKind::URem
+        | BinaryArithOpKind::SDiv
+        | BinaryArithOpKind::SRem => &EuclideanDivision,
+        _ => ice_unreachable!("`multiplied` and `divided` match only products and divisions"),
+    };
+    Some((bits, shape))
 }

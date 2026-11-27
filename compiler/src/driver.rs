@@ -67,6 +67,7 @@ use crate::{
             remove_unreachable_functions::RemoveUnreachableFunctions,
             return_reachability::ReturnReachabilityValidation,
             share_field_decompositions::ShareFieldDecompositions,
+            shared::limbs::witness_limb_bits,
             simplifier::Simplifier,
             simplify_asserts::SimplifyAsserts,
             sparse_conditional_simplification::SCS,
@@ -135,6 +136,8 @@ pub struct Driver {
     main_is_unconstrained: bool,
     /// Requested LogUp bits-of-security (from `--logup-soundness`); sizes the LogUp repetitions.
     logup_soundness: u32,
+    /// The widest witness limb a wide integer may be cut at; or the field's default when `None`.
+    max_limb_bits: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -260,6 +263,7 @@ impl Driver {
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
+            max_limb_bits: None,
         }
     }
 
@@ -294,6 +298,7 @@ impl Driver {
             draw_cfg,
             main_is_unconstrained: false,
             logup_soundness: DEFAULT_LOGUP_SOUNDNESS_BITS,
+            max_limb_bits: None,
         }
     }
 
@@ -338,6 +343,11 @@ impl Driver {
     /// [`DEFAULT_LOGUP_SOUNDNESS_BITS`]).
     pub fn set_logup_soundness(&mut self, bits: u32) {
         self.logup_soundness = bits;
+    }
+
+    /// Cut wide witnessed integers into limbs of at most `bits`.
+    pub fn set_max_limb_bits(&mut self, bits: usize) {
+        self.max_limb_bits = Some(bits);
     }
 
     pub fn enable_r1cs_profile(&mut self) {
@@ -741,6 +751,9 @@ impl Driver {
     #[tracing::instrument(skip_all)]
     pub fn spill_witness(&mut self) -> Result<(), Error> {
         let mut ssa = self.monomorphized_ssa.clone().unwrap();
+        let max_limb_bits = self
+            .max_limb_bits
+            .unwrap_or_else(|| witness_limb_bits(ssa.field()));
 
         let mut pass_manager = PassManager::new(
             "witness_spilling".to_string(),
@@ -783,7 +796,7 @@ impl Driver {
                 // Immediately before the lowerings that read an integer's width: a witnessed value
                 // too wide for one field element becomes its limbs here, and every lowering below
                 // this sees limbs it can work with.
-                Box::new(WideWitnessInts::new()),
+                Box::new(WideWitnessInts::new(max_limb_bits)),
                 // After the representation, so a value it carries as limbs has already had its
                 // narrowing rewritten into a recombination.
                 Box::new(InstructionLowering::witness_narrowing_casts()),

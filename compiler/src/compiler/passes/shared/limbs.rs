@@ -1,8 +1,7 @@
 //! The witness limb: how wide a piece of an integer can be for a given field.
 //!
 //! This governs witness layout and the widths the spread-based bitwise lowering works at. It is
-//! also the width the carry chain and the schoolbook product in `passes::wide_witness_ints` work
-//! at.
+//! also the widest limb `passes::wide_witness_ints` cuts at.
 //!
 //! A single-cell integer lowering holds only while the exact span of its result stays below the
 //! modulus, which a small field reaches at ordinary widths: on Goldilocks a `u64` already has more
@@ -48,12 +47,14 @@ const NARROW_HOST_BITS: usize = HOST_WORD_BITS;
 /// - unsigned sum, difference and ordering: one cell while the field holds the sum, and the carry
 ///   chain in `passes::wide_witness_ints` beyond it;
 /// - unsigned product, and division and remainder (whose check is a product plus the remainder):
-///   one cell while [`single_cell_product_fits`] holds, and the schoolbook beyond it;
+///   one cell while [`single_cell_product_fits`] holds, and a polynomial identity over limbs beyond
+///   it;
 /// - unsigned shifts: one cell while [`single_cell_shift_fits`] holds, and limb-wise beyond it;
 /// - equality: no width limit;
 /// - signed sum, difference and ordering: the unsigned route, with the sign bits checked beside it;
 /// - signed product, division and remainder: one cell while [`single_cell_signed_product_fits`]
-///   holds, and beyond it the unsigned gadgets over the operands' magnitudes;
+///   holds; beyond it a product is a polynomial identity over its two's complement operands, and a
+///   division or remainder is the unsigned gadgets over the operands' magnitudes;
 /// - signed shifts: a left shift is the unsigned one, and a right shift is the unsigned one with
 ///   the sign filled in;
 /// - sign extension: fills the limbs past the element.
@@ -155,7 +156,8 @@ pub fn limb_widths(bits: usize, limb_bits: usize) -> Vec<usize> {
         .collect()
 }
 
-/// The limb widths of an `int(bits)` held as limbs on `field`, little-endian.
+/// The limb widths of an `int(bits)` held as limbs at `field`'s default limb, [`witness_limb_bits`],
+/// little-endian.
 pub fn int_limb_widths(bits: usize, field: FieldConfig) -> Vec<usize> {
     limb_widths(bits, witness_limb_bits(field))
 }
@@ -164,7 +166,7 @@ pub fn int_limb_widths(bits: usize, field: FieldConfig) -> Vec<usize> {
 /// then a distinct element of `modulus`.
 ///
 /// So is a limb times a power of two up to `2^h`, and on bn254 and goldilocks the bits between `2h`
-/// and the injective width hold the partial products and carries a schoolbook column accumulates.
+/// and the injective width hold the partial products and carries a column of a product accumulates.
 /// Asking only that a bare `(2^h - 1)^2` stay below the modulus would give goldilocks a 32-bit
 /// limb, whose product has 64 bits: past the injective width that the lowerings state their bounds
 /// against.
@@ -190,7 +192,15 @@ pub fn limb_bits_for_modulus(modulus: &BigInt) -> usize {
 /// many bits, so an odd `h` would leave a bit unconstrained. [`limb_bits_for_modulus`] admits only
 /// powers of two.
 pub fn witness_half_limb_bits(field: FieldConfig) -> usize {
-    let limb_bits = witness_limb_bits(field);
+    half_limb_bits(witness_limb_bits(field))
+}
+
+/// Half a limb of `limb_bits` bits.
+///
+/// # Panics
+///
+/// If the limb has no exact half.
+pub fn half_limb_bits(limb_bits: usize) -> usize {
     assert!(
         limb_bits >= 2 && limb_bits.is_power_of_two(),
         "a {limb_bits}-bit limb has no exact half, so two half-limbs would not cover it"

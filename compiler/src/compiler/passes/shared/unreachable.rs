@@ -9,9 +9,9 @@
 //! assertion.
 //!
 //! No caller can fire on bn254 or Goldilocks: an earlier lowering routes every operation past the
-//! single-cell ones, and both fields leave the schoolbook room for one partial product and the
-//! carry it is reduced into. Every call site has a comment naming the earlier lowering or check
-//! that keeps its precondition true, so reaching one is a compiler bug.
+//! single-cell ones, and `wide_witness_ints` narrows its limb until every product's and division's
+//! identity fits, which both fields allow at some limb. Every call site has a comment naming the
+//! earlier lowering or check that keeps its precondition true, so reaching one is a compiler bug.
 
 use std::fmt;
 

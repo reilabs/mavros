@@ -1,4 +1,6 @@
-use super::{globals::Globals, plan::plan_function, rewriter::rewrite_function};
+use super::{
+    globals::Globals, limb_config::LimbConfig, plan::plan_function, rewriter::rewrite_function,
+};
 use crate::compiler::{
     analysis::{flow_analysis::FlowAnalysis, types::TypeInfo},
     pass_manager::{Analysis, AnalysisId, AnalysisStore, Pass, PassResult},
@@ -8,17 +10,15 @@ use crate::compiler::{
         hlssa::{HLSSA, OpCode},
     },
 };
-pub struct WideWitnessInts {}
-
-impl WideWitnessInts {
-    pub fn new() -> Self {
-        WideWitnessInts {}
-    }
+pub struct WideWitnessInts {
+    /// The widest limb a value may be cut at.
+    max_limb_bits: usize,
 }
 
-impl Default for WideWitnessInts {
-    fn default() -> Self {
-        Self::new()
+impl WideWitnessInts {
+    /// The pass, cutting no limb wider than `max_limb_bits`.
+    pub fn new(max_limb_bits: usize) -> Self {
+        WideWitnessInts { max_limb_bits }
     }
 }
 
@@ -32,11 +32,11 @@ impl Pass for WideWitnessInts {
     }
 
     fn run(&self, ssa: &mut HLSSA, store: &AnalysisStore) -> PassResult {
-        let field = ssa.field();
-        let globals = Globals::split(ssa, field);
-
         let type_info = store.get::<TypeInfo>();
         let cfg = store.get::<FlowAnalysis>();
+        let limb_config = &LimbConfig::of(ssa, type_info, cfg, self.max_limb_bits);
+        let field = limb_config.field();
+        let globals = Globals::split(ssa, limb_config);
 
         let function_ids: Vec<FunctionId> = ssa.get_function_ids().collect();
 
@@ -54,9 +54,9 @@ impl Pass for WideWitnessInts {
                 ssa.get_function(fid).get_blocks().count(),
                 "ICE: an unreachable block reached the multi-cell representation"
             );
-            let value_map = plan_function(ssa, fid, &reachable, type_info);
+            let value_map = plan_function(ssa, fid, &reachable, type_info, limb_config);
             // A function with no limbs can still hold an operation whose operands each fit an
-            // element but whose sum or product does not; the chain, schoolbook and division lower
+            // element but whose sum or product does not; the chain, product and division lower
             // those too, and every pure integer spelled by its limbs is recombined here.
             let fti = type_info.get_function(fid);
             let lowers_here = || {
@@ -85,7 +85,15 @@ impl Pass for WideWitnessInts {
             {
                 continue;
             }
-            rewrite_function(ssa, fid, &reachable, &value_map, type_info, field, &globals);
+            rewrite_function(
+                ssa,
+                fid,
+                &reachable,
+                &value_map,
+                type_info,
+                limb_config,
+                &globals,
+            );
         }
         Ok(())
     }

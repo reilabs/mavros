@@ -22,7 +22,7 @@ use crate::compiler::{
             ceil_log2, widest_cell_sum_bits, widest_injective_int_bits, witness_half_limb_bits,
             witness_limb_bits,
         },
-        wide_witness_ints::rewriter::division_carries,
+        wide_witness_ints::{limb_config::default_limb_config, rewriter::division_carries},
     },
     ssa::{
         BlockId, Instruction, Located, Terminator, ValueId,
@@ -75,18 +75,18 @@ fn the_top_limb_carries_the_remainder() {
 fn a_narrow_or_pure_integer_is_left_alone() {
     let field = bn254();
     let wide = multi_cell_int_bits(field) + 1;
-
-    assert_eq!(limb_types(&Type::int(wide), field).len(), 1);
+    let limb_config = &default_limb_config(field);
+    assert_eq!(limb_types(&Type::int(wide), limb_config).len(), 1);
     assert_eq!(
         limb_types(
             &Type::witness_of(Type::int(multi_cell_int_bits(field))),
-            field
+            limb_config
         )
         .len(),
         1
     );
     assert_eq!(
-        limb_types(&Type::witness_of(Type::int(wide)), field).len(),
+        limb_types(&Type::witness_of(Type::int(wide)), limb_config).len(),
         wide.div_ceil(witness_limb_bits(field))
     );
 }
@@ -101,25 +101,26 @@ fn a_narrow_or_pure_integer_is_left_alone() {
 #[test]
 fn a_reference_and_a_sequence_both_expand_by_the_element() {
     let field = bn254();
+    let limb_config = &default_limb_config(field);
     let wide = multi_cell_int_bits(field) + 1;
     let expected = wide.div_ceil(witness_limb_bits(field));
     assert!(expected > 1, "the width has to span limbs to be a test");
 
     assert_eq!(
-        limb_types(&Type::witness_of(Type::int(wide)).ref_of(), field).len(),
+        limb_types(&Type::witness_of(Type::int(wide)).ref_of(), limb_config).len(),
         expected
     );
     assert_eq!(
-        limb_types(&Type::witness_of(Type::int(wide)).array_of(4), field).len(),
+        limb_types(&Type::witness_of(Type::int(wide)).array_of(4), limb_config).len(),
         expected
     );
     assert_eq!(
-        limb_types(&Type::int(wide).array_of(4), field).len(),
+        limb_types(&Type::int(wide).array_of(4), limb_config).len(),
         expected,
         "a pure wide element is transposed too, or a constant sequence could not be read"
     );
     assert_eq!(
-        limb_types(&Type::slice_of(Type::int(wide)), field).len(),
+        limb_types(&Type::slice_of(Type::int(wide)), limb_config).len(),
         expected
     );
 
@@ -127,7 +128,7 @@ fn a_reference_and_a_sequence_both_expand_by_the_element() {
     assert_eq!(
         limb_types(
             &Type::witness_of(Type::int(2 * HOST_LIMB_BITS)).array_of(4),
-            field
+            limb_config
         )
         .len(),
         1
@@ -1816,17 +1817,18 @@ impl Audit {
     }
 }
 
-/// Every column a division witnesses is range-checked, and every column of `q·d + r` is held
-/// to the dividend's limb instead of being checked, however the product is formed.
+/// Every carry a division witnesses that its identity checks is range-checked, and the answer of
+/// `q·d + r` is the dividend's limbs instead of being checked, whether the divisor is witnessed or
+/// pure.
 ///
 /// Checks, in order: the quotient's and the remainder's limbs at their widths; the schoolbook's
-/// carries at the widths its plan gives; and the borrows of `r < d`, each a bit. Only an
-/// evaluated product's columns go unchecked, as its evaluations pin them. The rest is the
-/// chain's answer, one check per limb. The constraints are the product's (evaluations or
-/// overflow terms) plus one equality per dividend limb.
+/// carries at the widths its identity gives and the borrows of `r < d`, each a bit.
+/// The rest is the chain's answer, one check per limb.
+/// The constraints are the product's: the dividend is the `C(X)` of the identity and costs no row
+/// of its own.
 ///
 /// Structural for the reason [`every_carry_and_every_limb_of_a_product_is_bounded`] gives, and
-/// because a pinned column has no check to perturb: the equality is its bound.
+/// because a pinned column has no check to perturb: the identity is its bound.
 #[test]
 fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
     for field in fields() {
@@ -1836,9 +1838,9 @@ fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
             for bits in limbed_widths(field) {
                 let widths = limb_widths(bits, h);
                 let k = widths.len();
-                for (what, rhs_type, evaluated) in [
-                    ("evaluated", Type::witness_of(Type::int(bits)), true),
-                    ("summed", Type::int(bits), false),
+                for (what, rhs_type) in [
+                    ("witnessed", Type::witness_of(Type::int(bits))),
+                    ("pure", Type::int(bits)),
                 ] {
                     let mut ssa = operation_with(field, kind, bits, rhs_type);
                     run_pass(&mut ssa);
@@ -1848,14 +1850,7 @@ fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
                     let mut expected: Vec<Option<usize>> = Vec::new();
                     expected.extend(widths.iter().map(|width| Some(*width)));
                     expected.extend(widths.iter().map(|width| Some(*width)));
-                    if evaluated {
-                        expected.extend(std::iter::repeat_n(None, k));
-                    }
-                    expected.extend(
-                        division_carries(field, &widths, evaluated)
-                            .into_iter()
-                            .map(Some),
-                    );
+                    expected.extend(division_carries(field, &widths));
                     expected.extend(std::iter::repeat_n(Some(1), k - 1));
                     assert_eq!(audit.written_checks(), expected, "{what}");
 
@@ -1868,8 +1863,7 @@ fn every_column_of_a_division_is_bounded_and_every_limb_pinned() {
                         .collect();
                     assert_eq!(rest, widths, "{what}: the chain's limbs, and nothing else");
 
-                    let product = if evaluated { 2 * k - 1 } else { k - 1 };
-                    assert_eq!(audit.constraints(), product + k, "{what}");
+                    assert_eq!(audit.constraints(), 2 * k - 1, "{what}");
                 }
             }
         }
@@ -1927,18 +1921,78 @@ fn a_constant_divisor_narrows_the_quotient_and_the_remainder() {
         "the quotient's five limbs, the top one narrower, and a four-bit remainder"
     );
     assert!(
-        checks[6..]
-            .iter()
-            .all(|check| check.is_some_and(|bits| bits > 1)),
+        !checks[6..].contains(&Some(1)),
         "carries only, and no borrow: `r < 10` is one limb"
     );
+    let k = limb_widths(bits, h).len();
     assert_eq!(
         audit.constraints(),
-        5,
-        "one equality per limb of the dividend, and nothing to hold to zero"
+        k,
+        "the identity's evaluations at its lowered degree, and nothing for `r < d`"
     );
 }
 
+/// A widened operand's limbs above its source are known zeros, which lower the degree of the product's identity.
+#[test]
+fn a_widened_operand_lowers_the_degree_of_a_product() {
+    for field in fields() {
+        let id = field.id();
+        let h = witness_limb_bits(field);
+        for bits in limbed_widths(field) {
+            let k = limb_widths(bits, h).len();
+            let constraints = |multiply: bool| {
+                let mut ssa = program_multiplying_widened(field, h, bits, multiply);
+                run_pass(&mut ssa);
+                Audit::of(&ssa).constraints()
+            };
+            assert_eq!(
+                constraints(true) - constraints(false),
+                k,
+                "{id:?} int{bits}: the product of a one-limb operand evaluates at `k` points"
+            );
+        }
+    }
+}
+
+/// `main(a: WitnessOf<int(from)>, b: WitnessOf<int(bits)>) -> WitnessOf<int(bits)>`, returning
+/// `(a as int(bits)) * b` where `multiply`, and `a as int(bits)` otherwise.
+fn program_multiplying_widened(
+    field: FieldConfig,
+    from: usize,
+    bits: usize,
+    multiply: bool,
+) -> HLSSA {
+    let mut ssa = HLSSA::with_main(field, "main".to_string());
+    let main = ssa.get_unique_entrypoint_id();
+    let [a, b, wide_a, product] = std::array::from_fn(|_| ssa.fresh_value());
+    let mut builder = HLSSABuilder::new(&mut ssa);
+    builder.modify_function(main, |fb| {
+        let entry = fb.function.get_entry_id();
+        let block = fb.function.get_block_mut(entry);
+        block.push_parameter(a, Type::witness_of(Type::int(from)));
+        block.push_parameter(b, Type::witness_of(Type::int(bits)));
+        fb.function
+            .add_return_type(Type::witness_of(Type::int(bits)));
+        let mut block = fb.test_block(entry);
+        block.emit(OpCode::Cast {
+            result: wide_a,
+            value: a,
+            target: CastTarget::Int(bits),
+        });
+        if multiply {
+            block.emit(OpCode::BinaryArithOp {
+                kind: BinaryArithOpKind::UMul,
+                result: product,
+                lhs: wide_a,
+                rhs: b,
+            });
+            block.terminate_return(vec![product]);
+        } else {
+            block.terminate_return(vec![wide_a]);
+        }
+    });
+    ssa
+}
 /// A guarded division guards only what reads its operands, and its answer is zero where the
 /// guard is off without being selected.
 ///
@@ -1968,7 +2022,7 @@ fn a_guarded_division_is_checked_only_under_its_guard() {
             .partition(|(_, _, guard)| guard.is_none());
         assert!(
             unguarded.len() > 2 * k,
-            "{id:?}: the quotient's and the remainder's limbs, and the schoolbook's columns and carries"
+            "{id:?}: the quotient's and the remainder's limbs, and the schoolbook's boundary carries"
         );
         assert_eq!(
             guarded.len(),
@@ -1995,15 +2049,16 @@ fn a_guarded_division_is_checked_only_under_its_guard() {
             })
             .collect();
         let flagged = audit
-        .ops
-        .iter()
-        .filter(|op| {
-            matches!(op, OpCode::Constrain { a, b, .. } if flag.contains(a) || flag.contains(b))
-        })
-        .count();
+            .ops
+            .iter()
+            .filter(|op| {
+                matches!(op, OpCode::BinaryArithOp { kind: BinaryArithOpKind::UMul, lhs, .. }
+                if flag.contains(lhs))
+            })
+            .count();
         assert_eq!(
             flagged, k,
-            "{id:?}: each equality, and nothing else, holds only where the guard does"
+            "{id:?}: each dividend limb, and nothing else, is scaled by the guard"
         );
 
         let selected = audit
@@ -2633,77 +2688,6 @@ fn a_pure_amount_is_split_by_a_constant() {
             );
         }
     }
-}
-
-/// A witnessed operand's known limbs drop out of a product as a constant's do.
-///
-/// `(a as int320) · b` plans no term against `a`'s four upper limbs, which the widening knows
-/// to be zero. What is left is one partial product per limb of `b`, which is cheaper summed
-/// than the nine evaluations a product of two full operands pays, so the product constrains no
-/// evaluation and no overflow term at all.
-#[test]
-fn a_known_limb_of_a_witnessed_operand_drops_out_of_the_product() {
-    let bits = 320usize;
-    let mut ssa = HLSSA::with_main(FieldConfig::bn254(), "main".to_string());
-    let main = ssa.get_unique_entrypoint_id();
-    let (narrow, wide, widened, product) = (
-        ssa.fresh_value(),
-        ssa.fresh_value(),
-        ssa.fresh_value(),
-        ssa.fresh_value(),
-    );
-    let mut builder = HLSSABuilder::new(&mut ssa);
-    builder.modify_function(main, |fb| {
-        fb.function
-            .add_return_type(Type::witness_of(Type::int(bits)));
-        let entry = fb.function.get_entry_id();
-        let block = fb.function.get_block_mut(entry);
-        block.push_parameter(narrow, Type::witness_of(Type::int(64)));
-        block.push_parameter(wide, Type::witness_of(Type::int(bits)));
-        let mut block = fb.test_block(entry);
-        block.emit(OpCode::Cast {
-            result: widened,
-            value: narrow,
-            target: CastTarget::Int(bits),
-        });
-        block.emit(OpCode::BinaryArithOp {
-            kind: BinaryArithOpKind::UMul,
-            result: product,
-            lhs: widened,
-            rhs: wide,
-        });
-        block.terminate_return(vec![product]);
-    });
-    run_pass(&mut ssa);
-    let audit = Audit::of(&ssa);
-
-    let k = limb_widths(bits, witness_limb_bits(bn254())).len();
-    let witnessed_products = audit
-        .ops
-        .iter()
-        .filter(|op| {
-            let OpCode::BinaryArithOp {
-                kind: BinaryArithOpKind::UMul,
-                lhs,
-                rhs,
-                ..
-            } = op
-            else {
-                return false;
-            };
-            [lhs, rhs]
-                .into_iter()
-                .all(|value| ssa.get_const(*value).is_none())
-        })
-        .count();
-    // The one constraint is the widening's, tying `a`'s limb back to `a`.
-    assert_eq!(audit.constraints(), 1, "no evaluation and no overflow term");
-    // Per column: the partial product and its hint.
-    assert_eq!(
-        witnessed_products,
-        2 * k,
-        "one partial product per limb of `b`"
-    );
 }
 
 // SPREADS

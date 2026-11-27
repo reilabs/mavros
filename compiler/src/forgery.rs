@@ -32,7 +32,17 @@ pub fn accepts_the_forgery<F: MavrosField>(
     inputs: &[InputValueOrdered<F>],
     forge: impl FnOnce(&mut HLSSA),
 ) -> bool {
-    accepts_the_forgery_checked_at(ssa, inputs, None, forge)
+    accepts_the_forgery_with_checked_at(ssa, inputs, |_| {}, None, forge)
+}
+
+/// [`accepts_the_forgery`], with the driver set up by `configure` before it compiles.
+pub fn accepts_the_forgery_with<F: MavrosField>(
+    ssa: HLSSA,
+    inputs: &[InputValueOrdered<F>],
+    configure: impl FnOnce(&mut Driver),
+    forge: impl FnOnce(&mut HLSSA),
+) -> bool {
+    accepts_the_forgery_with_checked_at(ssa, inputs, configure, None, forge)
 }
 
 /// [`accepts_the_forgery`], where a trap located at the synthetic `checks` refuses the forgery too.
@@ -46,8 +56,20 @@ pub fn accepts_the_forgery_checked_at<F: MavrosField>(
     checks: Option<&str>,
     forge: impl FnOnce(&mut HLSSA),
 ) -> bool {
+    accepts_the_forgery_with_checked_at(ssa, inputs, |_| {}, checks, forge)
+}
+
+/// [`accepts_the_forgery_checked_at`], with the driver set up by `configure` before it compiles.
+pub fn accepts_the_forgery_with_checked_at<F: MavrosField>(
+    ssa: HLSSA,
+    inputs: &[InputValueOrdered<F>],
+    configure: impl FnOnce(&mut Driver),
+    checks: Option<&str>,
+    forge: impl FnOnce(&mut HLSSA),
+) -> bool {
     let dumps = tempfile::TempDir::new().unwrap();
     let mut driver = Driver::from_ssa(ssa, dumps.path().to_path_buf(), false);
+    configure(&mut driver);
     driver.make_struct_access_static().unwrap();
     driver.monomorphize().unwrap();
     driver.spill_witness().unwrap();
