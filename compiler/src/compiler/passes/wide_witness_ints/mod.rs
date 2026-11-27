@@ -75,7 +75,7 @@
 //! [this blogpost](https://xn--2-umb.com/26/dependent-r1cs/#integer-embedding). Limb `i` of an
 //! operand is the coefficient of `X^i`, so `a` is `A(β)` at the radix `β = 2^h`. The answer `C(X)`
 //! and the carries `H(X)` are witnessed from a pure-side schoolbook, and
-//! `F(X) = A(X)·B(X) − C(X) == (β − X)·H(X)` is constrained at each point `0..=deg F`.
+//! `F(X) = A(X)·B(X) − C(X) == (β − X)·H(X)` is constrained at `deg F + 1` points.
 //!
 //! The identity is checked modulo p and modulo β^t, so the identity holds over the integers.
 //! The columns are grouped into **blocks** of as many as fit together with a carry.

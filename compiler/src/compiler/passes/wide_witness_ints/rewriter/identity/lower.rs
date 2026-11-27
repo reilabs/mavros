@@ -3,7 +3,8 @@
 //! Each wide operand `a` is a [`Factor`] whose limbs are the coefficients of a polynomial `A(X)`, with
 //! `A(β) = a` at the radix `β = 2^limb_bits`. An identity such as `a·b = c` becomes
 //! `F(X) = A(X)·B(X) − C(X)`, which vanishes at `β` exactly when `F(X) = (β − X)·H(X)` for the
-//! carry polynomial `H`. We check that `A(X)·B(X) − C(X) = (β − X)·H(X)` at `deg F` points.
+//! carry polynomial `H`. We check that `A(X)·B(X) − C(X) = (β − X)·H(X)` at the `deg F + 1`
+//! points `0, ±1, ±2, …`.
 
 use super::super::Rewriter;
 use super::{Factor, IdentityTemplate, Limb, Polarity, PolynomialIdentity, Target, Term};
@@ -134,7 +135,8 @@ impl Rewriter<'_> {
         self.check_block_carries(identity, &carries, flags.range_check_guard);
         let terms_as_felts = self.terms_as_felts(&identity, flag);
 
-        for point in 0..=identity.degree() as u64 {
+        for i in 0..=identity.degree() as i64 {
+            let point = if i % 2 == 1 { (i + 1) / 2 } else { -(i / 2) };
             self.check_at_point(
                 point,
                 terms,
@@ -330,7 +332,7 @@ impl Rewriter<'_> {
     #[allow(clippy::too_many_arguments)]
     fn check_at_point(
         &mut self,
-        point: u64,
+        point: i64,
         terms: &[Term<'_>],
         terms_as_felts: &[(Vec<ValueId>, Option<Vec<ValueId>>)],
         carries: &[ValueId],
@@ -405,7 +407,7 @@ impl Rewriter<'_> {
     /// one scaled by `pure_guard` where there is one.
     fn witness_product_at(
         &mut self,
-        point: u64,
+        point: i64,
         lhs: &Factor,
         rhs: &Factor,
         pure_guard: Option<ValueId>,
@@ -493,28 +495,39 @@ impl Rewriter<'_> {
         self.signed_sum(&values, &hint_type)
     }
 
-    /// `Σ coefficients[i] · point^i` as a field element, which is linear in the coefficients.
-    fn evaluate_at(&mut self, coefficients: &[ValueId], point: u64) -> ValueId {
+    /// `Σ coefficients[i] · point^i`, as `E + O` or `E − O` for the even and odd powers' sums
+    /// at `|point|`, so that `±x` share `E` and `O`.
+    fn evaluate_at(&mut self, coefficients: &[ValueId], point: i64) -> ValueId {
         if point == 0 {
             return coefficients[0];
         }
-        let base = self.field().constant(point);
+        let base = self.field().constant(point.unsigned_abs());
         let mut power = self.field().one();
-        let mut sum = None;
-        for coefficient in coefficients {
+        let mut parts: [Option<ValueId>; 2] = [None, None];
+        for (index, coefficient) in coefficients.iter().enumerate() {
             let term = if power == self.field().one() {
                 *coefficient
             } else {
                 let power_const = self.field_const(power);
                 self.bin(BinaryArithOpKind::UMul, *coefficient, power_const)
             };
-            sum = Some(match sum {
+            let part = &mut parts[index % 2];
+            *part = Some(match *part {
                 None => term,
                 Some(sum) => self.bin(BinaryArithOpKind::UAdd, sum, term),
             });
             power = power * base;
         }
-        sum.expect("a polynomial has at least one coefficient")
+        let even = parts[0].expect("a polynomial has at least one coefficient");
+        let Some(odd) = parts[1] else {
+            return even;
+        };
+        let kind = if point < 0 {
+            BinaryArithOpKind::USub
+        } else {
+            BinaryArithOpKind::UAdd
+        };
+        self.bin(kind, even, odd)
     }
 
     /// Limb `limb` of `factor` on the constraining side.

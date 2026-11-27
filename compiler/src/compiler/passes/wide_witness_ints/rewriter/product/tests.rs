@@ -206,6 +206,12 @@ fn an_evaluated_product_is_pinned_at_distinct_points() {
                         ..
                     }) => stack.extend([(*lhs, scale), (*rhs, scale)]),
                     Some(OpCode::BinaryArithOp {
+                        kind: BinaryArithOpKind::USub,
+                        lhs,
+                        rhs,
+                        ..
+                    }) => stack.extend([(*lhs, scale), (*rhs, -scale)]),
+                    Some(OpCode::BinaryArithOp {
                         kind: BinaryArithOpKind::UMul,
                         lhs,
                         rhs,
@@ -239,22 +245,19 @@ fn an_evaluated_product_is_pinned_at_distinct_points() {
             "{id:?}: one evaluation per point"
         );
 
-        // The point is the scale of the second coefficient, and `0` where only the first is
-        // read.
-        let mut points: Vec<Field> = evaluations
+        // Two evaluations are at the same point exactly where they scale every left limb alike.
+        let mut points: Vec<String> = evaluations
             .iter()
             .map(|(a, _)| {
-                if a.len() == 1 {
-                    field.zero()
-                } else {
-                    a.iter()
-                        .map(|(_, scale)| *scale)
-                        .find(|scale| *scale != field.one())
-                        .unwrap_or(field.one())
-                }
+                let mut scales: Vec<String> = a
+                    .iter()
+                    .map(|(limb, scale)| format!("{limb:?}{scale:?}"))
+                    .collect();
+                scales.sort();
+                scales.join(",")
             })
             .collect();
-        points.sort_by_key(|point| format!("{point:?}"));
+        points.sort();
         points.dedup();
         assert_eq!(points.len(), 2 * k - 1, "{id:?}: the points are distinct");
         for (index, (a, rest)) in evaluations.iter().enumerate() {
